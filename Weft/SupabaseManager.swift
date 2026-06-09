@@ -400,6 +400,7 @@ final class SupabaseManager: @unchecked Sendable {
         try await rows("students", query: [
             URLQueryItem(name: "select", value: "*"),
             URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+            URLQueryItem(name: "order", value: "joined_at.asc"),
         ])
     }
 
@@ -407,6 +408,7 @@ final class SupabaseManager: @unchecked Sendable {
         try await rows("class_enrollments", query: [
             URLQueryItem(name: "select", value: "display_name,user_id,created_at,removed_at"),
             URLQueryItem(name: "class_id", value: "eq.\(classId)"),
+            URLQueryItem(name: "order", value: "created_at.asc"),
         ])
     }
 
@@ -414,6 +416,7 @@ final class SupabaseManager: @unchecked Sendable {
         try await rows("essay_submissions", query: [
             URLQueryItem(name: "select", value: "id,session_id,student_id,question_id,content_html,word_count,updated_at,submitted_at"),
             URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+            URLQueryItem(name: "order", value: "submitted_at.asc.nullslast"),
         ])
     }
 
@@ -491,16 +494,21 @@ final class SupabaseManager: @unchecked Sendable {
             query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
     }
 
-    func upsertGrade(submissionId: String, points: Double?, pointsPossible: Double,
-                     feedback: String, released: Bool) async throws {
+    /// Upsert a grade. `essay_grades.session_id` and `student_id` are NOT NULL,
+    /// so they MUST be supplied (mirrors teacher.js). `releasedAt` is the exact
+    /// value to store (the caller decides whether to keep/clear the share time).
+    func upsertGrade(submissionId: String, sessionId: String, studentId: String,
+                     points: Double?, pointsPossible: Double, feedback: String,
+                     releasedAt: String?) async throws {
         struct Payload: Encodable {
-            let submission_id: String; let points: Double?; let points_possible: Double
+            let submission_id: String; let session_id: String; let student_id: String
+            let points: Double?; let points_possible: Double
             let feedback: String; let released_at: String?
         }
         let _: [EssayGrade] = try await upsert("essay_grades",
-            values: Payload(submission_id: submissionId, points: points,
-                            points_possible: pointsPossible, feedback: feedback,
-                            released_at: released ? Self.nowISO() : nil),
+            values: Payload(submission_id: submissionId, session_id: sessionId, student_id: studentId,
+                            points: points, points_possible: pointsPossible, feedback: feedback,
+                            released_at: releasedAt),
             onConflict: "submission_id", returning: false)
     }
 

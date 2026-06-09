@@ -667,20 +667,26 @@ struct AssignmentEditorView: View {
     }
 
     private func save() {
-        // Persist through AppState. Int("") -> nil, which is the correct
-        // "unlimited" value for both word limit and time limit. The attached
-        // files + website allow-list stay local for now (their persistence is a
-        // later wave) and do not block the save. On success AppState navigates
-        // home; on failure it sets app.errorMessage, surfaced inline above.
+        // Persist through AppState. Blank -> nil = "unlimited"; trim whitespace
+        // and reject non-positive values so " 60" still counts and 0/-5 can't
+        // create an instantly-expired exam. The attached files + website
+        // allow-list stay local for now (persistence is a later wave) and do not
+        // block the save. On success AppState navigates home; on failure it sets
+        // app.errorMessage, surfaced inline above.
         Task {
             await app.saveAssignment(
                 title: title,
                 prompt: prompt,
-                wordLimit: Int(wordLimit),
-                timeLimitMinutes: Int(timeLimit)
+                wordLimit: positiveInt(wordLimit),
+                timeLimitMinutes: positiveInt(timeLimit)
             )
         }
         onSave()
+    }
+
+    /// Parse a positive integer from a text field, or nil for blank/invalid/non-positive.
+    private func positiveInt(_ text: String) -> Int? {
+        Int(text.trimmingCharacters(in: .whitespaces)).flatMap { $0 > 0 ? $0 : nil }
     }
 }
 

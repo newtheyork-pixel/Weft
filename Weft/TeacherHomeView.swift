@@ -45,6 +45,9 @@ struct TeacherHomeView: View {
             }
         }
         .background(AmbientBackground())
+        // Always reflect a live session when the home (re)appears, including
+        // after returning from grading/roster (a fresh view whose @State reset).
+        .onAppear { if app.liveSession != nil { tab = .live } }
         .task { await app.loadTeacherHome() }
         .onChange(of: app.liveSession?.id) { _, newValue in
             if newValue != nil { tab = .live }
@@ -73,12 +76,10 @@ struct TeacherHomeView: View {
                     Text("Ready to launch \(pickedAssignmentTitle) for \(pickedClassName).")
                         .font(Theme.sans(14))
                         .foregroundStyle(Theme.muted)
-                    labeledPicker("Assignment", pickedAssignmentTitle, app.assignments.map(\.title)) { title in
-                        app.pickedAssignmentId = app.assignments.first(where: { $0.title == title })?.id
-                    }
-                    labeledPicker("Class", pickedClassName, app.teacherClasses.map(\.name)) { name in
-                        app.pickedClassId = app.teacherClasses.first(where: { $0.name == name })?.id
-                    }
+                    idPicker("Assignment", value: pickedAssignmentTitle,
+                             items: app.assignments.map { ($0.id, $0.title) }) { app.pickedAssignmentId = $0 }
+                    idPicker("Class", value: pickedClassName,
+                             items: app.teacherClasses.map { ($0.id, $0.name) }) { app.pickedClassId = $0 }
                     Button {
                         Task { await app.launchSession() }
                     } label: {
@@ -231,6 +232,30 @@ struct TeacherHomeView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Theme.muted)
             Kicker(text: title)
+        }
+    }
+
+    /// Id-based picker: selecting an item passes its id (so two items with the
+    /// same display title never collide).
+    private func idPicker(_ label: String, value: String, items: [(String, String)],
+                          onPick: @escaping (String) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Kicker(text: label)
+            Menu {
+                ForEach(items, id: \.0) { item in Button(item.1) { onPick(item.0) } }
+            } label: {
+                HStack {
+                    Text(value).font(Theme.sans(14)).foregroundStyle(Theme.inkSoft)
+                    Spacer()
+                    Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.muted)
+                }
+                .padding(.vertical, 9).padding(.horizontal, 12)
+                .background(.white.opacity(0.6), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.black.opacity(0.12)))
+                .linkPointer()
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
         }
     }
 

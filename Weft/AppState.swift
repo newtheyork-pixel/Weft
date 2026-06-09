@@ -257,15 +257,21 @@ final class AppState {
             if pickedClassId == nil || !teacherClasses.contains(where: { $0.id == pickedClassId }) {
                 pickedClassId = teacherClasses.first?.id
             }
+            // Restore an already-open session (app relaunch / another device) so
+            // the home reflects reality and we never launch a duplicate.
+            if liveSession == nil, let open = try? await supabase.listOpenSessions(userId: userId).first {
+                liveSession = open
+                await loadLiveRoster()
+            }
         } catch {
             errorMessage = describe(error)
         }
     }
 
     // MARK: - Teacher: navigation
-    func teacherGoHome() { teacherScreen = .home }
-    func openNewAssignment() { editingAssignment = nil; teacherScreen = .editor }
-    func openEditAssignment(_ a: Assignment) { editingAssignment = a; teacherScreen = .editor }
+    func teacherGoHome() { errorMessage = nil; teacherScreen = .home }
+    func openNewAssignment() { errorMessage = nil; editingAssignment = nil; teacherScreen = .editor }
+    func openEditAssignment(_ a: Assignment) { errorMessage = nil; editingAssignment = a; teacherScreen = .editor }
 
     // MARK: - Teacher: classes
     func createClass(name: String) async {
@@ -282,6 +288,7 @@ final class AppState {
     }
 
     func openRoster(_ c: ClassRoom) {
+        errorMessage = nil
         rosterClassId = c.id; rosterClassName = c.name; teacherScreen = .roster
         Task { await loadRoster() }
     }
@@ -308,6 +315,7 @@ final class AppState {
             errorMessage = "An assignment needs a title and a prompt."
             return
         }
+        errorMessage = nil
         let qid = editingAssignment?.questions.first?.id ?? "q-\(UUID().uuidString.prefix(8))"
         let q = Question(id: qid, kind: "essay", prompt: p, wordLimit: wordLimit)
         if !signedIn {
@@ -346,13 +354,19 @@ final class AppState {
 
     // MARK: - Teacher: live session
     func launchSession() async {
+        errorMessage = nil
+        guard liveSession == nil else { return }   // one live session at a time
         guard let testId = pickedAssignmentId else {
             errorMessage = "Pick an assignment to launch."
             return
         }
+        guard let classId = pickedClassId else {
+            errorMessage = "Pick a class to launch for."
+            return
+        }
         if !signedIn {
             liveSession = ExamSession(id: "local-session", code: SupabaseManager.sessionCode(),
-                                      testId: testId, classId: pickedClassId, status: "open")
+                                      testId: testId, classId: classId, status: "open")
             roster = RosterStudent.sample
             return
         }
@@ -360,7 +374,7 @@ final class AppState {
         defer { isLoading = false }
         let ip = await ProctoringEngine().fetchPublicIP()
         do {
-            liveSession = try await supabase.launchSession(testId: testId, classId: pickedClassId,
+            liveSession = try await supabase.launchSession(testId: testId, classId: classId,
                                                            teacherUserId: userId, teacherIP: ip)
             await loadLiveRoster()
         } catch {
@@ -379,10 +393,14 @@ final class AppState {
             try? await supabase.endSession(id: sid)
         }
         liveSession = nil
+        gradingSubmissions = []
+        grades = [:]
+        roster = []
     }
 
     // MARK: - Teacher: grading
     func openGrading() {
+        errorMessage = nil
         gradingTitle = assignments.first(where: { $0.id == liveSession?.testId })?.title ?? "Submissions"
         teacherScreen = .grading
         Task { await loadGrading() }
@@ -397,8 +415,11 @@ final class AppState {
             grades = [:]
             return
         }
+        errorMessage = nil
         do {
             gradingSubmissions = try await supabase.listSessionSubmissions(sessionId: sid)
+            // Refresh the roster too so late-joiner names resolve when grading.
+            roster = try await supabase.listSessionStudents(sessionId: sid)
             let g = try await supabase.listGrades(submissionIds: gradingSubmissions.map(\.id))
             grades = Dictionary(uniqueKeysWithValues: g.map { ($0.submissionId, $0) })
         } catch {
@@ -406,12 +427,28 @@ final class AppState {
         }
     }
 
-    func saveGrade(submissionId: String, points: Double?, pointsPossible: Double,
+    /// Save (and optionally share) a grade. essay_grades requires session_id +
+    /// student_id, taken from the submission. Sharing keeps the original release
+    /// timestamp if already shared; saving-without-sharing never un-shares.
+    func saveGrade(submission: TeacherSubmission, points: Double?, pointsPossible: Double,
                    feedback: String, share: Bool) async {
         guard signedIn else { return }
+        guard let sid = submission.sessionId, let stid = submission.studentId else {
+            errorMessage = "This submission is missing its session or student."
+            return
+        }
+        errorMessage = nil
+        let existing = grades[submission.id]?.releasedAt
+        let releasedAt: String?
+        if share {
+            releasedAt = SupabaseDate.fractional.string(from: existing ?? Date())
+        } else {
+            releasedAt = existing.map { SupabaseDate.fractional.string(from: $0) }
+        }
         do {
-            try await supabase.upsertGrade(submissionId: submissionId, points: points,
-                                           pointsPossible: pointsPossible, feedback: feedback, released: share)
+            try await supabase.upsertGrade(submissionId: submission.id, sessionId: sid, studentId: stid,
+                                           points: points, pointsPossible: pointsPossible,
+                                           feedback: feedback, releasedAt: releasedAt)
             await loadGrading()
         } catch {
             errorMessage = describe(error)

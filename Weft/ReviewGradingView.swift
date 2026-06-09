@@ -138,6 +138,8 @@ struct ReviewGradingView: View {
     /// exist (signed-in), `liveEntries` drives the screen instead.
     @State private var mockRoster: [ReviewEntry] = ReviewEntry.mock
     @State private var index: Int = 0
+    /// True when the live score/comment buffers have unsaved edits.
+    @State private var gradeDirty = false
 
     /// Local edit buffers for the selected submission, seeded from the live grade.
     @State private var scoreText: String = ""
@@ -148,7 +150,9 @@ struct ReviewGradingView: View {
     private let defaultPointsPossible: Double = 100
 
     /// True when we have real submissions to grade (signed-in, non-empty load).
-    private var isLive: Bool { app.signedIn && !app.gradingSubmissions.isEmpty }
+    /// Signed in => real grading (even with zero submissions, which shows an
+    /// empty roster rather than fabricated sample essays). Preview => sample.
+    private var isLive: Bool { app.signedIn }
 
     private var assignmentTitle: String {
         isLive && !app.gradingTitle.isEmpty ? app.gradingTitle : "Lit essay 1 · AP English"
@@ -253,6 +257,7 @@ struct ReviewGradingView: View {
         seededSubmissionId = row.id
         scoreText = row.score
         commentText = row.finalComment
+        gradeDirty = false
     }
 
     // MARK: Top bar
@@ -273,7 +278,7 @@ struct ReviewGradingView: View {
 
             HStack(spacing: Theme.Space.sm) {
                 navButton("Back", system: "chevron.left", disabled: index <= 0) {
-                    if index > 0 { withAnimation(.easeOut(duration: 0.18)) { index -= 1 } }
+                    if index > 0 { flushIfDirty(); withAnimation(.easeOut(duration: 0.18)) { index -= 1 } }
                 }
                 .help("Previous student")
                 Text("Student \(index + 1) of \(roster.count)")
@@ -284,7 +289,7 @@ struct ReviewGradingView: View {
                     .contentTransition(.numericText())
                 navButton("Next", system: "chevron.right", trailingIcon: true,
                           disabled: index >= roster.count - 1) {
-                    if index < roster.count - 1 { withAnimation(.easeOut(duration: 0.18)) { index += 1 } }
+                    if index < roster.count - 1 { flushIfDirty(); withAnimation(.easeOut(duration: 0.18)) { index += 1 } }
                 }
                 .help("Next student")
             }
@@ -352,7 +357,7 @@ struct ReviewGradingView: View {
                         rosterRow(s, active: i == index)
                             .contentShape(Rectangle())
                             .rowHover(corner: Theme.Radius.sm, strength: i == index ? 0 : 0.05)
-                            .onTapGesture { withAnimation(.easeOut(duration: 0.18)) { index = i } }
+                            .onTapGesture { flushIfDirty(); withAnimation(.easeOut(duration: 0.18)) { index = i } }
                     }
                 }
                 .padding(.horizontal, Theme.Space.sm)
@@ -718,17 +723,25 @@ struct ReviewGradingView: View {
 
     private var scoreBinding: Binding<String> {
         if isLive {
-            return Binding(get: { scoreText }, set: { scoreText = $0 })
+            return Binding(get: { scoreText }, set: { scoreText = $0; gradeDirty = true })
         }
         return Binding(get: { mockRoster[safeMockIndex].score },
                        set: { mockRoster[safeMockIndex].score = $0 })
     }
     private var finalCommentBinding: Binding<String> {
         if isLive {
-            return Binding(get: { commentText }, set: { commentText = $0 })
+            return Binding(get: { commentText }, set: { commentText = $0; gradeDirty = true })
         }
         return Binding(get: { mockRoster[safeMockIndex].finalComment },
                        set: { mockRoster[safeMockIndex].finalComment = $0 })
+    }
+
+    /// Persist any unsaved live edits before the selection changes, so typing a
+    /// score/comment and then paging to another student never loses it.
+    private func flushIfDirty() {
+        guard isLive, gradeDirty else { return }
+        let alreadyReleased = app.grades[current.id]?.isReleased ?? false
+        saveCurrentGrade(share: alreadyReleased)
     }
 
     /// The current entry's comment text for the placeholder check, regardless of path.
@@ -749,13 +762,13 @@ struct ReviewGradingView: View {
             if share { withAnimation(.easeOut(duration: 0.2)) { mockRoster[safeMockIndex].returned = true } }
             return
         }
-        let submissionId = current.id
-        guard submissionId != ReviewEntry.placeholder.id else { return }
+        guard let submission = app.gradingSubmissions.first(where: { $0.id == current.id }) else { return }
         let trimmed = scoreText.trimmingCharacters(in: .whitespaces)
         let points = trimmed.isEmpty ? nil : Double(trimmed)
-        let alreadyReleased = app.grades[submissionId]?.isReleased ?? false
+        let alreadyReleased = app.grades[submission.id]?.isReleased ?? false
+        gradeDirty = false
         Task {
-            await app.saveGrade(submissionId: submissionId,
+            await app.saveGrade(submission: submission,
                                 points: points,
                                 pointsPossible: pointsPossible,
                                 feedback: commentText,
