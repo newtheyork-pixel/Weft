@@ -158,27 +158,35 @@ final class AppState {
             useMockData = false
             dropMockData()
 
-            // Best-effort server role lookup. If the backend doesn't expose it,
-            // fall back to the on-screen role chooser (treat as admin).
-            if let resolved = await supabase.resolveRole() {
-                role = resolved
-                isAdmin = (resolved == .admin)
-                switch resolved {
-                case .teacher, .admin:
-                    route = .teacher
-                    await loadTeacherHome()
-                case .student:
-                    studentScreen = .home
-                    route = .student
-                    await loadStudentHome()
-                }
-            } else {
-                // Unknown role — let the user pick on the sign-in card.
-                isAdmin = true
+            // Route by the school's Teachers sheet: on the list => teacher,
+            // everyone else => student (automatically).
+            let resolved = await resolveRole(email: email)
+            role = resolved
+            isAdmin = (resolved == .admin)
+            switch resolved {
+            case .teacher, .admin:
+                route = .teacher
+                await loadTeacherHome()
+            case .student:
+                studentScreen = .home
+                route = .student
+                await loadStudentHome()
             }
         } catch {
             errorMessage = describe(error)
         }
+    }
+
+    /// Teacher if the email is on the school's Teachers sheet; otherwise student.
+    /// If the sheet can't be reached, fall back to the server role function so a
+    /// teacher isn't wrongly demoted, then default to student.
+    private func resolveRole(email: String) async -> UserRole {
+        let directory = await TeacherDirectory.fetch()
+        if directory.ok {
+            return directory.emails.contains(email.lowercased()) ? .teacher : .student
+        }
+        if let serverRole = await supabase.resolveRole() { return serverRole }
+        return .student
     }
 
     // MARK: - Loads (student)

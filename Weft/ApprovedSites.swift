@@ -22,6 +22,52 @@ struct ApprovedSite: Identifiable, Hashable, Sendable {
     }
 }
 
+/// The school's teacher directory: the "Teachers" tab of the same spreadsheet is
+/// a single column of teacher emails (no header). On sign-in, an email on this
+/// list routes to the teacher role; everyone else is a student.
+enum TeacherDirectory {
+    static var csvURL: URL {
+        let override = ProcessInfo.processInfo.environment["WEFT_TEACHERS_URL"]
+        let s = override ?? "https://docs.google.com/spreadsheets/d/1ukX4v4b6z4GdTXEurRwgjex8BqfRMS6d2HoOBoL3L7E/gviz/tq?tqx=out:csv&sheet=Teachers"
+        return URL(string: s)!
+    }
+
+    /// Result distinguishes "fetched (maybe empty)" from "couldn't reach it", so
+    /// the caller can fall back rather than wrongly demoting a teacher.
+    struct Result { let emails: Set<String>; let ok: Bool }
+
+    static func fetch() async -> Result {
+        var req = URLRequest(url: csvURL)
+        req.timeoutInterval = 10
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                return Result(emails: [], ok: false)
+            }
+            guard let text = String(data: data, encoding: .utf8) else { return Result(emails: [], ok: false) }
+            return Result(emails: parse(text), ok: true)
+        } catch {
+            return Result(emails: [], ok: false)
+        }
+    }
+
+    /// Parse a single-column CSV of (quoted) emails into a lowercased set.
+    static func parse(_ csv: String) -> Set<String> {
+        var out = Set<String>()
+        let lines = csv.replacingOccurrences(of: "\r", with: "")
+            .split(separator: "\n", omittingEmptySubsequences: true)
+        for raw in lines {
+            // Take the first column, strip surrounding quotes + whitespace.
+            let first = raw.split(separator: ",", omittingEmptySubsequences: false).first.map(String.init) ?? String(raw)
+            let email = first.trimmingCharacters(in: CharacterSet(charactersIn: "\" ").union(.whitespacesAndNewlines))
+                .lowercased()
+            if email.contains("@") { out.insert(email) }
+        }
+        return out
+    }
+}
+
 enum ApprovedSitesService {
     /// The school's published sheet (overridable via env, matching the Electron
     /// TESSERA_APPROVED_SITES_URL). gid=0 is the approved-sites tab.
