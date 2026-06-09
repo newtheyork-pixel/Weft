@@ -17,6 +17,8 @@ struct DevGalleryView: View {
         case checks      = "Student · Pre-exam + privacy"
         case exam        = "Student · Exam (writing)"
         case done        = "Student · Done + ledger"
+        case blocked     = "Student · Blocked (sharing)"
+        case recovery    = "Student · Recovery prompt"
         case returned    = "Student · Returned work"
         case teacher     = "Teacher · Build / Live"
         case templates   = "Teacher · Templates"
@@ -51,6 +53,8 @@ struct DevGalleryView: View {
         case .checks:      StudentChecksView()
         case .exam:        ExamView()
         case .done:        StudentDoneView()
+        case .blocked:     StudentBlockedView()
+        case .recovery:    RecoveryPromptView()
         case .returned:    ReturnedWorkView()
         case .teacher:     TeacherHomeView()
         case .templates:   TemplatePickerView()
