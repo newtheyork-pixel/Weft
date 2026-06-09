@@ -338,6 +338,185 @@ final class SupabaseManager: @unchecked Sendable {
         throw SupabaseError.decoding("Bad signed URL: \(signed.signedURL)")
     }
 
+    // MARK: - Low-level upsert / delete (used by the teacher write paths)
+
+    /// PostgREST upsert (insert-or-merge on a conflict target).
+    @discardableResult
+    func upsert<Body: Encodable, T: Decodable>(
+        _ table: String, values: Body, onConflict: String, returning: Bool = true
+    ) async throws -> [T] {
+        var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("rest/v1/\(table)"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.queryItems = [URLQueryItem(name: "on_conflict", value: onConflict)]
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "POST"
+        for (k, v) in await headers(contentJSON: true) { req.setValue(v, forHTTPHeaderField: k) }
+        req.setValue("resolution=merge-duplicates,\(returning ? "return=representation" : "return=minimal")",
+                     forHTTPHeaderField: "Prefer")
+        req.httpBody = try encoder.encode(values)
+        let data = try await perform(req)
+        guard returning else { return [] }
+        return try decode([T].self, from: data)
+    }
+
+    /// DELETE rows matched by `query`.
+    func delete(_ table: String, query: [URLQueryItem]) async throws {
+        var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("rest/v1/\(table)"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.queryItems = query
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "DELETE"
+        for (k, v) in await headers(contentJSON: false) { req.setValue(v, forHTTPHeaderField: k) }
+        _ = try await perform(req)
+    }
+
+    // MARK: - Teacher reads
+
+    func listTeacherClasses() async throws -> [ClassRoom] {
+        try await rows("classes", query: [
+            URLQueryItem(name: "select", value: "*"),
+            URLQueryItem(name: "archived_at", value: "is.null"),
+            URLQueryItem(name: "order", value: "created_at.desc"),
+        ])
+    }
+
+    func listTeacherTests(userId: String) async throws -> [Assignment] {
+        try await rows("tests", query: [
+            URLQueryItem(name: "select", value: "*"),
+            URLQueryItem(name: "teacher_user_id", value: "eq.\(userId)"),
+            URLQueryItem(name: "order", value: "created_at.desc"),
+        ])
+    }
+
+    func listOpenSessions(userId: String) async throws -> [ExamSession] {
+        try await rows("sessions", query: [
+            URLQueryItem(name: "select", value: "id,code,test_id,class_id,status"),
+            URLQueryItem(name: "teacher_user_id", value: "eq.\(userId)"),
+            URLQueryItem(name: "status", value: "eq.open"),
+        ])
+    }
+
+    func listSessionStudents(sessionId: String) async throws -> [RosterStudent] {
+        try await rows("students", query: [
+            URLQueryItem(name: "select", value: "*"),
+            URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+        ])
+    }
+
+    func listClassEnrollments(classId: String) async throws -> [ClassEnrollment] {
+        try await rows("class_enrollments", query: [
+            URLQueryItem(name: "select", value: "display_name,user_id,created_at,removed_at"),
+            URLQueryItem(name: "class_id", value: "eq.\(classId)"),
+        ])
+    }
+
+    func listSessionSubmissions(sessionId: String) async throws -> [TeacherSubmission] {
+        try await rows("essay_submissions", query: [
+            URLQueryItem(name: "select", value: "id,session_id,student_id,question_id,content_html,word_count,updated_at,submitted_at"),
+            URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+        ])
+    }
+
+    func listGrades(submissionIds: [String]) async throws -> [EssayGrade] {
+        guard !submissionIds.isEmpty else { return [] }
+        let inList = "in.(" + submissionIds.joined(separator: ",") + ")"
+        return try await rows("essay_grades", query: [
+            URLQueryItem(name: "select", value: "submission_id,points,points_possible,feedback,released_at"),
+            URLQueryItem(name: "submission_id", value: inList),
+        ])
+    }
+
+    // MARK: - Teacher writes
+
+    @discardableResult
+    func createClass(name: String) async throws -> ClassRoom? {
+        struct Payload: Encodable { let name: String; let join_code: String }
+        let result: [ClassRoom] = try await insert("classes",
+            values: Payload(name: name, join_code: Self.classCode()))
+        return result.first
+    }
+
+    @discardableResult
+    func createTest(teacherUserId: String, title: String, questions: [Question],
+                    timeLimitMinutes: Int?) async throws -> Assignment? {
+        struct Payload: Encodable {
+            let teacher_user_id: String; let title: String
+            let questions: [Question]; let time_limit_minutes: Int?
+        }
+        let result: [Assignment] = try await insert("tests",
+            values: Payload(teacher_user_id: teacherUserId, title: title,
+                            questions: questions, time_limit_minutes: timeLimitMinutes))
+        return result.first
+    }
+
+    func updateTest(id: String, title: String, questions: [Question], timeLimitMinutes: Int?) async throws {
+        struct Payload: Encodable {
+            let title: String; let questions: [Question]
+            let time_limit_minutes: Int?; let updated_at: String
+        }
+        let _: [Assignment] = try await update("tests",
+            values: Payload(title: title, questions: questions,
+                            time_limit_minutes: timeLimitMinutes, updated_at: Self.nowISO()),
+            query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
+    }
+
+    func deleteTest(id: String) async throws {
+        try await delete("tests", query: [URLQueryItem(name: "id", value: "eq.\(id)")])
+    }
+
+    func archiveClass(id: String) async throws {
+        struct Payload: Encodable { let archived_at: String }
+        let _: [ClassRoom] = try await update("classes",
+            values: Payload(archived_at: Self.nowISO()),
+            query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
+    }
+
+    @discardableResult
+    func launchSession(testId: String?, classId: String?, teacherUserId: String,
+                       teacherIP: String?) async throws -> ExamSession? {
+        struct Payload: Encodable {
+            let code: String; let teacher_ip: String?; let status: String
+            let teacher_user_id: String; let test_id: String?; let class_id: String?
+        }
+        let result: [ExamSession] = try await insert("sessions",
+            values: Payload(code: Self.sessionCode(), teacher_ip: teacherIP, status: "open",
+                            teacher_user_id: teacherUserId, test_id: testId, class_id: classId))
+        return result.first
+    }
+
+    func endSession(id: String) async throws {
+        struct Payload: Encodable { let status: String; let closed_at: String }
+        let _: [ExamSession] = try await update("sessions",
+            values: Payload(status: "closed", closed_at: Self.nowISO()),
+            query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
+    }
+
+    func upsertGrade(submissionId: String, points: Double?, pointsPossible: Double,
+                     feedback: String, released: Bool) async throws {
+        struct Payload: Encodable {
+            let submission_id: String; let points: Double?; let points_possible: Double
+            let feedback: String; let released_at: String?
+        }
+        let _: [EssayGrade] = try await upsert("essay_grades",
+            values: Payload(submission_id: submissionId, points: points,
+                            points_possible: pointsPossible, feedback: feedback,
+                            released_at: released ? Self.nowISO() : nil),
+            onConflict: "submission_id", returning: false)
+    }
+
+    // MARK: - Code + time helpers
+
+    /// 6-digit numeric session join code (mirrors teacher.js generateCode).
+    static func sessionCode() -> String { String(Int.random(in: 100000...999999)) }
+
+    /// 6-char class join code, no ambiguous chars (mirrors generateClassCode).
+    static func classCode() -> String {
+        let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        return String((0..<6).compactMap { _ in alphabet.randomElement() })
+    }
+
+    static func nowISO() -> String { SupabaseDate.fractional.string(from: Date()) }
+
     // MARK: - User & role
 
     /// Fetch the signed-in user from GoTrue (`/auth/v1/user`). Requires a token.

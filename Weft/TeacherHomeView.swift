@@ -10,8 +10,17 @@ struct TeacherHomeView: View {
     @Environment(AppState.self) private var app
     enum Tab: Hashable { case build, live }
     @State private var tab: Tab = .build
-    @State private var pickedAssignment = "Lit essay 1"
-    @State private var pickedClass = "AP English"
+    @State private var newClassName = ""
+    @State private var showNewClass = false
+
+    /// The picked assignment's title, falling back gracefully when nothing is set.
+    private var pickedAssignmentTitle: String {
+        app.assignments.first(where: { $0.id == app.pickedAssignmentId })?.title ?? "an assignment"
+    }
+    /// The picked class's name, falling back gracefully when nothing is set.
+    private var pickedClassName: String {
+        app.teacherClasses.first(where: { $0.id == app.pickedClassId })?.name ?? "your class"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,21 +45,42 @@ struct TeacherHomeView: View {
             }
         }
         .background(AmbientBackground())
+        .task { await app.loadTeacherHome() }
+        .onChange(of: app.liveSession?.id) { _, newValue in
+            if newValue != nil { tab = .live }
+        }
+        .alert("New class", isPresented: $showNewClass) {
+            TextField("Class name", text: $newClassName)
+            Button("Create") {
+                Task {
+                    await app.createClass(name: newClassName)
+                    newClassName = ""
+                }
+            }
+            Button("Cancel", role: .cancel) { newClassName = "" }
+        } message: {
+            Text("Give the class a name. Students join with the class code.")
+        }
     }
 
     // MARK: Build
     private var buildView: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
+            if let error = app.errorMessage { errorBanner(error) }
             GlassCard {
                 VStack(alignment: .leading, spacing: Theme.Space.md) {
                     Kicker(text: "Session")
-                    Text("Ready to launch \(pickedAssignment) for \(pickedClass).")
+                    Text("Ready to launch \(pickedAssignmentTitle) for \(pickedClassName).")
                         .font(Theme.sans(14))
                         .foregroundStyle(Theme.muted)
-                    labeledPicker("Assignment", pickedAssignment, app.assignments.map(\.title)) { pickedAssignment = $0 }
-                    labeledPicker("Class", pickedClass, app.teacherClasses.map(\.name)) { pickedClass = $0 }
+                    labeledPicker("Assignment", pickedAssignmentTitle, app.assignments.map(\.title)) { title in
+                        app.pickedAssignmentId = app.assignments.first(where: { $0.title == title })?.id
+                    }
+                    labeledPicker("Class", pickedClassName, app.teacherClasses.map(\.name)) { name in
+                        app.pickedClassId = app.teacherClasses.first(where: { $0.name == name })?.id
+                    }
                     Button {
-                        tab = .live
+                        Task { await app.launchSession() }
                     } label: {
                         Label("Start live assignment", systemImage: "play.fill").frame(maxWidth: .infinity)
                     }
@@ -66,7 +96,7 @@ struct TeacherHomeView: View {
                     HStack {
                         sectionHeader("doc.text", "Assignments")
                         Spacer()
-                        Button("+ New") {}
+                        Button("+ New") { app.openNewAssignment() }
                             .buttonStyle(.plain)
                             .foregroundStyle(Theme.accent)
                             .font(Theme.sans(13, .semibold))
@@ -80,7 +110,7 @@ struct TeacherHomeView: View {
                                 Text("Essay" + (a.timeLimitMinutes.map { " · \($0) min" } ?? "")).font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                             }
                             Spacer()
-                            Button("Edit") {}.buttonStyle(.glass)
+                            Button("Edit") { app.openEditAssignment(a) }.buttonStyle(.glass)
                         }
                         .padding(.vertical, Theme.Space.sm)
                         .padding(.horizontal, Theme.Space.sm)
@@ -94,7 +124,7 @@ struct TeacherHomeView: View {
                     HStack {
                         sectionHeader("person.2", "Classes")
                         Spacer()
-                        Button("+ New") {}
+                        Button("+ New") { showNewClass = true }
                             .buttonStyle(.plain)
                             .foregroundStyle(Theme.accent)
                             .font(Theme.sans(13, .semibold))
@@ -108,7 +138,7 @@ struct TeacherHomeView: View {
                                 Text("Class code \(c.joinCode)").font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                             }
                             Spacer()
-                            Button("Roster") {}.buttonStyle(.glass)
+                            Button("Roster") { app.openRoster(c) }.buttonStyle(.glass)
                         }
                         .padding(.vertical, Theme.Space.sm)
                         .padding(.horizontal, Theme.Space.sm)
@@ -122,19 +152,27 @@ struct TeacherHomeView: View {
     // MARK: Live
     private var liveView: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
+            if let error = app.errorMessage { errorBanner(error) }
             GlassCard {
                 VStack(alignment: .leading, spacing: Theme.Space.md) {
-                    Text("\(pickedAssignment) is live for \(pickedClass) · \(app.roster.count) students")
+                    Text("\(pickedAssignmentTitle) is live for \(pickedClassName) · \(app.roster.count) students")
                         .font(Theme.sans(17, .semibold))
                         .foregroundStyle(Theme.inkSoft)
                     HStack(spacing: Theme.Space.md) {
                         Chip(text: "Open", kind: .good)
                         HStack(spacing: 6) {
                             Kicker(text: "Class code")
-                            Text("ABC234").font(.system(size: 14, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.inkSoft)
+                            Text(app.liveSession?.code ?? "------").font(.system(size: 14, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.inkSoft)
                         }
                         Spacer()
-                        Button("End session") {}.buttonStyle(.glass).help("Close this session for all students")
+                        Button("End session") {
+                            Task {
+                                await app.endSession()
+                                tab = .build
+                            }
+                        }
+                        .buttonStyle(.glass)
+                        .help("Close this session for all students")
                     }
                 }
             }
@@ -144,7 +182,7 @@ struct TeacherHomeView: View {
                     HStack {
                         sectionHeader("person.3", "Roster  \(app.roster.count)")
                         Spacer()
-                        Button("Review essays") {}.buttonStyle(.glass)
+                        Button("Review essays") { app.openGrading() }.buttonStyle(.glass)
                     }
                     .padding(.horizontal, Theme.Space.xl).padding(.top, Theme.Space.lg).padding(.bottom, Theme.Space.sm)
                     Divider().opacity(0.4).padding(.horizontal, Theme.Space.xl)
@@ -164,6 +202,26 @@ struct TeacherHomeView: View {
     }
 
     // MARK: Helpers
+
+    /// A small inline error banner, matching the student home's treatment.
+    private func errorBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: Theme.Space.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Theme.warn)
+            Text(message)
+                .font(Theme.sans(12.5))
+                .foregroundStyle(Theme.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button("Retry") { Task { await app.loadTeacherHome() } }
+                .buttonStyle(.plain)
+                .font(Theme.sans(12.5, .semibold))
+                .foregroundStyle(Theme.accent)
+                .linkPointer()
+        }
+        .padding(Theme.Space.md)
+        .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+    }
 
     /// A small leading SF Symbol paired with the standard Kicker label, for a
     /// more native section header without symbol-spamming.

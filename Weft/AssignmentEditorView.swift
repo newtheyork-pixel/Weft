@@ -187,9 +187,12 @@ struct TemplatePickerView: View {
 /// attached reference files, and the website allow-list. A single essay
 /// question per assignment, matching the Electron editor exactly.
 struct AssignmentEditorView: View {
-    /// Pre-fill from a template (new assignment) or an existing assignment.
+    @Environment(AppState.self) private var app
+
+    /// Optional template pre-fill for a brand-new assignment (dev gallery /
+    /// template picker entry). The live edit/create path is driven by
+    /// `app.editingAssignment`.
     var template: AssignmentTemplate?
-    var existing: Assignment?
 
     var onSave: () -> Void = {}
     var onCancel: () -> Void = {}
@@ -207,9 +210,7 @@ struct AssignmentEditorView: View {
     @State private var newLinkHref: String = ""
     @State private var linkError: String?
 
-    @State private var didSave = false
-
-    private var isNew: Bool { existing == nil }
+    private var isNew: Bool { app.editingAssignment == nil }
     private var heading: String { isNew ? "New assignment" : "Edit assignment" }
 
     var body: some View {
@@ -225,6 +226,9 @@ struct AssignmentEditorView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: Theme.Space.xl) {
+                        if let message = app.errorMessage {
+                            errorBanner(message)
+                        }
                         titleField
                         promptField
                         wordLimitField
@@ -508,31 +512,51 @@ struct AssignmentEditorView: View {
             Button {
                 save()
             } label: {
-                Label(didSave ? "Saved" : "Save assignment",
-                      systemImage: didSave ? "checkmark" : "tray.and.arrow.down")
+                Label("Save assignment", systemImage: "tray.and.arrow.down")
             }
             .buttonStyle(.glassProminent)
             .tint(Theme.accent)
-            .disabled(didSave)
-            Button("Cancel") { onCancel() }
+            .disabled(app.isLoading)
+            Button("Cancel") { cancel() }
                 .buttonStyle(.glass)
             Spacer()
-            if didSave {
+            if app.isLoading {
                 HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Theme.good)
-                    Text("Saved")
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Saving…")
                         .font(Theme.sans(13, .semibold))
-                        .foregroundStyle(Theme.good)
+                        .foregroundStyle(Theme.muted)
                 }
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
         }
-        .animation(.easeOut(duration: 0.2), value: didSave)
+        .animation(.easeOut(duration: 0.2), value: app.isLoading)
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: Theme.Space.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 13))
+            Text(message)
+                .font(Theme.sans(13, .semibold))
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(Theme.bad)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.sm, style: .continuous)
+                .fill(Theme.bad.opacity(0.10))
+        )
+        .transition(.opacity)
     }
 
     private var closeButton: some View {
-        Button(action: onCancel) {
+        Button(action: cancel) {
             Image(systemName: "xmark")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.muted)
@@ -600,17 +624,20 @@ struct AssignmentEditorView: View {
     // MARK: Behaviour (mock)
 
     private func prime() {
-        if let existing {
+        if let existing = app.editingAssignment {
             title = existing.title
-            if let q = existing.questions.first {
-                prompt = q.prompt
-                if let wl = q.wordLimit { wordLimit = String(wl) }
-            }
+            prompt = existing.questions.first?.prompt ?? ""
+            if let wl = existing.questions.first?.wordLimit { wordLimit = String(wl) }
             if let tl = existing.timeLimitMinutes { timeLimit = String(tl) }
         } else if let template {
             prompt = template.starterPrompt
             if let wl = template.defaultWordLimit { wordLimit = String(wl) }
         }
+    }
+
+    private func cancel() {
+        app.teacherGoHome()
+        onCancel()
     }
 
     private func addMockFile() {
@@ -640,8 +667,19 @@ struct AssignmentEditorView: View {
     }
 
     private func save() {
-        // Mock save — backend is a later wave. Flash confirmation then bubble up.
-        withAnimation { didSave = true }
+        // Persist through AppState. Int("") -> nil, which is the correct
+        // "unlimited" value for both word limit and time limit. The attached
+        // files + website allow-list stay local for now (their persistence is a
+        // later wave) and do not block the save. On success AppState navigates
+        // home; on failure it sets app.errorMessage, surfaced inline above.
+        Task {
+            await app.saveAssignment(
+                title: title,
+                prompt: prompt,
+                wordLimit: Int(wordLimit),
+                timeLimitMinutes: Int(timeLimit)
+            )
+        }
         onSave()
     }
 }

@@ -64,6 +64,32 @@ struct Assignment: Identifiable, Codable, Hashable, Sendable {
 
     var isVersioned: Bool { versionNumber > 1 }
 
+    enum CodingKeys: String, CodingKey {
+        case id, title, questions
+        case versionGroupId = "version_group_id"
+        case versionNumber = "version_number"
+        case timeLimitMinutes = "time_limit_minutes"
+    }
+
+    init(id: String, title: String, versionGroupId: String, versionNumber: Int,
+         questions: [Question], timeLimitMinutes: Int?) {
+        self.id = id; self.title = title; self.versionGroupId = versionGroupId
+        self.versionNumber = versionNumber; self.questions = questions
+        self.timeLimitMinutes = timeLimitMinutes
+    }
+
+    /// Tolerant decode from a `tests` row: version_group_id/version_number may be
+    /// null on a freshly created test, so default them (group = id, number = 1).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = (try? c.decode(String.self, forKey: .title)) ?? "Untitled"
+        questions = (try? c.decode([Question].self, forKey: .questions)) ?? []
+        versionGroupId = (try? c.decode(String.self, forKey: .versionGroupId)) ?? id
+        versionNumber = (try? c.decode(Int.self, forKey: .versionNumber)) ?? 1
+        timeLimitMinutes = try? c.decode(Int.self, forKey: .timeLimitMinutes)
+    }
+
     static let sample = Assignment(
         id: "t1", title: "Lit essay 1", versionGroupId: "g1", versionNumber: 1,
         questions: [Question(id: "q1", kind: "essay",
@@ -216,9 +242,102 @@ struct RosterStudent: Identifiable, Codable, Hashable, Sendable {
     }
     enum Signal { case ok, warn, bad }
 
+    enum CodingKeys: String, CodingKey {
+        case id, name, status
+        case networkSame = "ip_match"
+        case remote = "remote_session"
+        case capture = "screen_capture"
+        case displays = "display_count"
+        case isVM = "is_vm"
+    }
+
+    init(id: String, name: String, networkSame: Bool, remote: Bool, capture: Bool,
+         displays: Int, isVM: Bool, status: String) {
+        self.id = id; self.name = name; self.networkSame = networkSame
+        self.remote = remote; self.capture = capture; self.displays = displays
+        self.isVM = isVM; self.status = status
+    }
+
+    /// Tolerant decode from a `students` row (fields are null for a student who
+    /// just joined and hasn't run checks yet).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = (try? c.decode(String.self, forKey: .name)) ?? "Student"
+        networkSame = (try? c.decode(Bool.self, forKey: .networkSame)) ?? true
+        remote = (try? c.decode(Bool.self, forKey: .remote)) ?? false
+        capture = (try? c.decode(Bool.self, forKey: .capture)) ?? false
+        displays = (try? c.decode(Int.self, forKey: .displays)) ?? 1
+        isVM = (try? c.decode(Bool.self, forKey: .isVM)) ?? false
+        status = (try? c.decode(String.self, forKey: .status)) ?? "joined"
+    }
+
     static let sample = [
         RosterStudent(id: "1", name: "Ava Chen", networkSame: true, remote: false, capture: false, displays: 1, isVM: false, status: "writing"),
         RosterStudent(id: "2", name: "Ben Ortiz", networkSame: false, remote: false, capture: false, displays: 1, isVM: false, status: "review"),
         RosterStudent(id: "3", name: "Maya Singh", networkSame: true, remote: false, capture: false, displays: 2, isVM: false, status: "writing"),
     ]
+}
+
+// MARK: - Teacher-side: enrollment, submissions, grades
+
+/// A class roster member (a `class_enrollments` row).
+struct ClassEnrollment: Identifiable, Codable, Hashable, Sendable {
+    var displayName: String
+    var userId: String
+    var createdAt: Date?
+    var removedAt: Date?
+
+    var id: String { userId }
+    var isActive: Bool { removedAt == nil }
+
+    enum CodingKeys: String, CodingKey {
+        case displayName = "display_name"
+        case userId = "user_id"
+        case createdAt = "created_at"
+        case removedAt = "removed_at"
+    }
+}
+
+/// A student's essay submission (an `essay_submissions` row), teacher-side.
+struct TeacherSubmission: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    var sessionId: String?
+    var studentId: String?
+    var questionId: String?
+    var contentHtml: String?
+    var wordCount: Int?
+    var submittedAt: Date?
+    var updatedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case sessionId = "session_id"
+        case studentId = "student_id"
+        case questionId = "question_id"
+        case contentHtml = "content_html"
+        case wordCount = "word_count"
+        case submittedAt = "submitted_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+/// A grade for a submission (an `essay_grades` row).
+struct EssayGrade: Identifiable, Codable, Hashable, Sendable {
+    var submissionId: String
+    var points: Double?
+    var pointsPossible: Double?
+    var feedback: String?
+    var releasedAt: Date?
+
+    var id: String { submissionId }
+    var isReleased: Bool { releasedAt != nil }
+
+    enum CodingKeys: String, CodingKey {
+        case submissionId = "submission_id"
+        case points
+        case pointsPossible = "points_possible"
+        case feedback
+        case releasedAt = "released_at"
+    }
 }

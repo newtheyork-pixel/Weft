@@ -69,11 +69,29 @@ struct RootView: View {
         Group {
             switch app.route {
             case .signIn:  SignInView()
-            case .teacher: TeacherHomeView()
+            case .teacher: TeacherFlowView()
             case .student: StudentFlowView()
             }
         }
         .animation(.smooth(duration: 0.28), value: app.route)
+    }
+}
+
+/// Sub-router for the teacher role: home (build/live), assignment editor,
+/// grading, and class roster. Driven by `AppState.teacherScreen`.
+struct TeacherFlowView: View {
+    @Environment(AppState.self) private var app
+
+    var body: some View {
+        Group {
+            switch app.teacherScreen {
+            case .home:    TeacherHomeView()
+            case .editor:  AssignmentEditorView()
+            case .grading: ReviewGradingView()
+            case .roster:  TeacherRosterView()
+            }
+        }
+        .animation(.smooth(duration: 0.28), value: app.teacherScreen)
     }
 }
 

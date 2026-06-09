@@ -51,6 +51,35 @@ private struct ReviewEntry: Identifiable {
 
     var initials: String { String((name.first ?? "?")).uppercased() }
 
+    /// An empty stand-in used only when a live load returns zero rows mid-render,
+    /// so `current` is never indexed out of bounds.
+    static let placeholder = ReviewEntry(
+        id: "__none__", name: "No submissions", status: .joined, wordCount: 0,
+        submitted: false, returned: false, lastEdited: "",
+        score: "", finalComment: "", paragraphs: [])
+
+    /// Cheap HTML → paragraphs: turn block-level closers into line breaks, strip
+    /// the remaining tags, decode the few common entities, and split into blocks.
+    static func paragraphs(fromHTML html: String) -> [String] {
+        guard !html.isEmpty else { return [] }
+        var s = html
+        for tag in ["</p>", "<br>", "<br/>", "<br />", "</div>", "</h1>", "</h2>", "</h3>", "</li>"] {
+            s = s.replacingOccurrences(of: tag, with: "\n", options: .caseInsensitive)
+        }
+        let stripped = s.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        let map = ["&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"",
+                   "&#39;": "'", "&apos;": "'", "&nbsp;": " "]
+        var decoded = stripped
+        for (k, v) in map { decoded = decoded.replacingOccurrences(of: k, with: v) }
+        let blocks = decoded
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return blocks.isEmpty
+            ? [decoded.trimmingCharacters(in: .whitespacesAndNewlines)].filter { !$0.isEmpty }
+            : blocks
+    }
+
     static let mock: [ReviewEntry] = [
         ReviewEntry(
             id: "1", name: "Ava Chen", status: .submitted, wordCount: 612,
@@ -105,15 +134,49 @@ private struct ReviewEntry: Identifiable {
 struct ReviewGradingView: View {
     @Environment(AppState.self) private var app
 
-    @State private var roster: [ReviewEntry] = ReviewEntry.mock
+    /// The mock roster is the preview / no-data fallback. When real submissions
+    /// exist (signed-in), `liveEntries` drives the screen instead.
+    @State private var mockRoster: [ReviewEntry] = ReviewEntry.mock
     @State private var index: Int = 0
 
-    private let assignmentTitle = "Lit essay 1 · AP English"
-    private let pointsPossible = 100
+    /// Local edit buffers for the selected submission, seeded from the live grade.
+    @State private var scoreText: String = ""
+    @State private var commentText: String = ""
+    /// Tracks which submission the buffers were seeded for, so we reseed on move.
+    @State private var seededSubmissionId: String?
+
+    private let defaultPointsPossible: Double = 100
+
+    /// True when we have real submissions to grade (signed-in, non-empty load).
+    private var isLive: Bool { app.signedIn && !app.gradingSubmissions.isEmpty }
+
+    private var assignmentTitle: String {
+        isLive && !app.gradingTitle.isEmpty ? app.gradingTitle : "Lit essay 1 · AP English"
+    }
     private let prompt = "Analyze the use of light and dark imagery in the assigned passage. Support your claim with specific textual evidence."
 
-    private var current: ReviewEntry { roster[index] }
+    /// The rows the screen renders — live submissions mapped into `ReviewEntry`,
+    /// or the bundled mock essays when there is no real data.
+    private var roster: [ReviewEntry] {
+        isLive ? app.gradingSubmissions.map(liveEntry(from:)) : mockRoster
+    }
+
+    private var current: ReviewEntry {
+        let rows = roster
+        guard !rows.isEmpty else { return ReviewEntry.placeholder }
+        return rows[min(index, rows.count - 1)]
+    }
     private var submittedCount: Int { roster.filter { $0.submitted }.count }
+
+    /// The points-possible to grade against: the existing grade's, or the default.
+    private var pointsPossible: Double {
+        if isLive, let g = app.grades[current.id], let pp = g.pointsPossible { return pp }
+        return defaultPointsPossible
+    }
+    private var pointsPossibleLabel: String {
+        let pp = pointsPossible
+        return pp == pp.rounded() ? String(Int(pp)) : String(pp)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -131,6 +194,65 @@ struct ReviewGradingView: View {
             }
         }
         .background(AmbientBackground())
+        .task { await app.loadGrading() }
+        .onChange(of: current.id) { _, _ in seedBuffers() }
+        .onChange(of: isLive) { _, _ in index = 0; seedBuffers() }
+        .onAppear { seedBuffers() }
+    }
+
+    // MARK: Live data ↔ ReviewEntry
+
+    /// Build a roster row from a real submission + its grade so the existing
+    /// rendering (roster rail, reader, grade rail) works unchanged on live data.
+    private func liveEntry(from sub: TeacherSubmission) -> ReviewEntry {
+        let grade = app.grades[sub.id]
+        let words = sub.wordCount ?? 0
+        let name = liveName(for: sub)
+        let scoreString: String = {
+            guard let p = grade?.points else { return "" }
+            return p == p.rounded() ? String(Int(p)) : String(p)
+        }()
+        return ReviewEntry(
+            id: sub.id,
+            name: name,
+            status: .submitted,
+            wordCount: words,
+            submitted: true,
+            returned: grade?.isReleased ?? false,
+            lastEdited: liveEdited(for: sub),
+            score: scoreString,
+            finalComment: grade?.feedback ?? "",
+            paragraphs: ReviewEntry.paragraphs(fromHTML: sub.contentHtml ?? ""))
+    }
+
+    private func liveName(for sub: TeacherSubmission) -> String {
+        if let sid = sub.studentId,
+           let r = app.roster.first(where: { $0.id == sid }) {
+            return r.name
+        }
+        return "Student"
+    }
+
+    private func liveEdited(for sub: TeacherSubmission) -> String {
+        guard let when = sub.submittedAt ?? sub.updatedAt else { return "" }
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return "Submitted " + f.string(from: when)
+    }
+
+    /// Seed the local Score / Final comment buffers from the selected grade.
+    private func seedBuffers() {
+        let row = current
+        guard isLive else {
+            // Preview path keeps editing the mock entry's own fields.
+            seededSubmissionId = nil
+            return
+        }
+        guard seededSubmissionId != row.id else { return }
+        seededSubmissionId = row.id
+        scoreText = row.score
+        commentText = row.finalComment
     }
 
     // MARK: Top bar
@@ -176,7 +298,7 @@ struct ReviewGradingView: View {
                 .fixedSize()
 
             Button {
-                app.route = .teacher
+                app.teacherGoHome()
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 13, weight: .semibold))
@@ -480,6 +602,7 @@ struct ReviewGradingView: View {
                     .monospacedDigit()
                     .foregroundStyle(Theme.inkSoft)
                     .multilineTextAlignment(.leading)
+                    .onSubmit { saveCurrentGrade(share: false) }
                     .frame(width: 72)
                     .padding(.vertical, 4)
                     .padding(.horizontal, 8)
@@ -491,7 +614,7 @@ struct ReviewGradingView: View {
                         RoundedRectangle(cornerRadius: Theme.Radius.sm)
                             .stroke(Color.black.opacity(0.12), lineWidth: 1)
                     )
-                Text("/ \(pointsPossible) pts")
+                Text("/ \(pointsPossibleLabel) pts")
                     .font(.system(size: 14))
                     .foregroundStyle(Theme.muted)
                     .monospacedDigit()
@@ -521,7 +644,7 @@ struct ReviewGradingView: View {
                         .stroke(Color.black.opacity(0.10), lineWidth: 1)
                 )
                 .overlay(alignment: .topLeading) {
-                    if current.finalComment.isEmpty {
+                    if commentIsEmpty {
                         Text("Write one overall comment for the whole essay.")
                             .font(Theme.sans(13))
                             .foregroundStyle(Theme.muted2)
@@ -537,8 +660,30 @@ struct ReviewGradingView: View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
             Divider().overlay(Color.black.opacity(0.08))
                 .padding(.bottom, Theme.Space.xs)
+
+            if isLive {
+                Button {
+                    saveCurrentGrade(share: false)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "tray.and.arrow.down.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Save without sharing")
+                            .font(Theme.sans(14, .semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.glass)
+                .disabled(app.isLoading)
+                .help("Save the score and comment privately. The student does not see it yet.")
+            }
+
             Button {
-                withAnimation(.easeOut(duration: 0.2)) { roster[index].returned = true }
+                if isLive {
+                    saveCurrentGrade(share: true)
+                } else {
+                    withAnimation(.easeOut(duration: 0.2)) { mockRoster[safeMockIndex].returned = true }
+                }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: current.returned ? "checkmark.circle.fill" : "paperplane.fill")
@@ -550,7 +695,16 @@ struct ReviewGradingView: View {
             }
             .buttonStyle(.glassProminent)
             .tint(Theme.accent)
-            .help(current.returned ? "Already shared with this student" : "Send the score and your comment to the student")
+            .disabled(app.isLoading)
+            .help(current.returned ? "Update and re-share with this student" : "Send the score and your comment to the student")
+
+            if let error = app.errorMessage {
+                Text(error)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.bad)
+                    .lineSpacing(2)
+                    .transition(.opacity)
+            }
 
             Text("Once shared, the student sees the score and your Shared comments. Private notes stay hidden.")
                 .font(.system(size: 11))
@@ -563,12 +717,50 @@ struct ReviewGradingView: View {
     // MARK: Bindings into the current entry
 
     private var scoreBinding: Binding<String> {
-        Binding(get: { roster[index].score },
-                set: { roster[index].score = $0 })
+        if isLive {
+            return Binding(get: { scoreText }, set: { scoreText = $0 })
+        }
+        return Binding(get: { mockRoster[safeMockIndex].score },
+                       set: { mockRoster[safeMockIndex].score = $0 })
     }
     private var finalCommentBinding: Binding<String> {
-        Binding(get: { roster[index].finalComment },
-                set: { roster[index].finalComment = $0 })
+        if isLive {
+            return Binding(get: { commentText }, set: { commentText = $0 })
+        }
+        return Binding(get: { mockRoster[safeMockIndex].finalComment },
+                       set: { mockRoster[safeMockIndex].finalComment = $0 })
+    }
+
+    /// The current entry's comment text for the placeholder check, regardless of path.
+    private var commentIsEmpty: Bool {
+        isLive ? commentText.isEmpty : current.finalComment.isEmpty
+    }
+
+    /// Index into the mock roster, clamped so edits never go out of bounds.
+    private var safeMockIndex: Int { min(index, max(0, mockRoster.count - 1)) }
+
+    // MARK: Grade actions (live path)
+
+    /// Persist the current score + comment. `share` true releases to the student;
+    /// false saves privately, preserving whatever released state already exists.
+    private func saveCurrentGrade(share: Bool) {
+        guard isLive else {
+            // Preview path: keep the existing local "Shared" demo behaviour.
+            if share { withAnimation(.easeOut(duration: 0.2)) { mockRoster[safeMockIndex].returned = true } }
+            return
+        }
+        let submissionId = current.id
+        guard submissionId != ReviewEntry.placeholder.id else { return }
+        let trimmed = scoreText.trimmingCharacters(in: .whitespaces)
+        let points = trimmed.isEmpty ? nil : Double(trimmed)
+        let alreadyReleased = app.grades[submissionId]?.isReleased ?? false
+        Task {
+            await app.saveGrade(submissionId: submissionId,
+                                points: points,
+                                pointsPossible: pointsPossible,
+                                feedback: commentText,
+                                share: share || alreadyReleased)
+        }
     }
 }
 

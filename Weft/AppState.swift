@@ -50,6 +50,24 @@ final class AppState {
     var examFiles: [ExamFile] = ExamFile.sample
     var examLinks: [ExamLink] = ExamLink.sample
 
+    // MARK: Teacher in-role navigation + state
+    enum TeacherScreen: Equatable { case home, editor, grading, roster }
+    var teacherScreen: TeacherScreen = .home
+    /// The assignment being edited; nil means a brand-new assignment.
+    var editingAssignment: Assignment?
+    /// The currently live session (after Start live assignment).
+    var liveSession: ExamSession?
+    var pickedAssignmentId: String?
+    var pickedClassId: String?
+    // Class roster (for the Roster screen)
+    var classRoster: [ClassEnrollment] = []
+    var rosterClassId: String?
+    var rosterClassName: String = ""
+    // Grading
+    var gradingSubmissions: [TeacherSubmission] = []
+    var grades: [String: EssayGrade] = [:]   // submissionId -> grade
+    var gradingTitle: String = ""
+
     // MARK: Async UI state
     var isLoading = false
     var errorMessage: String?
@@ -62,6 +80,7 @@ final class AppState {
     func enterTeacher() {
         role = .teacher
         if displayName.isEmpty { displayName = "Thomas Seirer" }
+        teacherScreen = .home
         route = .teacher
         if signedIn { Task { await loadTeacherHome() } }
     }
@@ -90,6 +109,16 @@ final class AppState {
         enrolledClasses = [.sample, .sample2]
         classWork = ClassWorkItem.sampleList
         returnedWork = []
+        // Teacher state back to defaults.
+        teacherScreen = .home
+        editingAssignment = nil
+        liveSession = nil
+        pickedAssignmentId = nil; pickedClassId = nil
+        classRoster = []; rosterClassId = nil; rosterClassName = ""
+        gradingSubmissions = []; grades = [:]
+        teacherClasses = [.sample, .sample2]
+        assignments = [.sample, .sample2]
+        roster = RosterStudent.sample
         route = .signIn
     }
 
@@ -211,15 +240,182 @@ final class AppState {
         }
     }
 
-    // MARK: - Loads (teacher)
+    // MARK: - Teacher: data load
     //
-    // Teacher data wiring is intentionally light: the full teacher build/live
-    // flows (roster realtime, session launch, grading writes) are a later wave
-    // (see the rewrite memory). For now the teacher home renders mock data; this
-    // hook is where the real `list_*` RPCs land when those flows are ported.
+    // Real Supabase when signed in; local mock mutations when previewing (not
+    // signed in) so every teacher button is demoable without a backend session.
+
     func loadTeacherHome() async {
         guard signedIn else { return }
-        // TODO(teacher wave): load real classes/assignments/roster here.
+        errorMessage = nil
+        do {
+            teacherClasses = try await supabase.listTeacherClasses()
+            assignments = try await supabase.listTeacherTests(userId: userId)
+            if pickedAssignmentId == nil || !assignments.contains(where: { $0.id == pickedAssignmentId }) {
+                pickedAssignmentId = assignments.first?.id
+            }
+            if pickedClassId == nil || !teacherClasses.contains(where: { $0.id == pickedClassId }) {
+                pickedClassId = teacherClasses.first?.id
+            }
+        } catch {
+            errorMessage = describe(error)
+        }
+    }
+
+    // MARK: - Teacher: navigation
+    func teacherGoHome() { teacherScreen = .home }
+    func openNewAssignment() { editingAssignment = nil; teacherScreen = .editor }
+    func openEditAssignment(_ a: Assignment) { editingAssignment = a; teacherScreen = .editor }
+
+    // MARK: - Teacher: classes
+    func createClass(name: String) async {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        if !signedIn {
+            teacherClasses.append(ClassRoom(id: "local-\(UUID().uuidString.prefix(6))",
+                name: clean, joinCode: SupabaseManager.classCode(), archivedAt: nil))
+            if pickedClassId == nil { pickedClassId = teacherClasses.last?.id }
+            return
+        }
+        do { _ = try await supabase.createClass(name: clean); await loadTeacherHome() }
+        catch { errorMessage = describe(error) }
+    }
+
+    func openRoster(_ c: ClassRoom) {
+        rosterClassId = c.id; rosterClassName = c.name; teacherScreen = .roster
+        Task { await loadRoster() }
+    }
+
+    func loadRoster() async {
+        guard let cid = rosterClassId else { return }
+        if !signedIn {
+            classRoster = [
+                ClassEnrollment(displayName: "Ava Chen", userId: "u1", createdAt: .now, removedAt: nil),
+                ClassEnrollment(displayName: "Ben Ortiz", userId: "u2", createdAt: .now, removedAt: nil),
+                ClassEnrollment(displayName: "Maya Singh", userId: "u3", createdAt: .now, removedAt: nil),
+            ]
+            return
+        }
+        do { classRoster = try await supabase.listClassEnrollments(classId: cid) }
+        catch { errorMessage = describe(error) }
+    }
+
+    // MARK: - Teacher: assignments
+    func saveAssignment(title: String, prompt: String, wordLimit: Int?, timeLimitMinutes: Int?) async {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !p.isEmpty else {
+            errorMessage = "An assignment needs a title and a prompt."
+            return
+        }
+        let qid = editingAssignment?.questions.first?.id ?? "q-\(UUID().uuidString.prefix(8))"
+        let q = Question(id: qid, kind: "essay", prompt: p, wordLimit: wordLimit)
+        if !signedIn {
+            if let id = editingAssignment?.id, let idx = assignments.firstIndex(where: { $0.id == id }) {
+                assignments[idx] = Assignment(id: id, title: t,
+                    versionGroupId: assignments[idx].versionGroupId,
+                    versionNumber: assignments[idx].versionNumber,
+                    questions: [q], timeLimitMinutes: timeLimitMinutes)
+            } else {
+                assignments.append(Assignment(id: "local-\(UUID().uuidString.prefix(6))", title: t,
+                    versionGroupId: "g-\(UUID().uuidString.prefix(6))", versionNumber: 1,
+                    questions: [q], timeLimitMinutes: timeLimitMinutes))
+            }
+            teacherScreen = .home
+            return
+        }
+        do {
+            if let id = editingAssignment?.id {
+                try await supabase.updateTest(id: id, title: t, questions: [q], timeLimitMinutes: timeLimitMinutes)
+            } else {
+                _ = try await supabase.createTest(teacherUserId: userId, title: t,
+                                                  questions: [q], timeLimitMinutes: timeLimitMinutes)
+            }
+            await loadTeacherHome()
+            teacherScreen = .home
+        } catch {
+            errorMessage = describe(error)
+        }
+    }
+
+    func deleteAssignment(_ a: Assignment) async {
+        if !signedIn { assignments.removeAll { $0.id == a.id }; return }
+        do { try await supabase.deleteTest(id: a.id); await loadTeacherHome() }
+        catch { errorMessage = describe(error) }
+    }
+
+    // MARK: - Teacher: live session
+    func launchSession() async {
+        guard let testId = pickedAssignmentId else {
+            errorMessage = "Pick an assignment to launch."
+            return
+        }
+        if !signedIn {
+            liveSession = ExamSession(id: "local-session", code: SupabaseManager.sessionCode(),
+                                      testId: testId, classId: pickedClassId, status: "open")
+            roster = RosterStudent.sample
+            return
+        }
+        isLoading = true
+        defer { isLoading = false }
+        let ip = await ProctoringEngine().fetchPublicIP()
+        do {
+            liveSession = try await supabase.launchSession(testId: testId, classId: pickedClassId,
+                                                           teacherUserId: userId, teacherIP: ip)
+            await loadLiveRoster()
+        } catch {
+            errorMessage = describe(error)
+        }
+    }
+
+    func loadLiveRoster() async {
+        guard signedIn, let sid = liveSession?.id else { return }
+        do { roster = try await supabase.listSessionStudents(sessionId: sid) }
+        catch { errorMessage = describe(error) }
+    }
+
+    func endSession() async {
+        if signedIn, let sid = liveSession?.id {
+            try? await supabase.endSession(id: sid)
+        }
+        liveSession = nil
+    }
+
+    // MARK: - Teacher: grading
+    func openGrading() {
+        gradingTitle = assignments.first(where: { $0.id == liveSession?.testId })?.title ?? "Submissions"
+        teacherScreen = .grading
+        Task { await loadGrading() }
+    }
+
+    func loadGrading() async {
+        guard let sid = liveSession?.id else { return }
+        if !signedIn {
+            // No submissions to load in preview; the grading screen falls back
+            // to its own sample content.
+            gradingSubmissions = []
+            grades = [:]
+            return
+        }
+        do {
+            gradingSubmissions = try await supabase.listSessionSubmissions(sessionId: sid)
+            let g = try await supabase.listGrades(submissionIds: gradingSubmissions.map(\.id))
+            grades = Dictionary(uniqueKeysWithValues: g.map { ($0.submissionId, $0) })
+        } catch {
+            errorMessage = describe(error)
+        }
+    }
+
+    func saveGrade(submissionId: String, points: Double?, pointsPossible: Double,
+                   feedback: String, share: Bool) async {
+        guard signedIn else { return }
+        do {
+            try await supabase.upsertGrade(submissionId: submissionId, points: points,
+                                           pointsPossible: pointsPossible, feedback: feedback, released: share)
+            await loadGrading()
+        } catch {
+            errorMessage = describe(error)
+        }
     }
 
     // MARK: - Student flow transitions
