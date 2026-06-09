@@ -28,8 +28,17 @@ struct ExamReferencePanel: View {
     @State private var pdf: PDFDocument?
     @State private var pdfLoading = false
     @State private var blockedHost: String?
+    @State private var loadTask: Task<Void, Never>?
 
     private var allowedHosts: [String] { links.map(\.host) }
+
+    /// Build a loadable URL from an approved link, prepending https:// when the
+    /// teacher stored a bare host (otherwise the locked browser silently blocks
+    /// the schemeless URL and nothing renders).
+    private func normalizedURL(_ raw: String) -> URL? {
+        let s = raw.contains("://") ? raw : "https://" + raw
+        return URL(string: s)
+    }
     private var selectedFile: ExamFile? {
         files.first { $0.id == selectedFileID } ?? files.first
     }
@@ -44,8 +53,23 @@ struct ExamReferencePanel: View {
             content
         }
         .background(Color(white: 0.96))
-        .task { await primeSelection() }
-        .onChange(of: selectedFileID) { _, _ in Task { await loadPDF() } }
+        .task { primeSelection() }
+        // The single PDF-load path: selection changes drive reloadPDF (which
+        // cancels any in-flight load and guards against out-of-order results).
+        .onChange(of: selectedFileID) { _, _ in reloadPDF() }
+        // Real materials can arrive after the panel is shown (loadExamMaterials
+        // resolves async). Re-point the selection without resetting the user's
+        // chosen mode.
+        .onChange(of: files) { _, _ in
+            if selectedFileID == nil || !files.contains(where: { $0.id == selectedFileID }) {
+                selectedFileID = files.first?.id   // fires onChange -> reloadPDF
+            }
+        }
+        .onChange(of: links) { _, _ in
+            if selectedLinkID == nil || !links.contains(where: { $0.id == selectedLinkID }) {
+                selectedLinkID = links.first?.id
+            }
+        }
     }
 
     // MARK: Mode bar
@@ -65,7 +89,7 @@ struct ExamReferencePanel: View {
                 Image(systemName: "sidebar.right")
             }
             .buttonStyle(.borderless)
-            .help("Hide references — write only (⌘⇧R)")
+            .help("Hide references, write only (⌘⇧R)")
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)
@@ -140,7 +164,7 @@ struct ExamReferencePanel: View {
                     Menu {
                         ForEach(links) { l in
                             Button { selectedLinkID = l.id; blockedHost = nil } label: {
-                                Text("\(l.displayName) — \(l.host)")
+                                Text("\(l.displayName) · \(l.host)")
                             }
                         }
                     } label: {
@@ -156,7 +180,7 @@ struct ExamReferencePanel: View {
             }
             Divider()
             ZStack(alignment: .top) {
-                if let link = selectedLink, let url = URL(string: link.url) {
+                if let link = selectedLink, let url = normalizedURL(link.url) {
                     LockedBrowserView(url: url, allowedHosts: allowedHosts) { blocked in
                         blockedHost = blocked.host
                     }
@@ -206,32 +230,50 @@ struct ExamReferencePanel: View {
     }
 
     // MARK: Loading
-    private func primeSelection() async {
+
+    /// First appearance: seed selection + the initial layout mode. Setting
+    /// `selectedFileID` from nil fires `.onChange` which performs the single load,
+    /// so we do NOT load here (avoids a double request). Mode is set once here and
+    /// never reset by later data arrivals.
+    private func primeSelection() {
         if selectedFileID == nil { selectedFileID = files.first?.id }
         if selectedLinkID == nil { selectedLinkID = links.first?.id }
-        // Start from the user's preferred default layout…
         mode = ReferenceMode(rawValue: defaultMode) ?? .split
-        // …then fall back if one side has nothing to show.
         if files.isEmpty && !links.isEmpty { mode = .web }
         else if links.isEmpty && !files.isEmpty { mode = .pdf }
-        await loadPDF()
     }
 
-    private func loadPDF() async {
-        guard let file = selectedFile else { pdf = nil; return }
+    /// Load the selected file's PDF. Cancels any in-flight load, shows the
+    /// spinner during a switch, and discards a result whose file is no longer
+    /// selected (out-of-order completion guard).
+    private func reloadPDF() {
+        loadTask?.cancel()
+        guard let file = selectedFile else { pdf = nil; pdfLoading = false; return }
         // Sample materials (empty storage path) or not signed in → the bundled
         // sample document so the viewer is always populated for QA.
         if file.storagePath.isEmpty || !signedIn {
             pdf = SamplePDF.shared
+            pdfLoading = false
             return
         }
+        pdf = nil
         pdfLoading = true
-        defer { pdfLoading = false }
+        let targetID = file.id
+        loadTask = Task {
+            let loaded = await loadDocument(for: file)
+            if Task.isCancelled { return }
+            guard selectedFile?.id == targetID else { return }  // selection moved on
+            pdf = loaded
+            pdfLoading = false
+        }
+    }
+
+    private func loadDocument(for file: ExamFile) async -> PDFDocument? {
         do {
             let url = try await SupabaseManager.shared.signedURL(bucket: "essay-files", path: file.storagePath)
-            pdf = await PDFLoader.load(from: url)
+            return await PDFLoader.load(from: url)
         } catch {
-            pdf = nil
+            return nil
         }
     }
 }

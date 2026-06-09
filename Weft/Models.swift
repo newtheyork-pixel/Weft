@@ -177,7 +177,12 @@ struct ExamLink: Identifiable, Codable, Hashable, Sendable {
     var displayName: String
     var url: String
 
-    var host: String { URL(string: url)?.host ?? url }
+    /// Bare host for display + whitelist. Tolerates a schemeless stored URL
+    /// (e.g. "gcschool.org/library") by normalizing before parsing.
+    var host: String {
+        let raw = url.contains("://") ? url : "https://" + url
+        return URL(string: raw)?.host ?? url
+    }
 
     enum CodingKeys: String, CodingKey {
         case id

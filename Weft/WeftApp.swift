@@ -44,9 +44,12 @@ struct WeftApp: App {
             // add an account command.
             CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .appSettings) {
-                if app.role != nil {
+                if app.signedIn {
                     Divider()
                     Button("Sign Out") { app.signOut() }
+                } else if app.role != nil {
+                    Divider()
+                    Button("Exit Preview") { app.signOut() }
                 }
             }
         }

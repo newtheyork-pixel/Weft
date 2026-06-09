@@ -126,12 +126,16 @@ struct WeftTopBar: View {
 
     private var accountMenu: some View {
         Menu {
-            if !app.displayName.isEmpty {
-                Text(app.displayName)
+            if app.signedIn {
+                if !app.displayName.isEmpty { Text(app.displayName) }
                 if !app.email.isEmpty { Text(app.email) }
                 Divider()
+                Button("Sign out") { app.signOut() }
+            } else {
+                Text("Previewing without signing in")
+                Divider()
+                Button("Exit preview") { app.signOut() }
             }
-            Button("Sign out") { app.signOut() }
         } label: {
             HStack(spacing: 6) {
                 roleLabel

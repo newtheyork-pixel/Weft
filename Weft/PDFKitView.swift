@@ -66,9 +66,11 @@ enum PDFLoader {
 // MARK: - Sample PDF (dev gallery / no-session preview)
 
 enum SamplePDF {
-    nonisolated(unsafe) static let shared: PDFDocument? = make(
+    /// Main-actor isolated: `make` does AppKit drawing, so first-touch must be on
+    /// the main thread. (Sole caller is the @MainActor exam reference panel.)
+    @MainActor static let shared: PDFDocument? = make(
         title: "Reference document",
-        subtitle: "Daoism — assigned passage",
+        subtitle: "Daoism, assigned passage",
         paragraphs: [
             "This is a sample reference document so the in-exam PDF viewer renders in the dev gallery without a live session. In the real exam, the teacher's uploaded PDFs load here from the school's Weft storage.",
             "The interplay of light and shadow in the passage works as more than scenery. The author returns to dawn three times, each marking a shift in the narrator's certainty about what she has seen.",

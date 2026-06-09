@@ -324,10 +324,15 @@ final class SupabaseManager: @unchecked Sendable {
         let data = try await perform(req)
         struct SignedResponse: Decodable { let signedURL: String }
         let signed = try decode(SignedResponse.self, from: data)
-        // The API returns a path like "/object/sign/...?token=..."; resolve it
-        // against the storage base.
-        let base = SupabaseConfig.url.appendingPathComponent("storage/v1")
-        if let full = URL(string: signed.signedURL, relativeTo: base)?.absoluteURL {
+        // The API returns an absolute-path reference like
+        // "/object/sign/<bucket>/<path>?token=...". Concatenate it onto the
+        // storage base explicitly — RFC 3986 relative resolution of a
+        // leading-slash reference would REPLACE the base path and drop the
+        // "/storage/v1" segment, 404-ing every file. (This matches supabase-js,
+        // which does `${url}/storage/v1${signedURL}`.)
+        let suffix = signed.signedURL.hasPrefix("/") ? signed.signedURL : "/" + signed.signedURL
+        let baseStr = SupabaseConfig.url.appendingPathComponent("storage/v1").absoluteString
+        if let full = URL(string: baseStr + suffix) {
             return full
         }
         throw SupabaseError.decoding("Bad signed URL: \(signed.signedURL)")

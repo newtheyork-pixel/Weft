@@ -33,14 +33,19 @@ private struct GeneralSettings: View {
 
     var body: some View {
         Form {
-            if app.role != nil {
+            if app.signedIn {
                 Section("Account") {
-                    LabeledContent("Signed in as", value: app.displayName.isEmpty ? "—" : app.displayName)
+                    LabeledContent("Signed in as", value: app.displayName.isEmpty ? "Not signed in" : app.displayName)
                     if !app.email.isEmpty { LabeledContent("Email", value: app.email) }
                     if let role = app.role {
                         LabeledContent("Role", value: role.rawValue.capitalized)
                     }
                     Button("Sign Out", role: .destructive) { app.signOut() }
+                }
+            } else if app.role != nil {
+                Section("Preview") {
+                    LabeledContent("Mode", value: "Previewing as \(app.role?.rawValue.capitalized ?? "")")
+                    Button("Exit preview") { app.signOut() }
                 }
             }
 

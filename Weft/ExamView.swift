@@ -37,10 +37,15 @@ struct ExamView: View {
     @Environment(AppState.self) private var app
 
     @State private var controller = RichTextController()
-    @State private var essay = NSAttributedString(
-        string: "The interplay of light and shadow in the passage works as more than scenery. The author returns to dawn three times, each marking a shift in the narrator's certainty about what she has seen.")
-    @State private var wordCount = 26
+    @State private var essay = NSAttributedString(string: "")
+    @State private var wordCount = 0
     @State private var referencesVisible = true
+    @State private var expiryTask: Task<Void, Never>?
+    @State private var didSeedPreview = false
+
+    /// Filler text shown ONLY in the preview/gallery (lockdown == false) so the
+    /// screen reads as a real writing session for QA. A real exam starts blank.
+    private let previewEssay = "The interplay of light and shadow in the passage works as more than scenery. The author returns to dawn three times, each marking a shift in the narrator's certainty about what she has seen."
 
     @State private var runtime = ExamRuntime()
     @State private var kiosk = KioskController()
@@ -91,8 +96,26 @@ struct ExamView: View {
                 let minutes = assignment.timeLimitMinutes ?? 45
                 deadline = Date().addingTimeInterval(TimeInterval(minutes * 60))
             }
+            // Seed filler text in preview only; a real exam starts blank.
+            if !lockdown && !didSeedPreview {
+                didSeedPreview = true
+                essay = NSAttributedString(string: previewEssay)
+            }
+            armExpiry()
         }
         .onDisappear { endExam() }
+    }
+
+    /// Auto-submit when the clock reaches 0:00 (real exams only). A hard time
+    /// limit must be enforced, not merely displayed; force-submit bypasses the
+    /// confirm dialog since "keep writing" is no longer an option.
+    private func armExpiry() {
+        guard lockdown, let deadline, expiryTask == nil else { return }
+        let interval = deadline.timeIntervalSinceNow
+        expiryTask = Task {
+            if interval > 0 { try? await Task.sleep(for: .seconds(interval)) }
+            if !Task.isCancelled { submit() }
+        }
     }
 
     // MARK: Lifecycle
@@ -106,11 +129,14 @@ struct ExamView: View {
         kiosk.enterKiosk(window: window)
         monitorTask?.cancel()
         monitorTask = Task { await monitorLoop() }
+        armExpiry()
     }
 
     private func endExam() {
         monitorTask?.cancel()
         monitorTask = nil
+        expiryTask?.cancel()
+        expiryTask = nil
         saveDebounce?.cancel()
         guard kioskEntered, let window = examWindow else { return }
         kiosk.exitKiosk(window: window)
@@ -261,7 +287,7 @@ struct ExamView: View {
             }
             .buttonStyle(.borderless)
             .keyboardShortcut("r", modifiers: [.command, .shift])
-            .help(referencesVisible ? "Hide references — write only (⌘⇧R)" : "Show references (⌘⇧R)")
+            .help(referencesVisible ? "Hide references, write only (⌘⇧R)" : "Show references (⌘⇧R)")
         }
         .padding(.horizontal, Theme.Space.xl)
         .padding(.vertical, Theme.Space.sm)

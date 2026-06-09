@@ -83,10 +83,11 @@ struct SignInView: View {
                 )
                 .shadow(color: Color.black.opacity(googleHovering ? 0.12 : 0.06),
                         radius: googleHovering ? 7 : 4, y: googleHovering ? 3 : 2)
-                .scaleEffect(googlePressed ? 0.98 : 1)
+                .scaleEffect((googlePressed && !busy) ? 0.98 : 1)
             }
             .buttonStyle(.plain)
             .disabled(busy)
+            .onChange(of: busy) { _, b in if b { googlePressed = false } }
             .pointerStyle(.link)
             .onHover { googleHovering = $0 }
             .animation(.easeOut(duration: 0.14), value: googleHovering)
