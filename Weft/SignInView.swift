@@ -188,29 +188,17 @@ struct SignInView: View {
     }
 }
 
-// MARK: - Brand glyph (a small woven tile; real logo asset swaps in later)
+// MARK: - Brand mark (the real Weft app logo asset). Used in the top bar on
+// every screen, the sign-in lockup, and Settings. Name kept as `WovenGlyph` so
+// all call sites are unchanged.
 struct WovenGlyph: View {
     var size: CGFloat = 44
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
-            .fill(LinearGradient(colors: [Theme.accentSoft, Theme.accent],
-                                 startPoint: .topLeading, endPoint: .bottomTrailing))
-            .overlay(
-                GeometryReader { geo in
-                    Path { p in
-                        let n = 4
-                        for i in 1..<n {
-                            let x = geo.size.width * CGFloat(i) / CGFloat(n)
-                            p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: geo.size.height))
-                            let y = geo.size.height * CGFloat(i) / CGFloat(n)
-                            p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: geo.size.width, y: y))
-                        }
-                    }
-                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
-                }
-            )
+        Image("WeftLogo")
+            .resizable()
+            .interpolation(.high)
+            .scaledToFit()
             .frame(width: size, height: size)
-            .shadow(color: Theme.accent.opacity(0.30), radius: 8, y: 3)
     }
 }
 
