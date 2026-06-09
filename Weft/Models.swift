@@ -52,6 +52,27 @@ struct Question: Identifiable, Codable, Hashable, Sendable {
     var kind: String          // "essay" | "quiz"
     var prompt: String
     var wordLimit: Int?
+    /// References into the per-teacher test_files / test_urls pools (the jsonb
+    /// question stores these; there is no test_id FK on those tables).
+    var fileIds: [String]
+    var urlIds: [String]
+
+    init(id: String, kind: String, prompt: String, wordLimit: Int?,
+         fileIds: [String] = [], urlIds: [String] = []) {
+        self.id = id; self.kind = kind; self.prompt = prompt
+        self.wordLimit = wordLimit; self.fileIds = fileIds; self.urlIds = urlIds
+    }
+
+    /// Tolerant decode: older questions (and the jsonb) may omit these arrays.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        kind = (try? c.decode(String.self, forKey: .kind)) ?? "essay"
+        prompt = (try? c.decode(String.self, forKey: .prompt)) ?? ""
+        wordLimit = try? c.decode(Int.self, forKey: .wordLimit)
+        fileIds = (try? c.decode([String].self, forKey: .fileIds)) ?? []
+        urlIds = (try? c.decode([String].self, forKey: .urlIds)) ?? []
+    }
 }
 
 struct Assignment: Identifiable, Codable, Hashable, Sendable {

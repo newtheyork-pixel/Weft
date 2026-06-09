@@ -291,21 +291,42 @@ final class SupabaseManager: @unchecked Sendable {
 
     // MARK: - Exam reference materials
 
-    /// The reference files attached to a test (`test_files`). Rendered in the
-    /// exam's PDF pane via a signed URL (see `signedURL`).
-    func listTestFiles(testId: String) async throws -> [ExamFile] {
-        try await rows("test_files", query: [
+    /// A single test row.
+    func getTest(id: String) async throws -> Assignment? {
+        let result: [Assignment] = try await rows("tests", query: [
+            URLQueryItem(name: "select", value: "*"),
+            URLQueryItem(name: "id", value: "eq.\(id)"),
+        ])
+        return result.first
+    }
+
+    /// Reference files by id (test_files is a per-teacher pool keyed by a
+    /// question's `fileIds`, not a test_id). Rendered via a signed URL.
+    func listTestFiles(ids: [String]) async throws -> [ExamFile] {
+        guard !ids.isEmpty else { return [] }
+        return try await rows("test_files", query: [
             URLQueryItem(name: "select", value: "id,original_name,mime_type,storage_path"),
-            URLQueryItem(name: "test_id", value: "eq.\(testId)")
+            URLQueryItem(name: "id", value: "in.(\(ids.joined(separator: ",")))"),
         ])
     }
 
-    /// The approved reference links for a test (`test_urls`).
-    func listTestURLs(testId: String) async throws -> [ExamLink] {
-        try await rows("test_urls", query: [
+    /// Approved reference links by id (test_urls pool, keyed by `urlIds`).
+    func listTestURLs(ids: [String]) async throws -> [ExamLink] {
+        guard !ids.isEmpty else { return [] }
+        return try await rows("test_urls", query: [
             URLQueryItem(name: "select", value: "id,display_name,url"),
-            URLQueryItem(name: "test_id", value: "eq.\(testId)")
+            URLQueryItem(name: "id", value: "in.(\(ids.joined(separator: ",")))"),
         ])
+    }
+
+    /// Insert approved links into the test_urls pool, returning their new ids
+    /// (to store in a question's `urlIds`).
+    func createTestURLs(userId: String, links: [(name: String, href: String)]) async throws -> [String] {
+        guard !links.isEmpty else { return [] }
+        struct Row: Encodable { let teacher_user_id: String; let display_name: String; let url: String; let source: String }
+        let payload = links.map { Row(teacher_user_id: userId, display_name: $0.name, url: $0.href, source: "custom") }
+        let created: [ExamLink] = try await insert("test_urls", values: payload, returning: true)
+        return created.map(\.id)
     }
 
     /// Create a time-limited signed URL for an object in a (private) storage

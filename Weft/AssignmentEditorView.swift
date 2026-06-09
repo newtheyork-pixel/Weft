@@ -249,6 +249,7 @@ struct AssignmentEditorView: View {
             .overlay(alignment: .topTrailing) { closeButton }
         }
         .onAppear(perform: prime)
+        .task { await app.loadApprovedSites() }
     }
 
     // MARK: Header
@@ -407,9 +408,59 @@ struct AssignmentEditorView: View {
 
     // MARK: Websites students may open
 
+    /// "Add from the school list" pulls the school's published Google Sheet of
+    /// approved sites (the Electron picker, restored).
+    @ViewBuilder private var schoolListRow: some View {
+        if app.approvedSitesLoading {
+            Label("Loading the school list", systemImage: "globe")
+                .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+        } else if !app.approvedSites.isEmpty {
+            HStack(spacing: Theme.Space.sm) {
+                Menu {
+                    ForEach(app.approvedSites) { site in
+                        Button("\(site.name) · \(site.host)") { addApprovedSite(site) }
+                    }
+                } label: {
+                    Label("Add from school list", systemImage: "list.bullet.rectangle")
+                        .font(Theme.sans(13, .semibold))
+                        .foregroundStyle(Theme.accent)
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().linkPointer()
+                Text("·").foregroundStyle(Theme.muted2)
+                Button("Add all") { addAllApprovedSites() }
+                    .buttonStyle(.plain)
+                    .font(Theme.sans(13, .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .linkPointer()
+                    .help("Add every school-approved site")
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func addApprovedSite(_ site: ApprovedSite) {
+        guard !links.contains(where: { $0.href.caseInsensitiveCompare(site.url) == .orderedSame }) else { return }
+        withAnimation(.easeOut(duration: 0.18)) {
+            links.append(EditorLink(name: site.name, href: site.url,
+                                    scope: site.scope == .exact ? .exact : .domain))
+        }
+    }
+
+    private func addAllApprovedSites() {
+        withAnimation(.easeOut(duration: 0.18)) {
+            for site in app.approvedSites where
+                !links.contains(where: { $0.href.caseInsensitiveCompare(site.url) == .orderedSame }) {
+                links.append(EditorLink(name: site.name, href: site.url,
+                                        scope: site.scope == .exact ? .exact : .domain))
+            }
+        }
+    }
+
     private var websitesSection: some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
             sectionHead(title: "Websites students may open") { EmptyView() }
+
+            schoolListRow
 
             // Add a link by name + URL.
             VStack(spacing: Theme.Space.sm) {
@@ -629,6 +680,13 @@ struct AssignmentEditorView: View {
             prompt = existing.questions.first?.prompt ?? ""
             if let wl = existing.questions.first?.wordLimit { wordLimit = String(wl) }
             if let tl = existing.timeLimitMinutes { timeLimit = String(tl) }
+            // Load the assignment's saved approved links so editing preserves them.
+            Task {
+                let saved = await app.editorLinks(for: existing)
+                if !saved.isEmpty, links.isEmpty {
+                    links = saved.map { EditorLink(name: $0.name, href: $0.href) }
+                }
+            }
         } else if let template {
             prompt = template.starterPrompt
             if let wl = template.defaultWordLimit { wordLimit = String(wl) }
@@ -678,7 +736,8 @@ struct AssignmentEditorView: View {
                 title: title,
                 prompt: prompt,
                 wordLimit: positiveInt(wordLimit),
-                timeLimitMinutes: positiveInt(timeLimit)
+                timeLimitMinutes: positiveInt(timeLimit),
+                links: links.map { (name: $0.name, href: $0.href) }
             )
         }
         onSave()

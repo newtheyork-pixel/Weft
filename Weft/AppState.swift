@@ -71,6 +71,9 @@ final class AppState {
     var gradingSubmissions: [TeacherSubmission] = []
     var grades: [String: EssayGrade] = [:]   // submissionId -> grade
     var gradingTitle: String = ""
+    // School-approved websites (from the published Google Sheet), for the editor.
+    var approvedSites: [ApprovedSite] = []
+    var approvedSitesLoading = false
 
     // MARK: Async UI state
     var isLoading = false
@@ -273,6 +276,15 @@ final class AppState {
         }
     }
 
+    /// Load the school's approved-website list from the published Google Sheet
+    /// (cached after first success). Used by the assignment editor's picker.
+    func loadApprovedSites() async {
+        guard approvedSites.isEmpty, !approvedSitesLoading else { return }
+        approvedSitesLoading = true
+        defer { approvedSitesLoading = false }
+        approvedSites = await ApprovedSitesService.fetch()
+    }
+
     // MARK: - Teacher: navigation
     func teacherGoHome() { errorMessage = nil; teacherScreen = .home }
     func openNewAssignment() { errorMessage = nil; editingAssignment = nil; teacherScreen = .editor }
@@ -313,7 +325,8 @@ final class AppState {
     }
 
     // MARK: - Teacher: assignments
-    func saveAssignment(title: String, prompt: String, wordLimit: Int?, timeLimitMinutes: Int?) async {
+    func saveAssignment(title: String, prompt: String, wordLimit: Int?, timeLimitMinutes: Int?,
+                        links: [(name: String, href: String)] = []) async {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, !p.isEmpty else {
@@ -322,8 +335,12 @@ final class AppState {
         }
         errorMessage = nil
         let qid = editingAssignment?.questions.first?.id ?? "q-\(UUID().uuidString.prefix(8))"
-        let q = Question(id: qid, kind: "essay", prompt: p, wordLimit: wordLimit)
+        let existingFileIds = editingAssignment?.questions.first?.fileIds ?? []
         if !signedIn {
+            // Preview keeps the links on the question so the editor round-trips,
+            // but no backend pool ids exist; store the hrefs as the "ids" stand-in.
+            let q = Question(id: qid, kind: "essay", prompt: p, wordLimit: wordLimit,
+                             fileIds: existingFileIds, urlIds: links.map(\.href))
             if let id = editingAssignment?.id, let idx = assignments.firstIndex(where: { $0.id == id }) {
                 assignments[idx] = Assignment(id: id, title: t,
                     versionGroupId: assignments[idx].versionGroupId,
@@ -338,6 +355,11 @@ final class AppState {
             return
         }
         do {
+            // Persist the approved links into the test_urls pool, then reference
+            // their ids from the question (there is no test_id FK on test_urls).
+            let urlIds = try await supabase.createTestURLs(userId: userId, links: links)
+            let q = Question(id: qid, kind: "essay", prompt: p, wordLimit: wordLimit,
+                             fileIds: existingFileIds, urlIds: urlIds)
             if let id = editingAssignment?.id {
                 try await supabase.updateTest(id: id, title: t, questions: [q], timeLimitMinutes: timeLimitMinutes)
             } else {
@@ -349,6 +371,15 @@ final class AppState {
         } catch {
             errorMessage = describe(error)
         }
+    }
+
+    /// Load the saved approved links for an assignment being edited, so the
+    /// editor shows them (and re-saving preserves them). Scope isn't persisted
+    /// yet, so it defaults to domain on reload.
+    func editorLinks(for assignment: Assignment?) async -> [(name: String, href: String)] {
+        guard signedIn, let ids = assignment?.questions.first?.urlIds, !ids.isEmpty else { return [] }
+        let urls = (try? await supabase.listTestURLs(ids: ids)) ?? []
+        return urls.map { (name: $0.displayName, href: $0.url) }
     }
 
     func deleteAssignment(_ a: Assignment) async {
@@ -496,9 +527,11 @@ final class AppState {
         guard signedIn else { return }
         do {
             guard let session = try await supabase.lookupSession(code: code),
-                  let testId = session.testId else { return }
-            let files = try await supabase.listTestFiles(testId: testId)
-            let links = try await supabase.listTestURLs(testId: testId)
+                  let testId = session.testId,
+                  let test = try await supabase.getTest(id: testId) else { return }
+            let q = test.questions.first
+            let files = try await supabase.listTestFiles(ids: q?.fileIds ?? [])
+            let links = try await supabase.listTestURLs(ids: q?.urlIds ?? [])
             if !files.isEmpty { examFiles = files }
             if !links.isEmpty { examLinks = links }
         } catch {
