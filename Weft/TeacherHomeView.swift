@@ -8,10 +8,14 @@ import SwiftUI
 
 struct TeacherHomeView: View {
     @Environment(AppState.self) private var app
-    enum Tab: Hashable { case build, live }
-    @State private var tab: Tab = .build
     @State private var newClassName = ""
     @State private var showNewClass = false
+
+    /// Build/Live segment, persisted in AppState so it survives navigating to
+    /// roster/grading and back (a fresh view instance otherwise resets it).
+    private var tab: Binding<AppState.TeacherTab> {
+        Binding(get: { app.teacherTab }, set: { app.teacherTab = $0 })
+    }
 
     /// The picked assignment's title, falling back gracefully when nothing is set.
     private var pickedAssignmentTitle: String {
@@ -25,9 +29,9 @@ struct TeacherHomeView: View {
     var body: some View {
         VStack(spacing: 0) {
             WeftTopBar(role: "Teacher")
-            Picker("", selection: $tab) {
-                Text("Build").tag(Tab.build)
-                Text("Live").tag(Tab.live)
+            Picker("", selection: tab) {
+                Text("Build").tag(AppState.TeacherTab.build)
+                Text("Live").tag(AppState.TeacherTab.live)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -36,22 +40,16 @@ struct TeacherHomeView: View {
 
             ScrollView {
                 Group {
-                    if tab == .build { buildView } else { liveView }
+                    if app.teacherTab == .build { buildView } else { liveView }
                 }
                 .padding(Theme.Space.xl)
                 .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
-                .animation(.easeInOut(duration: 0.2), value: tab)
+                .animation(.easeInOut(duration: 0.2), value: app.teacherTab)
             }
         }
         .background(AmbientBackground())
-        // Always reflect a live session when the home (re)appears, including
-        // after returning from grading/roster (a fresh view whose @State reset).
-        .onAppear { if app.liveSession != nil { tab = .live } }
         .task { await app.loadTeacherHome() }
-        .onChange(of: app.liveSession?.id) { _, newValue in
-            if newValue != nil { tab = .live }
-        }
         .alert("New class", isPresented: $showNewClass) {
             TextField("Class name", text: $newClassName)
             Button("Create") {
@@ -167,10 +165,7 @@ struct TeacherHomeView: View {
                         }
                         Spacer()
                         Button("End session") {
-                            Task {
-                                await app.endSession()
-                                tab = .build
-                            }
+                            Task { await app.endSession() }   // also resets the tab to Build
                         }
                         .buttonStyle(.glass)
                         .help("Close this session for all students")

@@ -53,6 +53,10 @@ final class AppState {
     // MARK: Teacher in-role navigation + state
     enum TeacherScreen: Equatable { case home, editor, grading, roster }
     var teacherScreen: TeacherScreen = .home
+    /// Build/Live segment on the teacher home. Persisted here (not view @State)
+    /// so navigating to roster/grading and back returns to the same tab.
+    enum TeacherTab: Equatable { case build, live }
+    var teacherTab: TeacherTab = .build
     /// The assignment being edited; nil means a brand-new assignment.
     var editingAssignment: Assignment?
     /// The currently live session (after Start live assignment).
@@ -262,6 +266,7 @@ final class AppState {
             if liveSession == nil, let open = try? await supabase.listOpenSessions(userId: userId).first {
                 liveSession = open
                 await loadLiveRoster()
+                teacherTab = .live
             }
         } catch {
             errorMessage = describe(error)
@@ -368,6 +373,7 @@ final class AppState {
             liveSession = ExamSession(id: "local-session", code: SupabaseManager.sessionCode(),
                                       testId: testId, classId: classId, status: "open")
             roster = RosterStudent.sample
+            teacherTab = .live
             return
         }
         isLoading = true
@@ -377,6 +383,7 @@ final class AppState {
             liveSession = try await supabase.launchSession(testId: testId, classId: classId,
                                                            teacherUserId: userId, teacherIP: ip)
             await loadLiveRoster()
+            teacherTab = .live
         } catch {
             errorMessage = describe(error)
         }
@@ -396,6 +403,7 @@ final class AppState {
         gradingSubmissions = []
         grades = [:]
         roster = []
+        teacherTab = .build
     }
 
     // MARK: - Teacher: grading
