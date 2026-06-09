@@ -1,0 +1,551 @@
+//
+//  SupabaseManager.swift
+//  Weft — a thin Supabase client built on URLSession only (NO supabase-js / SDK).
+//
+//  It mirrors the renderer's calling patterns (supabase-config.js + student.js +
+//  teacher.js): a PostgREST layer (.from(...).select/insert/update) plus an RPC
+//  layer (/rest/v1/rpc/<name>) and a GoTrue auth scaffold (PKCE OAuth via
+//  ASWebAuthenticationSession). The shared anon key goes on every request as the
+//  `apikey` header; once a user signs in, the access token rides along as a
+//  Bearer `Authorization` header so row-level security sees the real user.
+//
+//  Design notes:
+//  - `final class` + a shared singleton, matching how the renderer keeps one
+//    `supabase` client. Token mutation is funnelled through @MainActor so the
+//    UI and the network layer read a consistent value (Swift 6 strict
+//    concurrency).
+//  - Networking that needs entitlements (the OAuth web session) is scaffolded
+//    with clear TODOs; the PostgREST/RPC plumbing is real and ready to call.
+//
+
+import Foundation
+import CryptoKit
+#if canImport(AppKit)
+import AppKit
+#endif
+import AuthenticationServices
+
+// MARK: - Configuration (mirrors renderer/supabase-config.js)
+
+enum SupabaseConfig {
+    static let url = URL(string: "https://elrrvicxsguqstqciodn.supabase.co")!
+    static let anonKey = "sb_publishable_pTH5Q3s2o2CbCdDb7aXuvw_HsGZedAs"
+
+    /// Custom URL scheme the OAuth flow redirects back to. Must be registered in
+    /// the app's Info.plist (CFBundleURLTypes) for the deep link to land.
+    static let redirectScheme = "weft"
+    static let redirectURL = "weft://auth-callback"
+}
+
+// MARK: - Errors
+
+enum SupabaseError: LocalizedError {
+    case badResponse(status: Int, body: String)
+    case noData
+    case notSignedIn
+    case auth(String)
+    case decoding(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .badResponse(status, body):
+            return "Supabase request failed (\(status)). \(body)"
+        case .noData:
+            return "Supabase returned no data."
+        case .notSignedIn:
+            return "You are not signed in."
+        case let .auth(message):
+            return message
+        case let .decoding(message):
+            return "Could not read the response. \(message)"
+        }
+    }
+}
+
+// MARK: - Manager
+
+/// `@unchecked Sendable`: the only mutable state (`accessToken`/`refreshToken`)
+/// is isolated to `@MainActor`; everything else is immutable (`let`). The
+/// URLSession/JSONCoder members are thread-safe. That makes the shared singleton
+/// safe to reach from any task under Swift 6 strict concurrency.
+final class SupabaseManager: @unchecked Sendable {
+
+    static let shared = SupabaseManager()
+
+    private let session: URLSession
+    private let decoder: JSONDecoder
+    private let encoder: JSONEncoder
+
+    /// The signed-in user's access token. nil until OAuth completes. Read on the
+    /// main actor so the network layer and UI never see a torn value.
+    @MainActor private(set) var accessToken: String?
+    /// Refresh token from the same GoTrue session, kept for `grant_type=refresh_token`.
+    @MainActor private(set) var refreshToken: String?
+
+    private init(session: URLSession = .shared) {
+        self.session = session
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .supabase
+        self.decoder = decoder
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .supabase
+        self.encoder = encoder
+    }
+
+    // MARK: Token
+
+    @MainActor
+    func setSession(accessToken: String?, refreshToken: String?) {
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+    }
+
+    @MainActor
+    func clearSession() {
+        accessToken = nil
+        refreshToken = nil
+    }
+
+    /// Headers for every PostgREST / RPC call. `apikey` is always the anon key;
+    /// the Bearer token is the user's access token when signed in, otherwise the
+    /// anon key (which is what GoTrue expects for anonymous reads).
+    @MainActor
+    private func headers(contentJSON: Bool) -> [String: String] {
+        var h: [String: String] = [
+            "apikey": SupabaseConfig.anonKey,
+            "Authorization": "Bearer \(accessToken ?? SupabaseConfig.anonKey)"
+        ]
+        if contentJSON {
+            h["Content-Type"] = "application/json"
+        }
+        return h
+    }
+
+    // MARK: - Low-level request
+
+    private func perform(_ request: URLRequest) async throws -> Data {
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw SupabaseError.auth(error.localizedDescription)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw SupabaseError.noData
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw SupabaseError.badResponse(status: http.statusCode, body: body)
+        }
+        return data
+    }
+
+    private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        // PostgREST returns 204 with an empty body for some writes; surface a
+        // clear error rather than a cryptic decode failure.
+        guard !data.isEmpty else { throw SupabaseError.noData }
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            let snippet = String(data: data.prefix(400), encoding: .utf8) ?? ""
+            throw SupabaseError.decoding("\(error.localizedDescription). Body: \(snippet)")
+        }
+    }
+
+    // MARK: - PostgREST helpers (the .from(...).select/insert/update surface)
+
+    /// SELECT rows from a table. `query` carries the PostgREST filters and the
+    /// `select=` projection, mirroring `.from(table).select(...).eq(...)` in JS.
+    ///
+    ///     let rows: [ClassRoom] = try await rows(
+    ///         "class_enrollments",
+    ///         query: [.init(name: "select", value: "class_id,classes(id,name)"),
+    ///                 .init(name: "user_id", value: "eq.\(uid)")])
+    func rows<T: Decodable>(_ table: String, query: [URLQueryItem] = []) async throws -> [T] {
+        var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("rest/v1/\(table)"),
+                                  resolvingAgainstBaseURL: false)!
+        if !query.isEmpty { comps.queryItems = query }
+
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "GET"
+        for (k, v) in await headers(contentJSON: false) { req.setValue(v, forHTTPHeaderField: k) }
+
+        let data = try await perform(req)
+        return try decode([T].self, from: data)
+    }
+
+    /// INSERT rows. Mirrors `.from(table).insert(values).select()`. Pass
+    /// `returning: false` for fire-and-forget writes (PostgREST returns 204).
+    @discardableResult
+    func insert<Body: Encodable, T: Decodable>(
+        _ table: String,
+        values: Body,
+        returning: Bool = true
+    ) async throws -> [T] {
+        var req = URLRequest(url: SupabaseConfig.url.appendingPathComponent("rest/v1/\(table)"))
+        req.httpMethod = "POST"
+        for (k, v) in await headers(contentJSON: true) { req.setValue(v, forHTTPHeaderField: k) }
+        req.setValue(returning ? "return=representation" : "return=minimal",
+                     forHTTPHeaderField: "Prefer")
+        req.httpBody = try encoder.encode(values)
+
+        let data = try await perform(req)
+        guard returning else { return [] }
+        return try decode([T].self, from: data)
+    }
+
+    /// UPDATE rows matched by `query` (the PostgREST filters, e.g. id=eq.123).
+    /// Mirrors `.from(table).update(values).eq(...)`.
+    @discardableResult
+    func update<Body: Encodable, T: Decodable>(
+        _ table: String,
+        values: Body,
+        query: [URLQueryItem],
+        returning: Bool = true
+    ) async throws -> [T] {
+        var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("rest/v1/\(table)"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.queryItems = query
+
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "PATCH"
+        for (k, v) in await headers(contentJSON: true) { req.setValue(v, forHTTPHeaderField: k) }
+        req.setValue(returning ? "return=representation" : "return=minimal",
+                     forHTTPHeaderField: "Prefer")
+        req.httpBody = try encoder.encode(values)
+
+        let data = try await perform(req)
+        guard returning else { return [] }
+        return try decode([T].self, from: data)
+    }
+
+    // MARK: - RPC
+
+    /// POST to /rest/v1/rpc/<name>, decoding the JSON result into `T`. Mirrors
+    /// `supabase.rpc(name, params)`. Postgres functions returning SETOF decode as
+    /// an array `T`; scalar-returning functions decode as the scalar.
+    func rpc<T: Decodable>(_ name: String, params: [String: Any] = [:]) async throws -> T {
+        var req = URLRequest(url: SupabaseConfig.url.appendingPathComponent("rest/v1/rpc/\(name)"))
+        req.httpMethod = "POST"
+        for (k, v) in await headers(contentJSON: true) { req.setValue(v, forHTTPHeaderField: k) }
+        req.httpBody = try JSONSerialization.data(withJSONObject: params, options: [])
+
+        let data = try await perform(req)
+        return try decode(T.self, from: data)
+    }
+
+    // MARK: - Typed RPC calls (the real Weft RPCs)
+
+    /// One row per assignment (version_group_id) for a class: active session,
+    /// the student's own submission/grade state. See student.js `list_class_work`.
+    func listClassWork(classId: String) async throws -> [ClassWorkItem] {
+        try await rpc("list_class_work", params: ["p_class_id": classId])
+    }
+
+    /// Degraded fallback when list_class_work isn't deployed: OPEN sessions only.
+    /// Returns the raw decoded rows (shape varies, so the caller decodes a type).
+    func listClassAssignments<T: Decodable>(classId: String) async throws -> [T] {
+        try await rpc("list_class_assignments", params: ["p_class_id": classId])
+    }
+
+    /// Resolve a 6-digit session code to its session row. student.js takes the
+    /// first element when the RPC returns an array.
+    func lookupSession(code: String) async throws -> ExamSession? {
+        let sessions: [ExamSession] = try await rpc("lookup_session_by_code",
+                                                     params: ["p_code": code])
+        return sessions.first
+    }
+
+    /// Idempotent class enrollment by class code. Returns the joined class row.
+    /// SECURITY DEFINER on the server; matches student.js `join_class_by_code`.
+    func joinClass(code: String, displayName: String) async throws -> ClassRoom? {
+        let classes: [ClassRoom] = try await rpc("join_class_by_code", params: [
+            "p_code": code,
+            "p_display_name": displayName
+        ])
+        return classes.first
+    }
+
+    /// Released grades + essays for the signed-in student across all sessions.
+    /// New consolidated RPC replacing the multi-table stitch in loadReturnedEssays().
+    func getMyReturnedWork() async throws -> [ReturnedWorkItem] {
+        try await rpc("get_my_returned_work")
+    }
+
+    // MARK: - Auth (GoTrue) — OAuth PKCE scaffold
+
+    /// Kick off Google sign-in: open GoTrue's `/authorize` in a system web
+    /// session, wait for the `weft://auth-callback?code=...` redirect, then
+    /// exchange the code for a session. This is the desktop equivalent of the
+    /// renderer's `supabase.auth.signInWithOAuth({ provider: 'google' })`.
+    ///
+    /// TODO(entitlements): ASWebAuthenticationSession needs a presentation anchor
+    /// and the app must register the `weft` URL scheme in Info.plist
+    /// (CFBundleURLTypes) plus the Sign in with Apple / network entitlements as
+    /// appropriate. Wire `presentationContextProvider` to the key window once the
+    /// AppKit window is available.
+    @MainActor
+    func signInWithGoogle() async throws {
+        let verifier = PKCE.makeVerifier()
+        let challenge = PKCE.challenge(for: verifier)
+
+        var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("auth/v1/authorize"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.queryItems = [
+            URLQueryItem(name: "provider", value: "google"),
+            URLQueryItem(name: "redirect_to", value: SupabaseConfig.redirectURL),
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256")
+        ]
+        let authorizeURL = comps.url!
+
+        let callbackURL = try await Self.runWebAuth(
+            url: authorizeURL,
+            callbackScheme: SupabaseConfig.redirectScheme
+        )
+
+        // The redirect lands as weft://auth-callback?code=<authCode>. Pull it out.
+        let items = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        guard let code = items.first(where: { $0.name == "code" })?.value else {
+            // GoTrue can also redirect with ?error=...; surface that.
+            let message = items.first(where: { $0.name == "error_description" })?.value
+                ?? "Sign-in did not complete."
+            throw SupabaseError.auth(message)
+        }
+
+        try await exchangeCode(code, verifier: verifier)
+    }
+
+    /// Exchange a PKCE auth code for a session, POSTing to
+    /// /auth/v1/token?grant_type=pkce with `{ auth_code, code_verifier }` (the
+    /// exact body the supabase-js client sends), then store the tokens.
+    @MainActor
+    func exchangeCode(_ authCode: String, verifier: String) async throws {
+        var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("auth/v1/token"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.queryItems = [URLQueryItem(name: "grant_type", value: "pkce")]
+
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "POST"
+        req.setValue(SupabaseConfig.anonKey, forHTTPHeaderField: "apikey")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "auth_code": authCode,
+            "code_verifier": verifier
+        ])
+
+        let data = try await perform(req)
+        let token = try decode(TokenResponse.self, from: data)
+        setSession(accessToken: token.accessToken, refreshToken: token.refreshToken)
+    }
+
+    /// Sign out: drop the local session. The GoTrue `/logout` round-trip is best
+    /// effort and can be added once a stored token revoke is needed.
+    @MainActor
+    func signOut() {
+        clearSession()
+    }
+
+    // MARK: - Web auth (ASWebAuthenticationSession bridge)
+
+    /// Run a one-shot ASWebAuthenticationSession and return the callback URL.
+    ///
+    /// TODO(entitlements): in a sandboxed build this needs the
+    /// `com.apple.security.network.client` entitlement, and the session needs a
+    /// non-nil `presentationContextProvider`. We supply a default anchor below;
+    /// swap in the real key window when one is guaranteed to exist.
+    @MainActor
+    private static func runWebAuth(url: URL, callbackScheme: String) async throws -> URL {
+        let anchorProvider = WebAuthPresentationAnchor()
+        return try await withCheckedThrowingContinuation { continuation in
+            let webAuth = ASWebAuthenticationSession(
+                url: url,
+                callbackURLScheme: callbackScheme
+            ) { callbackURL, error in
+                if let error {
+                    continuation.resume(throwing: SupabaseError.auth(error.localizedDescription))
+                    return
+                }
+                guard let callbackURL else {
+                    continuation.resume(throwing: SupabaseError.auth("No callback URL."))
+                    return
+                }
+                continuation.resume(returning: callbackURL)
+            }
+            webAuth.presentationContextProvider = anchorProvider
+            webAuth.prefersEphemeralWebBrowserSession = false
+            // Keep the anchor alive for the lifetime of the session.
+            objc_setAssociatedObject(webAuth, &WebAuthPresentationAnchor.key,
+                                     anchorProvider, .OBJC_ASSOCIATION_RETAIN)
+            if !webAuth.start() {
+                continuation.resume(throwing: SupabaseError.auth("Could not start the sign-in session."))
+            }
+        }
+    }
+}
+
+// MARK: - Returned-work DTO (the get_my_returned_work RPC row)
+
+/// A single released (graded) essay for the signed-in student. Mirrors the
+/// stitched shape student.js builds in loadReturnedEssays(): the essay body, the
+/// score, the teacher's overall feedback, and the shared inline comments.
+///
+/// This is the network DTO; the read-only UI (ReturnedWorkView) maps it into its
+/// own presentation model. Lives here (not Models.swift) so this file stays
+/// self-contained and the typed RPC actually compiles.
+struct ReturnedWorkItem: Identifiable, Codable, Hashable, Sendable {
+    let submissionId: String
+    var questionId: String?
+    var contentHtml: String
+    var wordCount: Int
+    var points: Double?
+    var pointsPossible: Double
+    var feedback: String
+    var releasedAt: Date?
+    var comments: [ReturnedComment]
+
+    var id: String { submissionId }
+
+    enum CodingKeys: String, CodingKey {
+        case submissionId = "submission_id"
+        case questionId = "question_id"
+        case contentHtml = "content_html"
+        case wordCount = "word_count"
+        case points
+        case pointsPossible = "points_possible"
+        case feedback
+        case releasedAt = "released_at"
+        case comments
+    }
+}
+
+/// A shared inline comment anchored to a quote in the returned essay. Mirrors the
+/// `essay_comments` columns student.js reads (visibility filtered to 'shared').
+struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    var submissionId: String?
+    var rangeStart: Int?
+    var rangeEnd: Int?
+    var quote: String?
+    var body: String
+    var visibility: String?
+    var createdAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case submissionId = "submission_id"
+        case rangeStart = "range_start"
+        case rangeEnd = "range_end"
+        case quote
+        case body
+        case visibility
+        case createdAt = "created_at"
+    }
+}
+
+// MARK: - GoTrue token response
+
+private struct TokenResponse: Decodable {
+    let accessToken: String
+    let refreshToken: String?
+    let expiresIn: Int?
+    let tokenType: String?
+
+    enum CodingKeys: String, CodingKey {
+        case accessToken = "access_token"
+        case refreshToken = "refresh_token"
+        case expiresIn = "expires_in"
+        case tokenType = "token_type"
+    }
+}
+
+// MARK: - PKCE helpers
+
+enum PKCE {
+    /// A high-entropy code verifier (43–128 chars, URL-safe base64 of 32 bytes).
+    static func makeVerifier() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return base64URL(Data(bytes))
+    }
+
+    /// S256 challenge: base64url( SHA256(verifier) ).
+    static func challenge(for verifier: String) -> String {
+        let digest = SHA256.hash(data: Data(verifier.utf8))
+        return base64URL(Data(digest))
+    }
+
+    private static func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+// MARK: - Presentation anchor for ASWebAuthenticationSession
+
+/// Supplies a window for the system auth sheet to attach to. On macOS this is an
+/// NSWindow; we fall back to a throwaway window if no key window exists yet.
+final class WebAuthPresentationAnchor: NSObject, ASWebAuthenticationPresentationContextProviding {
+    nonisolated(unsafe) static var key: UInt8 = 0
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        #if canImport(AppKit)
+        if let window = NSApp?.keyWindow ?? NSApp?.windows.first {
+            return window
+        }
+        // TODO(entitlements): no window available — create a transient one so the
+        // sheet has an anchor. Replace with the real app window when wiring up.
+        return NSWindow()
+        #else
+        return ASPresentationAnchor()
+        #endif
+    }
+}
+
+// MARK: - Date strategies (Supabase ISO8601 with optional fractional seconds)
+
+extension JSONDecoder.DateDecodingStrategy {
+    /// Postgres/PostgREST timestamps come back as ISO8601, sometimes with
+    /// fractional seconds (e.g. 2026-06-08T12:34:56.789012+00:00) and sometimes
+    /// without. Try the fractional formatter first, then the plain one.
+    static let supabase = custom { decoder in
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        if let date = SupabaseDate.parse(raw) { return date }
+        throw DecodingError.dataCorruptedError(
+            in: container,
+            debugDescription: "Unrecognized Supabase date: \(raw)")
+    }
+}
+
+extension JSONEncoder.DateEncodingStrategy {
+    static let supabase = custom { date, encoder in
+        var container = encoder.singleValueContainer()
+        try container.encode(SupabaseDate.fractional.string(from: date))
+    }
+}
+
+enum SupabaseDate {
+    // ISO8601DateFormatter isn't Sendable, but these instances are configured
+    // once and only ever read (parsing/formatting is internally synchronized), so
+    // nonisolated(unsafe) is sound here.
+    nonisolated(unsafe) static let fractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    nonisolated(unsafe) static let plain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    static func parse(_ raw: String) -> Date? {
+        fractional.date(from: raw) ?? plain.date(from: raw)
+    }
+}

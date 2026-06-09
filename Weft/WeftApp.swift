@@ -11,10 +11,12 @@ struct WeftApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            // TEMP dev scaffolding: browse every screen while flows are wired.
+            // Swap back to RootView() once navigation between screens is done.
+            DevGalleryView()
                 .environment(app)
                 .preferredColorScheme(.light)   // Weft's identity is light
-                .frame(minWidth: 460, minHeight: 600)
+                .frame(minWidth: 900, minHeight: 640)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1000, height: 800)
