@@ -556,7 +556,22 @@ final class AppState {
     func goToJoin()  { studentScreen = .join }
     func goToHome()  { studentScreen = .home }
     func enterExam() { studentScreen = .exam }
-    func finishExam() { activeAssignment = nil; studentScreen = .done }
+
+    func finishExam() {
+        // Move the just-submitted assignment out of "Active": clear its live
+        // session and stamp a submission time so it drops into the submitted/past
+        // bucket. (In the real flow the backend reload also reflects this; this
+        // gives immediate, correct feedback, especially in preview.)
+        if let vgid = activeAssignment?.versionGroupId,
+           let idx = classWork.firstIndex(where: { $0.versionGroupId == vgid }) {
+            classWork[idx].activeSessionId = nil
+            classWork[idx].activeCode = nil
+            classWork[idx].mySubmittedAt = Date()
+        }
+        activeAssignment = nil
+        studentScreen = .done
+        if signedIn { Task { await loadClassWork() } }
+    }
 
     // MARK: - Helpers
 
