@@ -45,6 +45,10 @@ final class AppState {
     var selectedClassId: String?
     /// The assignment a student is about to take / is taking (drives ExamView).
     var activeAssignment: Assignment?
+    /// Reference materials for the active exam (sample defaults; replaced by the
+    /// real test_files / test_urls when an active session resolves).
+    var examFiles: [ExamFile] = ExamFile.sample
+    var examLinks: [ExamLink] = ExamLink.sample
 
     // MARK: Async UI state
     var isLoading = false
@@ -235,7 +239,30 @@ final class AppState {
                                      ?? "Respond to the prompt your teacher set.",
                                  wordLimit: 600)],
             timeLimitMinutes: 45)
+        // Reset to samples, then (when signed in) pull the real reference
+        // materials for the active session in the background.
+        examFiles = ExamFile.sample
+        examLinks = ExamLink.sample
+        if signedIn, let code = item.activeCode {
+            Task { await loadExamMaterials(code: code) }
+        }
         studentScreen = .checks
+    }
+
+    /// Resolve the active session's test, then load its reference files + links.
+    /// Best-effort: on any failure we keep the sample materials.
+    func loadExamMaterials(code: String) async {
+        guard signedIn else { return }
+        do {
+            guard let session = try await supabase.lookupSession(code: code),
+                  let testId = session.testId else { return }
+            let files = try await supabase.listTestFiles(testId: testId)
+            let links = try await supabase.listTestURLs(testId: testId)
+            if !files.isEmpty { examFiles = files }
+            if !links.isEmpty { examLinks = links }
+        } catch {
+            // keep samples; this is a non-blocking enhancement
+        }
     }
 
     func openReturnedWork() {

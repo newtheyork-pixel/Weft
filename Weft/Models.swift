@@ -146,6 +146,52 @@ struct ClassWorkItem: Identifiable, Codable, Hashable, Sendable {
     static let sampleList = [active, graded, past]
 }
 
+// MARK: - Exam reference materials (test_files / test_urls)
+
+/// A teacher-uploaded reference file for an exam (a `test_files` row). The bytes
+/// live in the private `essay-files` storage bucket at `storagePath`.
+struct ExamFile: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    var originalName: String
+    var mimeType: String
+    var storagePath: String
+
+    var isPDF: Bool { mimeType.contains("pdf") || originalName.lowercased().hasSuffix(".pdf") }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case originalName = "original_name"
+        case mimeType = "mime_type"
+        case storagePath = "storage_path"
+    }
+
+    static let sample = [
+        ExamFile(id: "f1", originalName: "Passage excerpt.pdf", mimeType: "application/pdf", storagePath: ""),
+        ExamFile(id: "f2", originalName: "Imagery glossary.pdf", mimeType: "application/pdf", storagePath: ""),
+    ]
+}
+
+/// A teacher-approved reference link for an exam (a `test_urls` row).
+struct ExamLink: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    var displayName: String
+    var url: String
+
+    var host: String { URL(string: url)?.host ?? url }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case displayName = "display_name"
+        case url
+    }
+
+    static let sample = [
+        ExamLink(id: "u1", displayName: "JSTOR", url: "https://jstor.org/"),
+        ExamLink(id: "u2", displayName: "BBC", url: "https://bbc.com/"),
+        ExamLink(id: "u3", displayName: "Grace Church School", url: "https://gcschool.org/"),
+    ]
+}
+
 // MARK: - Live roster (proctoring monitor)
 
 struct RosterStudent: Identifiable, Codable, Hashable, Sendable {

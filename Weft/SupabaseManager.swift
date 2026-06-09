@@ -289,6 +289,50 @@ final class SupabaseManager: @unchecked Sendable {
         }
     }
 
+    // MARK: - Exam reference materials
+
+    /// The reference files attached to a test (`test_files`). Rendered in the
+    /// exam's PDF pane via a signed URL (see `signedURL`).
+    func listTestFiles(testId: String) async throws -> [ExamFile] {
+        try await rows("test_files", query: [
+            URLQueryItem(name: "select", value: "id,original_name,mime_type,storage_path"),
+            URLQueryItem(name: "test_id", value: "eq.\(testId)")
+        ])
+    }
+
+    /// The approved reference links for a test (`test_urls`).
+    func listTestURLs(testId: String) async throws -> [ExamLink] {
+        try await rows("test_urls", query: [
+            URLQueryItem(name: "select", value: "id,display_name,url"),
+            URLQueryItem(name: "test_id", value: "eq.\(testId)")
+        ])
+    }
+
+    /// Create a time-limited signed URL for an object in a (private) storage
+    /// bucket. Used to load `essay-files` PDFs into the exam PDF viewer. Returns
+    /// the fully-qualified URL.
+    @MainActor
+    func signedURL(bucket: String, path: String, expiresInSeconds: Int = 3600) async throws -> URL {
+        let endpoint = SupabaseConfig.url
+            .appendingPathComponent("storage/v1/object/sign")
+            .appendingPathComponent(bucket)
+            .appendingPathComponent(path)
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = "POST"
+        for (k, v) in headers(contentJSON: true) { req.setValue(v, forHTTPHeaderField: k) }
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["expiresIn": expiresInSeconds])
+        let data = try await perform(req)
+        struct SignedResponse: Decodable { let signedURL: String }
+        let signed = try decode(SignedResponse.self, from: data)
+        // The API returns a path like "/object/sign/...?token=..."; resolve it
+        // against the storage base.
+        let base = SupabaseConfig.url.appendingPathComponent("storage/v1")
+        if let full = URL(string: signed.signedURL, relativeTo: base)?.absoluteURL {
+            return full
+        }
+        throw SupabaseError.decoding("Bad signed URL: \(signed.signedURL)")
+    }
+
     // MARK: - User & role
 
     /// Fetch the signed-in user from GoTrue (`/auth/v1/user`). Requires a token.

@@ -1,16 +1,15 @@
 //
 //  ExamView.swift
-//  Weft — the in-exam writing surface: prompt + live timer, the rich-text
-//  editor on a clean white page, an approved-resources side panel (files +
-//  locked browser), and the honest "Proctoring on" chip. Mirrors the Electron
-//  #stage-essay.
+//  Weft — the in-exam writing workspace. A native, resizable two-pane layout:
+//  the writing surface on the left and a reference column on the right that the
+//  student arranges themselves — PDFs, the approved web links, or both at once
+//  (a VSplitView), or collapsed entirely for a distraction-free write-only view.
 //
-//  When `lockdown` is true (the real student flow) this drives the full exam
-//  lifecycle: KioskController locks the window, a ProctoringEngine monitor
+//  When `lockdown` is true (the real student flow) this also drives the full
+//  exam lifecycle: KioskController locks the window, a ProctoringEngine monitor
 //  re-sweeps every few seconds, and a blackout overlay covers the screen if
 //  screen-sharing software appears or the student leaves the window. With
-//  `lockdown` false (dev gallery / WEFT_SCREEN QA) it's an inert preview — no
-//  full-screen lock, no monitoring — so it's safe to inspect.
+//  `lockdown` false (dev gallery / WEFT_SCREEN QA) it's an inert preview.
 //
 
 import SwiftUI
@@ -23,10 +22,11 @@ import AppKit
 @Observable
 final class ExamRuntime {
     enum Block: Equatable { case sharing(String), focusLost }
-    enum SaveState: Equatable { case saving, saved }
 
     var block: Block?
     var saveState: SaveState = .saved
+
+    enum SaveState: Equatable { case saving, saved }
 }
 
 struct ExamView: View {
@@ -40,7 +40,7 @@ struct ExamView: View {
     @State private var essay = NSAttributedString(
         string: "The interplay of light and shadow in the passage works as more than scenery. The author returns to dawn three times, each marking a shift in the narrator's certainty about what she has seen.")
     @State private var wordCount = 26
-    @State private var sideTab: SideTab = .files
+    @State private var referencesVisible = true
 
     @State private var runtime = ExamRuntime()
     @State private var kiosk = KioskController()
@@ -50,21 +50,25 @@ struct ExamView: View {
     @State private var saveDebounce: Task<Void, Never>?
     @State private var monitorTask: Task<Void, Never>?
 
-    enum SideTab { case files, links }
-
-    private let files = ["Passage excerpt.pdf", "Imagery glossary.pdf"]
-
     private var assignment: Assignment { app.activeAssignment ?? .sample }
     private var prompt: String {
         assignment.questions.first?.prompt ?? Assignment.sample.questions.first?.prompt ?? "Respond to the prompt."
     }
+    private var wordLimit: Int? { assignment.questions.first?.wordLimit }
 
     var body: some View {
-        HStack(spacing: 0) {
+        HSplitView {
             editorColumn
-            Divider()
-            sidePanel
-                .frame(width: 380)
+                .frame(minWidth: 380)
+            if referencesVisible {
+                ExamReferencePanel(
+                    files: app.examFiles,
+                    links: app.examLinks,
+                    signedIn: app.signedIn,
+                    onHide: { toggleReferences() }
+                )
+                .frame(minWidth: 320, idealWidth: 460)
+            }
         }
         .background(Color(white: 0.97))
         .overlay(alignment: .bottomTrailing) { proctoringChip.padding(20) }
@@ -75,7 +79,6 @@ struct ExamView: View {
             startExam(in: window)
         }
         .task {
-            // Stage the deadline from the assignment's time limit (45 min default).
             if deadline == nil {
                 let minutes = assignment.timeLimitMinutes ?? 45
                 deadline = Date().addingTimeInterval(TimeInterval(minutes * 60))
@@ -90,7 +93,6 @@ struct ExamView: View {
         examWindow = window
         kioskEntered = true
         kiosk.onBlackout = { [runtime] in
-            // Raise the focus-lost overlay unless a sharing blackout is already up.
             if runtime.block == nil { runtime.block = .focusLost }
         }
         kiosk.enterKiosk(window: window)
@@ -107,9 +109,6 @@ struct ExamView: View {
         kioskEntered = false
     }
 
-    /// Deterministic exit from the focus-lost blackout: clear it and bring the
-    /// exam window back to the front. (We never auto-clear on becomeKey — that
-    /// races the re-key the kiosk itself performs.)
     private func resumeFromFocusLoss() {
         runtime.block = nil
         examWindow?.makeKeyAndOrderFront(nil)
@@ -117,8 +116,8 @@ struct ExamView: View {
 
     /// Re-sweep proctoring every few seconds. Owned by `monitorTask`, started in
     /// startExam and cancelled in endExam so it never outlives the kiosk lock.
-    /// Only the screen-share/remote signals drive the blackout here; focus loss is
-    /// handled by the kiosk `onBlackout` hook and `.focusLost` takes precedence.
+    /// Only the screen-share/remote signals drive the blackout here; focus loss
+    /// is handled by the kiosk `onBlackout` hook and `.focusLost` takes precedence.
     private func monitorLoop() async {
         let engine = ProctoringEngine()
         while !Task.isCancelled {
@@ -140,6 +139,10 @@ struct ExamView: View {
         return false
     }
 
+    private func toggleReferences() {
+        withAnimation(.easeInOut(duration: 0.22)) { referencesVisible.toggle() }
+    }
+
     private func submit() {
         endExam()
         app.finishExam()
@@ -151,7 +154,6 @@ struct ExamView: View {
     }
 
     // MARK: Blackout overlay
-
     @ViewBuilder private var blackout: some View {
         switch runtime.block {
         case .sharing(let name):
@@ -183,9 +185,7 @@ struct ExamView: View {
     private var editorColumn: some View {
         VStack(spacing: 0) {
             header
-            RichTextToolbar(controller: controller)
-                .padding(.horizontal, Theme.Space.xl)
-                .padding(.vertical, Theme.Space.sm)
+            toolbarRow
             RichTextEditor(text: $essay, wordCount: $wordCount, controller: controller)
                 .background(Color.white)
                 .padding(.horizontal, Theme.Space.xl)
@@ -217,13 +217,53 @@ struct ExamView: View {
         if let deadline {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let remaining = max(0, Int(deadline.timeIntervalSince(context.date)))
-                Text(String(format: "%d:%02d", remaining / 60, remaining % 60))
-                    .font(.system(size: 15, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(remaining < 300 ? Theme.warn : Theme.accent)
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(Theme.accent.opacity(0.10), in: Capsule())
+                Label {
+                    Text(String(format: "%d:%02d", remaining / 60, remaining % 60))
+                        .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                        .monospacedDigit()
+                } icon: {
+                    Image(systemName: "clock")
+                }
+                .foregroundStyle(remaining < 300 ? Theme.warn : Theme.accent)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background((remaining < 300 ? Theme.warn : Theme.accent).opacity(0.10), in: Capsule())
+                .help("Time remaining")
             }
         }
+    }
+
+    private var toolbarRow: some View {
+        HStack(spacing: Theme.Space.md) {
+            RichTextToolbar(controller: controller)
+            Spacer()
+            wordCountView
+            Button {
+                toggleReferences()
+            } label: {
+                Image(systemName: referencesVisible ? "sidebar.right" : "sidebar.left")
+            }
+            .buttonStyle(.borderless)
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            .help(referencesVisible ? "Hide references — write only (⌘⇧R)" : "Show references (⌘⇧R)")
+        }
+        .padding(.horizontal, Theme.Space.xl)
+        .padding(.vertical, Theme.Space.sm)
+    }
+
+    private var wordCountView: some View {
+        Group {
+            if let limit = wordLimit {
+                let over = wordCount > limit
+                Text("\(wordCount) / \(limit) words")
+                    .foregroundStyle(over ? Theme.warn : Theme.muted)
+            } else {
+                Text("\(wordCount) words")
+                    .foregroundStyle(Theme.muted)
+            }
+        }
+        .font(.system(size: 12, weight: .medium, design: .rounded))
+        .monospacedDigit()
+        .help("Word count")
     }
 
     private var footerBar: some View {
@@ -233,13 +273,27 @@ struct ExamView: View {
             }
             .buttonStyle(.glass)
             Spacer()
-            Text(runtime.saveState == .saving ? "Saving…" : "All saved")
-                .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
+            saveStateView
             Spacer()
             Button("Submit") { submit() }
                 .buttonStyle(.glassProminent).tint(Theme.accent)
+                .keyboardShortcut("\r", modifiers: [.command])
         }
         .padding(Theme.Space.xl)
+    }
+
+    private var saveStateView: some View {
+        HStack(spacing: 6) {
+            if runtime.saveState == .saving {
+                ProgressView().controlSize(.small).scaleEffect(0.7)
+                Text("Saving…")
+            } else {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.good)
+                Text("All saved")
+            }
+        }
+        .font(Theme.sans(12.5))
+        .foregroundStyle(Theme.muted)
     }
 
     // MARK: Autosave (debounced stub — real PostgREST write lands with the
@@ -251,42 +305,6 @@ struct ExamView: View {
             try? await Task.sleep(for: .seconds(0.8))
             if !Task.isCancelled { runtime.saveState = .saved }
         }
-    }
-
-    // MARK: Side panel (approved resources)
-    private var sidePanel: some View {
-        VStack(spacing: 0) {
-            Picker("", selection: $sideTab) {
-                Text("Files (PDFs, docs)").tag(SideTab.files)
-                Text("Reference links").tag(SideTab.links)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(Theme.Space.md)
-
-            if sideTab == .files {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(files, id: \.self) { f in
-                        HStack(spacing: 10) {
-                            Image(systemName: "doc.text")
-                                .foregroundStyle(Theme.accent)
-                            Text(f).font(Theme.sans(14)).foregroundStyle(Theme.inkSoft)
-                            Spacer()
-                        }
-                        .padding(.horizontal, Theme.Space.xl)
-                        .padding(.vertical, 14)
-                        Divider().opacity(0.4).padding(.horizontal, Theme.Space.xl)
-                    }
-                    Spacer()
-                }
-            } else {
-                LockedBrowserView(
-                    url: URL(string: "https://en.wikipedia.org/wiki/Imagery")!,
-                    allowedHosts: ["wikipedia.org"]
-                )
-            }
-        }
-        .background(.regularMaterial)
     }
 
     // MARK: Proctoring chip
