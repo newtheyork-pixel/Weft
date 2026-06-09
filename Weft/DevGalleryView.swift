@@ -15,6 +15,7 @@ struct DevGalleryView: View {
         case studentHome = "Student · Class home"
         case join        = "Student · Join a class"
         case checks      = "Student · Pre-exam + privacy"
+        case exam        = "Student · Exam (writing)"
         case done        = "Student · Done + ledger"
         case returned    = "Student · Returned work"
         case teacher     = "Teacher · Build / Live"
@@ -48,6 +49,7 @@ struct DevGalleryView: View {
         case .studentHome: StudentClassHomeView()
         case .join:        StudentJoinView()
         case .checks:      StudentChecksView()
+        case .exam:        ExamView()
         case .done:        StudentDoneView()
         case .returned:    ReturnedWorkView()
         case .teacher:     TeacherHomeView()
