@@ -34,6 +34,8 @@ struct StudentClassHomeView: View {
                 .padding(Theme.Space.xl)
                 .frame(maxWidth: 560)
                 .frame(maxWidth: .infinity)
+                .animation(.easeOut(duration: 0.2), value: app.classWork.count)
+                .animation(.easeOut(duration: 0.2), value: app.selectedClassId)
             }
         }
         .background(AmbientBackground())
@@ -41,11 +43,17 @@ struct StudentClassHomeView: View {
     }
 
     private var emptyState: some View {
-        Text("No assignments yet. Join a class with a class code and your work will appear here.")
-            .font(Theme.sans(13))
-            .foregroundStyle(Theme.muted)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, Theme.Space.md)
+        HStack(alignment: .top, spacing: Theme.Space.sm) {
+            Image(systemName: "tray")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.muted2)
+            Text("No assignments yet. Join a class with a class code and your work will appear here.")
+                .font(Theme.sans(13))
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, Theme.Space.md)
     }
 
     private func errorBanner(_ message: String) -> some View {
@@ -61,6 +69,7 @@ struct StudentClassHomeView: View {
                 .buttonStyle(.plain)
                 .font(Theme.sans(12.5, .semibold))
                 .foregroundStyle(Theme.accent)
+                .linkPointer()
         }
         .padding(Theme.Space.md)
         .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
@@ -86,7 +95,10 @@ struct StudentClassHomeView: View {
                 Button(c.name) { app.selectClass(c.id) }
             }
         } label: {
-            HStack {
+            HStack(spacing: Theme.Space.md) {
+                Image(systemName: "books.vertical")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(Theme.accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Kicker(text: "Class")
                     Text(selectedClass?.name ?? "Select a class")
@@ -94,7 +106,7 @@ struct StudentClassHomeView: View {
                         .foregroundStyle(Theme.inkSoft)
                 }
                 Spacer()
-                Image(systemName: "chevron.down")
+                Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.muted)
             }
@@ -102,19 +114,27 @@ struct StudentClassHomeView: View {
             .padding(.horizontal, 20)
             .frame(maxWidth: .infinity)
             .weftGlass(Theme.Radius.md)
+            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous))
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
+        .linkPointer()
+        .help("Switch class")
     }
 
     // MARK: Section card
     private func sectionCard(_ title: String, _ items: [ClassWorkItem]) -> some View {
         GlassCard(padding: 0) {
             VStack(alignment: .leading, spacing: 0) {
-                Kicker(text: title)
-                    .padding(.horizontal, 22)
-                    .padding(.top, 16)
-                    .padding(.bottom, 10)
+                HStack(spacing: Theme.Space.sm) {
+                    Image(systemName: sectionIcon(title))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.muted)
+                    Kicker(text: title)
+                }
+                .padding(.horizontal, 22)
+                .padding(.top, 16)
+                .padding(.bottom, 10)
                 Divider().opacity(0.4).padding(.horizontal, 22)
                 ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
                     if idx > 0 { Divider().opacity(0.4).padding(.horizontal, 22) }
@@ -123,6 +143,14 @@ struct StudentClassHomeView: View {
                         .padding(.vertical, 15)
                 }
             }
+        }
+    }
+
+    private func sectionIcon(_ title: String) -> String {
+        switch title {
+        case "Active": return "pencil.line"
+        case "Graded": return "checkmark.seal"
+        default:       return "archivebox"
         }
     }
 
@@ -148,10 +176,20 @@ struct StudentClassHomeView: View {
                     Text("\(fmt(item.myPoints)) / \(fmt(item.myPointsPossible))")
                         .font(.system(size: 15, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Theme.inkSoft)
-                    Button("View returned work") { app.openReturnedWork() }
-                        .buttonStyle(.plain)
-                        .font(Theme.sans(13, .semibold))
-                        .foregroundStyle(Theme.accent)
+                    Button {
+                        app.openReturnedWork()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Text("View returned work")
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(Theme.sans(13, .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .linkPointer()
+                    .help("Open your graded work")
                 }
             case .past:
                 Chip(text: "Read-only", kind: .neutral)
@@ -164,11 +202,17 @@ struct StudentClassHomeView: View {
         Button {
             app.goToJoin()
         } label: {
-            Text("Join another class")
-                .font(Theme.sans(13, .semibold))
-                .foregroundStyle(Theme.accent)
+            HStack(spacing: 6) {
+                Image(systemName: "plus.circle")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Join another class")
+                    .font(Theme.sans(13, .semibold))
+            }
+            .foregroundStyle(Theme.accent)
         }
         .buttonStyle(.plain)
+        .linkPointer()
+        .help("Join a class with a class code")
         .padding(.top, Theme.Space.sm)
     }
 

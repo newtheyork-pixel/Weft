@@ -71,7 +71,9 @@ struct StudentChecksView: View {
                         .foregroundStyle(Theme.inkSoft)
                 } else if let report {
                     Image(systemName: warnings(report).isEmpty ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                        .font(.system(size: 18))
                         .foregroundStyle(warnings(report).isEmpty ? Theme.good : Theme.warn)
+                        .symbolRenderingMode(.hierarchical)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(warnings(report).isEmpty ? "All clear" : "Heads up before you start")
                             .font(Theme.sans(14, .semibold))
@@ -86,6 +88,7 @@ struct StudentChecksView: View {
                 }
                 Spacer(minLength: 0)
             }
+            .animation(.easeOut(duration: 0.25), value: running)
         }
     }
 
@@ -206,14 +209,25 @@ struct StudentChecksView: View {
         Button {
             app.enterExam()
         } label: {
-            Text(running ? "Finishing checks…" : "Enter exam")
-                .font(Theme.sans(15, .semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 4)
+            HStack(spacing: Theme.Space.sm) {
+                if running {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "pencil.and.outline")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                Text(running ? "Finishing checks…" : "Enter exam")
+                    .font(Theme.sans(15, .semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
         }
         .buttonStyle(.glassProminent)
         .tint(Theme.accent)
         .disabled(running)
+        .pointerStyle(running ? .default : .link)
+        .help(running ? "Checks are still finishing" : "Enter the exam")
+        .animation(.easeOut(duration: 0.2), value: running)
         .padding(.top, Theme.Space.xs)
     }
 }

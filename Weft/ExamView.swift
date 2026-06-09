@@ -49,6 +49,8 @@ struct ExamView: View {
     @State private var deadline: Date?
     @State private var saveDebounce: Task<Void, Never>?
     @State private var monitorTask: Task<Void, Never>?
+    @State private var showSubmitConfirm = false
+    @AppStorage(Prefs.confirmBeforeSubmit) private var confirmBeforeSubmit = true
 
     private var assignment: Assignment { app.activeAssignment ?? .sample }
     private var prompt: String {
@@ -74,6 +76,12 @@ struct ExamView: View {
         .overlay(alignment: .bottomTrailing) { proctoringChip.padding(20) }
         .overlay { blackout }
         .animation(.easeOut(duration: 0.2), value: runtime.block)
+        .confirmationDialog("Submit your exam?", isPresented: $showSubmitConfirm, titleVisibility: .visible) {
+            Button("Submit exam", role: .destructive) { submit() }
+            Button("Keep writing", role: .cancel) { }
+        } message: {
+            Text("You wrote \(wordCount) word\(wordCount == 1 ? "" : "s"). Once you submit, the exam ends and monitoring stops. You can't keep writing after this.")
+        }
         .onWindow { window in
             guard lockdown, let window, examWindow !== window else { return }
             startExam(in: window)
@@ -141,6 +149,15 @@ struct ExamView: View {
 
     private func toggleReferences() {
         withAnimation(.easeInOut(duration: 0.22)) { referencesVisible.toggle() }
+    }
+
+    /// Entry point for the Submit buttons: confirm first if the preference is on.
+    private func requestSubmit() {
+        if confirmBeforeSubmit {
+            showSubmitConfirm = true
+        } else {
+            submit()
+        }
     }
 
     private func submit() {
@@ -269,13 +286,13 @@ struct ExamView: View {
     private var footerBar: some View {
         HStack {
             Button(lockdown ? "Submit and exit" : "Back") {
-                if lockdown { submit() } else { leave() }
+                if lockdown { requestSubmit() } else { leave() }
             }
             .buttonStyle(.glass)
             Spacer()
             saveStateView
             Spacer()
-            Button("Submit") { submit() }
+            Button("Submit") { requestSubmit() }
                 .buttonStyle(.glassProminent).tint(Theme.accent)
                 .keyboardShortcut("\r", modifiers: [.command])
         }

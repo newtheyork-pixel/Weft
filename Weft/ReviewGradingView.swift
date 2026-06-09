@@ -137,26 +137,34 @@ struct ReviewGradingView: View {
 
     private var topBar: some View {
         HStack(spacing: Theme.Space.lg) {
-            Text(assignmentTitle)
-                .font(Theme.sans(15, .semibold))
-                .foregroundStyle(Theme.inkSoft)
-                .lineLimit(1)
+            HStack(spacing: Theme.Space.sm) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                Text(assignmentTitle)
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundStyle(Theme.inkSoft)
+                    .lineLimit(1)
+            }
 
             Spacer(minLength: Theme.Space.lg)
 
             HStack(spacing: Theme.Space.sm) {
                 navButton("Back", system: "chevron.left", disabled: index <= 0) {
-                    if index > 0 { index -= 1 }
+                    if index > 0 { withAnimation(.easeOut(duration: 0.18)) { index -= 1 } }
                 }
+                .help("Previous student")
                 Text("Student \(index + 1) of \(roster.count)")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.muted)
                     .monospacedDigit()
                     .frame(minWidth: 104)
+                    .contentTransition(.numericText())
                 navButton("Next", system: "chevron.right", trailingIcon: true,
                           disabled: index >= roster.count - 1) {
-                    if index < roster.count - 1 { index += 1 }
+                    if index < roster.count - 1 { withAnimation(.easeOut(duration: 0.18)) { index += 1 } }
                 }
+                .help("Next student")
             }
 
             Spacer(minLength: Theme.Space.lg)
@@ -177,6 +185,7 @@ struct ReviewGradingView: View {
             }
             .buttonStyle(.glass)
             .clipShape(Circle())
+            .help("Close grading and return to the teacher view")
             .accessibilityLabel("Close")
         }
         .padding(.horizontal, Theme.Space.lg)
@@ -203,20 +212,25 @@ struct ReviewGradingView: View {
 
     private var rosterRail: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("STUDENTS")
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(0.9)
-                .foregroundStyle(Theme.muted)
-                .padding(.horizontal, Theme.Space.lg)
-                .padding(.top, Theme.Space.lg)
-                .padding(.bottom, Theme.Space.sm)
+            HStack(spacing: 6) {
+                Image(systemName: "person.2")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("STUDENTS")
+                    .tracking(0.9)
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Theme.muted)
+            .padding(.horizontal, Theme.Space.lg)
+            .padding(.top, Theme.Space.lg)
+            .padding(.bottom, Theme.Space.sm)
 
             ScrollView {
                 VStack(spacing: 4) {
                     ForEach(Array(roster.enumerated()), id: \.element.id) { i, s in
                         rosterRow(s, active: i == index)
                             .contentShape(Rectangle())
-                            .onTapGesture { index = i }
+                            .rowHover(corner: Theme.Radius.sm, strength: i == index ? 0 : 0.05)
+                            .onTapGesture { withAnimation(.easeOut(duration: 0.18)) { index = i } }
                     }
                 }
                 .padding(.horizontal, Theme.Space.sm)
@@ -245,9 +259,14 @@ struct ReviewGradingView: View {
                         .foregroundStyle(Theme.inkSoft)
                         .lineLimit(1)
                     if s.returned {
-                        Text("Returned")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Theme.good)
+                        HStack(spacing: 3) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text("Returned")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundStyle(Theme.good)
+                        .transition(.opacity.combined(with: .scale(scale: 0.85)))
                     }
                 }
                 HStack(spacing: 6) {
@@ -272,6 +291,8 @@ struct ReviewGradingView: View {
                 .frame(width: 3)
                 .padding(.vertical, 4)
         }
+        .animation(.easeOut(duration: 0.18), value: active)
+        .animation(.easeOut(duration: 0.2), value: s.returned)
     }
 
     // MARK: Center — reader (prompt + white paper)
@@ -288,6 +309,8 @@ struct ReviewGradingView: View {
                 .padding(.top, Theme.Space.lg)
                 .padding(.bottom, Theme.Space.xxxl)
                 .frame(maxWidth: .infinity)
+                .id(current.id)
+                .transition(.opacity)
             }
             .background(Color(red: 0.976, green: 0.984, blue: 0.992)) // #f9fbfd canvas
         }
@@ -317,17 +340,28 @@ struct ReviewGradingView: View {
                 }
             }
 
-            Text(prompt)
-                .font(Theme.sans(13))
-                .foregroundStyle(Theme.muted)
-                .lineSpacing(3)
-                .padding(.leading, Theme.Space.md)
-                .overlay(alignment: .leading) {
-                    Rectangle()
-                        .fill(Theme.accentSoft.opacity(0.5))
-                        .frame(width: 3)
+            VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                HStack(spacing: 6) {
+                    Image(systemName: "text.quote")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("PROMPT")
+                        .tracking(0.9)
                 }
-                .padding(.top, Theme.Space.xs)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.muted2)
+
+                Text(prompt)
+                    .font(Theme.sans(13))
+                    .foregroundStyle(Theme.muted)
+                    .lineSpacing(3)
+            }
+            .padding(.leading, Theme.Space.md)
+            .overlay(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(Theme.accentSoft.opacity(0.5))
+                    .frame(width: 3)
+            }
+            .padding(.top, Theme.Space.xs)
         }
         .padding(.horizontal, Theme.Space.xl)
         .padding(.top, Theme.Space.lg)
@@ -408,7 +442,7 @@ struct ReviewGradingView: View {
                 shareBlock
             } else {
                 VStack(alignment: .leading, spacing: Theme.Space.md) {
-                    slotHead("Grading")
+                    slotHead("Grading", system: "pencil.and.list.clipboard")
                     Text("No submission yet. When this student submits, their essay appears here for grading.")
                         .font(Theme.sans(12))
                         .foregroundStyle(Theme.muted)
@@ -423,16 +457,22 @@ struct ReviewGradingView: View {
         .background(.regularMaterial)
     }
 
-    private func slotHead(_ text: String) -> some View {
-        Text(text.uppercased())
-            .font(.system(size: 11, weight: .semibold))
-            .tracking(0.9)
-            .foregroundStyle(Theme.muted)
+    private func slotHead(_ text: String, system: String? = nil) -> some View {
+        HStack(spacing: 6) {
+            if let system {
+                Image(systemName: system)
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            Text(text.uppercased())
+                .tracking(0.9)
+        }
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(Theme.muted)
     }
 
     private var scoreBlock: some View {
         VStack(alignment: .leading, spacing: Theme.Space.md) {
-            slotHead("Score")
+            slotHead("Score", system: "number")
             HStack(alignment: .firstTextBaseline, spacing: Theme.Space.sm) {
                 TextField("", text: scoreBinding)
                     .textFieldStyle(.plain)
@@ -465,7 +505,7 @@ struct ReviewGradingView: View {
 
     private var finalCommentBlock: some View {
         VStack(alignment: .leading, spacing: Theme.Space.md) {
-            slotHead("Final comment")
+            slotHead("Final comment", system: "text.bubble")
             TextEditor(text: finalCommentBinding)
                 .font(Theme.sans(13))
                 .foregroundStyle(Theme.inkSoft)
@@ -498,14 +538,19 @@ struct ReviewGradingView: View {
             Divider().overlay(Color.black.opacity(0.08))
                 .padding(.bottom, Theme.Space.xs)
             Button {
-                roster[index].returned = true
+                withAnimation(.easeOut(duration: 0.2)) { roster[index].returned = true }
             } label: {
-                Text(current.returned ? "Shared" : "Share with student")
-                    .font(Theme.sans(14, .semibold))
-                    .frame(maxWidth: .infinity)
+                HStack(spacing: 6) {
+                    Image(systemName: current.returned ? "checkmark.circle.fill" : "paperplane.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(current.returned ? "Shared" : "Share with student")
+                        .font(Theme.sans(14, .semibold))
+                }
+                .frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
             .tint(Theme.accent)
+            .help(current.returned ? "Already shared with this student" : "Send the score and your comment to the student")
 
             Text("Once shared, the student sees the score and your Shared comments. Private notes stay hidden.")
                 .font(.system(size: 11))

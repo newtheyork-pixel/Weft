@@ -15,6 +15,7 @@ struct StudentJoinView: View {
     @State private var code: String = ""
     @State private var joining: Bool = false
     @State private var joined: Bool = false
+    @FocusState private var codeFocused: Bool
 
     /// A class code is letters + numbers, up to 6 characters.
     private var trimmedCode: String {
@@ -47,10 +48,11 @@ struct StudentJoinView: View {
                 joinButton
                 helper
                 if joined {
-                    Text("You're in. Your assignments will appear automatically.")
+                    Label("You're in. Your assignments will appear automatically.", systemImage: "checkmark.circle.fill")
                         .font(Theme.sans(13, .semibold))
                         .foregroundStyle(Theme.good)
-                        .transition(.opacity)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 backLink
             }
@@ -60,7 +62,12 @@ struct StudentJoinView: View {
     // MARK: Header
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Kicker(text: "Student")
+            HStack(spacing: Theme.Space.sm) {
+                Image(systemName: "person.2.badge.key")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                Kicker(text: "Student")
+            }
             Text("Join a class to start writing")
                 .font(Theme.serif(26, .semibold))
                 .foregroundStyle(Theme.inkSoft)
@@ -75,7 +82,7 @@ struct StudentJoinView: View {
     // MARK: Code field
     private var field: some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
-            Text("Class code (letters & numbers, e.g. ABC234)")
+            Label("Class code (letters and numbers, e.g. ABC234)", systemImage: "number")
                 .font(Theme.sans(13, .medium))
                 .foregroundStyle(Theme.inkSoft)
             TextField("ABC234", text: $code)
@@ -85,10 +92,16 @@ struct StudentJoinView: View {
                 .foregroundStyle(Theme.inkSoft)
                 .textContentType(.oneTimeCode)
                 .autocorrectionDisabled(true)
+                .focused($codeFocused)
                 .padding(.vertical, 14)
                 .padding(.horizontal, 16)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .weftGlass(Theme.Radius.md)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous)
+                        .strokeBorder(Theme.accent.opacity(codeFocused ? 0.45 : 0), lineWidth: 1.5)
+                )
+                .animation(.easeOut(duration: 0.15), value: codeFocused)
                 .onChange(of: code) { _, newValue in
                     // Letters + numbers only, uppercased, max 6 — mirrors the
                     // Electron input (maxlength 6, text-transform: uppercase).
@@ -106,14 +119,25 @@ struct StudentJoinView: View {
     // MARK: Join button
     private var joinButton: some View {
         Button(action: join) {
-            Text(joining ? "Joining…" : "Join class")
-                .font(Theme.sans(15, .semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 4)
+            HStack(spacing: Theme.Space.sm) {
+                if joining {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                } else {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                }
+                Text(joining ? "Joining" : "Join class")
+                    .font(Theme.sans(15, .semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
         }
         .buttonStyle(.glassProminent)
         .tint(Theme.accent)
         .disabled(!canJoin)
+        .help("Join the class with this code")
     }
 
     // MARK: Helper copy
@@ -130,11 +154,12 @@ struct StudentJoinView: View {
         Button {
             app.goToHome()
         } label: {
-            Text("Back to your classes")
+            Label("Back to your classes", systemImage: "chevron.left")
                 .font(Theme.sans(13, .semibold))
                 .foregroundStyle(Theme.accent)
         }
         .buttonStyle(.plain)
+        .linkPointer()
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.top, Theme.Space.xs)
     }

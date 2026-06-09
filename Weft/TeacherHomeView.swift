@@ -32,6 +32,7 @@ struct TeacherHomeView: View {
                 .padding(Theme.Space.xl)
                 .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
+                .animation(.easeInOut(duration: 0.2), value: tab)
             }
         }
         .background(AmbientBackground())
@@ -51,7 +52,7 @@ struct TeacherHomeView: View {
                     Button {
                         tab = .live
                     } label: {
-                        Text("Start live assignment").frame(maxWidth: .infinity)
+                        Label("Start live assignment", systemImage: "play.fill").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.glassProminent)
                     .tint(Theme.accent)
@@ -63,9 +64,14 @@ struct TeacherHomeView: View {
             GlassCard {
                 VStack(alignment: .leading, spacing: Theme.Space.sm) {
                     HStack {
-                        Kicker(text: "Assignments")
+                        sectionHeader("doc.text", "Assignments")
                         Spacer()
-                        Button("+ New") {}.buttonStyle(.plain).foregroundStyle(Theme.accent).font(Theme.sans(13, .semibold))
+                        Button("+ New") {}
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Theme.accent)
+                            .font(Theme.sans(13, .semibold))
+                            .linkPointer()
+                            .help("Create a new assignment")
                     }
                     ForEach(app.assignments) { a in
                         HStack {
@@ -76,7 +82,9 @@ struct TeacherHomeView: View {
                             Spacer()
                             Button("Edit") {}.buttonStyle(.glass)
                         }
-                        .padding(.vertical, 6)
+                        .padding(.vertical, Theme.Space.sm)
+                        .padding(.horizontal, Theme.Space.sm)
+                        .rowHover()
                     }
                 }
             }
@@ -84,9 +92,14 @@ struct TeacherHomeView: View {
             GlassCard {
                 VStack(alignment: .leading, spacing: Theme.Space.sm) {
                     HStack {
-                        Kicker(text: "Classes")
+                        sectionHeader("person.2", "Classes")
                         Spacer()
-                        Button("+ New") {}.buttonStyle(.plain).foregroundStyle(Theme.accent).font(Theme.sans(13, .semibold))
+                        Button("+ New") {}
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Theme.accent)
+                            .font(Theme.sans(13, .semibold))
+                            .linkPointer()
+                            .help("Create a new class")
                     }
                     ForEach(app.teacherClasses) { c in
                         HStack {
@@ -97,7 +110,9 @@ struct TeacherHomeView: View {
                             Spacer()
                             Button("Roster") {}.buttonStyle(.glass)
                         }
-                        .padding(.vertical, 6)
+                        .padding(.vertical, Theme.Space.sm)
+                        .padding(.horizontal, Theme.Space.sm)
+                        .rowHover()
                     }
                 }
             }
@@ -119,7 +134,7 @@ struct TeacherHomeView: View {
                             Text("ABC234").font(.system(size: 14, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.inkSoft)
                         }
                         Spacer()
-                        Button("End session") {}.buttonStyle(.glass)
+                        Button("End session") {}.buttonStyle(.glass).help("Close this session for all students")
                     }
                 }
             }
@@ -127,21 +142,21 @@ struct TeacherHomeView: View {
             GlassCard(padding: 0) {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack {
-                        Kicker(text: "Roster  \(app.roster.count)")
+                        sectionHeader("person.3", "Roster  \(app.roster.count)")
                         Spacer()
                         Button("Review essays") {}.buttonStyle(.glass)
                     }
-                    .padding(.horizontal, 22).padding(.top, 16).padding(.bottom, 10)
-                    Divider().opacity(0.4).padding(.horizontal, 22)
+                    .padding(.horizontal, Theme.Space.xl).padding(.top, Theme.Space.lg).padding(.bottom, Theme.Space.sm)
+                    Divider().opacity(0.4).padding(.horizontal, Theme.Space.xl)
                     ForEach(Array(app.roster.enumerated()), id: \.element.id) { idx, s in
-                        if idx > 0 { Divider().opacity(0.4).padding(.horizontal, 22) }
-                        HStack {
+                        if idx > 0 { Divider().opacity(0.4).padding(.horizontal, Theme.Space.xl) }
+                        HStack(spacing: Theme.Space.md) {
                             Text(s.name).font(Theme.sans(14)).foregroundStyle(Theme.inkSoft)
                             Spacer()
                             Text(s.networkSame ? "Same Wi-Fi" : "Different network").font(Theme.sans(12.5)).foregroundStyle(s.networkSame ? Theme.muted : Theme.warn)
                             Chip(text: s.status.capitalized, kind: s.signal == .ok ? .good : .warn)
                         }
-                        .padding(.horizontal, 22).padding(.vertical, 13)
+                        .padding(.horizontal, Theme.Space.xl).padding(.vertical, 13)
                     }
                 }
             }
@@ -149,6 +164,18 @@ struct TeacherHomeView: View {
     }
 
     // MARK: Helpers
+
+    /// A small leading SF Symbol paired with the standard Kicker label, for a
+    /// more native section header without symbol-spamming.
+    private func sectionHeader(_ symbol: String, _ title: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.muted)
+            Kicker(text: title)
+        }
+    }
+
     private func labeledPicker(_ label: String, _ value: String, _ options: [String], _ onPick: @escaping (String) -> Void) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Kicker(text: label)
@@ -163,6 +190,7 @@ struct TeacherHomeView: View {
                 .padding(.vertical, 9).padding(.horizontal, 12)
                 .background(.white.opacity(0.6), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.black.opacity(0.12)))
+                .linkPointer()
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)

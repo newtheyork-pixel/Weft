@@ -5,6 +5,37 @@
 
 import SwiftUI
 
+// MARK: - Native interaction helpers
+
+/// A subtle, native-feeling hover highlight for clickable rows/cards — the
+/// macOS list-row behaviour. Pairs a faint accent wash with the link pointer.
+struct RowHover: ViewModifier {
+    var corner: CGFloat = Theme.Radius.sm
+    var strength: Double = 0.06
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: corner, style: .continuous)
+                    .fill(Theme.accent.opacity(hovering ? strength : 0))
+            )
+            .pointerStyle(.link)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+extension View {
+    /// Subtle hover wash + link cursor for a clickable row or card.
+    func rowHover(corner: CGFloat = Theme.Radius.sm, strength: Double = 0.06) -> some View {
+        modifier(RowHover(corner: corner, strength: strength))
+    }
+
+    /// Link pointer on hover, for inline text buttons that don't get a wash.
+    func linkPointer() -> some View { pointerStyle(.link) }
+}
+
 /// Small uppercase section label.
 struct Kicker: View {
     let text: String

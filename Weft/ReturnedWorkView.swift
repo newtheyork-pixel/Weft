@@ -126,11 +126,16 @@ struct ReturnedWorkView: View {
         Button {
             app.goToHome()
         } label: {
-            Text("Back to my assignments")
-                .font(Theme.sans(13, .semibold))
+            HStack(spacing: 5) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("Back to my assignments")
+                    .font(Theme.sans(13, .semibold))
+            }
         }
         .buttonStyle(.glass)
         .tint(Theme.accent)
+        .help("Return to your assignments")
     }
 
     private var topBar: some View {
@@ -141,16 +146,36 @@ struct ReturnedWorkView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: Theme.Space.md)
-            Text(returnedDateLabel(selected.releasedAt))
-                .font(Theme.sans(12))
-                .foregroundStyle(Theme.muted)
-                .lineLimit(1)
+            if selected.releasedAt != nil {
+                HStack(spacing: 5) {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.muted)
+                    Text(returnedDateLabel(selected.releasedAt))
+                        .font(Theme.sans(12))
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(1)
+                }
+            }
         }
         .padding(.horizontal, Theme.Space.xl)
         .padding(.vertical, Theme.Space.md)
         .background(.regularMaterial)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.black.opacity(0.06)).frame(height: 1)
+        }
+    }
+
+    // MARK: Section header (Kicker with a small leading SF Symbol)
+
+    /// A Kicker paired with a restrained leading glyph so the rail sections read
+    /// a little more native. Mirrors the muted Kicker styling.
+    private func kickerRow(_ symbol: String, _ text: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.muted)
+            Kicker(text: text)
         }
     }
 
@@ -174,7 +199,7 @@ struct ReturnedWorkView: View {
     private var listPane: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                Kicker(text: "Your essays")
+                kickerRow("doc.text", "Your essays")
                     .padding(.horizontal, Theme.Space.lg)
                     .padding(.top, Theme.Space.lg)
                     .padding(.bottom, Theme.Space.sm)
@@ -213,8 +238,11 @@ struct ReturnedWorkView: View {
                 RoundedRectangle(cornerRadius: Theme.Radius.sm)
                     .fill(isActive ? Theme.accent.opacity(0.10) : Color.clear)
             )
+            .animation(.easeOut(duration: 0.15), value: isActive)
         }
         .buttonStyle(.plain)
+        .rowHover()
+        .help(essay.title)
     }
 
     // MARK: Centre — read-only essay "paper" (clean WHITE opaque card)
@@ -226,6 +254,7 @@ struct ReturnedWorkView: View {
                     paragraphText(para)
                 }
             }
+            .animation(.easeOut(duration: 0.18), value: activeCommentId)
             .padding(.horizontal, 56)
             .padding(.vertical, 56)
             .frame(maxWidth: 760, alignment: .leading)
@@ -268,7 +297,7 @@ struct ReturnedWorkView: View {
             VStack(alignment: .leading, spacing: Theme.Space.lg) {
                 scoreCard
                 finalCommentCard
-                Kicker(text: "Comments on your essay")
+                kickerRow("bubble.left.and.text.bubble.right", "Comments on your essay")
                     .padding(.top, Theme.Space.xs)
                 commentsList
             }
@@ -281,7 +310,7 @@ struct ReturnedWorkView: View {
 
     private var scoreCard: some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
-            Kicker(text: "Score")
+            kickerRow("checkmark.seal", "Score")
             if let points = selected.points {
                 HStack(alignment: .firstTextBaseline, spacing: 2) {
                     Text(fmtPoints(points))
@@ -323,6 +352,7 @@ struct ReturnedWorkView: View {
                 Capsule()
                     .fill(Theme.accent)
                     .frame(width: geo.size.width * CGFloat(selected.percent) / 100)
+                    .animation(.easeOut(duration: 0.35), value: selected.percent)
             }
         }
         .frame(height: 8)
@@ -332,7 +362,7 @@ struct ReturnedWorkView: View {
     private var finalCommentCard: some View {
         let fb = selected.feedback.trimmingCharacters(in: .whitespacesAndNewlines)
         return VStack(alignment: .leading, spacing: Theme.Space.sm) {
-            Kicker(text: "Overall comment from your teacher")
+            kickerRow("text.quote", "Overall comment from your teacher")
             Text(fb.isEmpty ? "No overall comment." : fb)
                 .font(Theme.sans(14))
                 .foregroundStyle(fb.isEmpty ? Theme.muted : Theme.inkSoft)
@@ -417,8 +447,11 @@ struct ReturnedWorkView: View {
             )
             .shadow(color: active ? Theme.accent.opacity(0.18) : .clear,
                     radius: active ? 8 : 0, x: 0, y: 2)
+            .animation(.easeOut(duration: 0.18), value: active)
         }
         .buttonStyle(.plain)
+        .rowHover()
+        .help(active ? "Hide this comment's highlight" : "Show this comment's highlight in the essay")
     }
 
     // MARK: Empty state

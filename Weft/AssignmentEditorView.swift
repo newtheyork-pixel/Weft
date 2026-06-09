@@ -112,9 +112,14 @@ struct TemplatePickerView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Start a new assignment")
-                .font(Theme.serif(20, .semibold))
-                .foregroundStyle(Theme.inkSoft)
+            HStack(spacing: Theme.Space.sm) {
+                Image(systemName: "doc.badge.plus")
+                    .font(.system(size: 18, weight: .regular))
+                    .foregroundStyle(Theme.accent)
+                Text("Start a new assignment")
+                    .font(Theme.serif(20, .semibold))
+                    .foregroundStyle(Theme.inkSoft)
+            }
             Text("Pick a starting point. You can change everything in the next step.")
                 .font(Theme.sans(13))
                 .foregroundStyle(Theme.muted)
@@ -154,8 +159,10 @@ struct TemplatePickerView: View {
                     .strokeBorder(isOn ? Theme.accent : Color.black.opacity(0.10),
                                   lineWidth: isOn ? 1.5 : 1)
             )
+            .animation(.easeOut(duration: 0.16), value: isOn)
         }
         .buttonStyle(.plain)
+        .rowHover(corner: Theme.Radius.md)
         .accessibilityAddTraits(isOn ? [.isSelected] : [])
     }
 
@@ -168,6 +175,8 @@ struct TemplatePickerView: View {
         }
         .buttonStyle(.plain)
         .padding(Theme.Space.md)
+        .help("Close")
+        .linkPointer()
         .accessibilityLabel("Close")
     }
 }
@@ -242,7 +251,10 @@ struct AssignmentEditorView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: Theme.Space.sm) {
+                Image(systemName: isNew ? "square.and.pencil" : "pencil.and.outline")
+                    .font(.system(size: 18, weight: .regular))
+                    .foregroundStyle(Theme.accent)
                 Text(heading)
                     .font(Theme.serif(20, .semibold))
                     .foregroundStyle(Theme.inkSoft)
@@ -256,6 +268,7 @@ struct AssignmentEditorView: View {
                     .foregroundStyle(Theme.accent)
             }
             .buttonStyle(.plain)
+            .linkPointer()
         }
     }
 
@@ -336,11 +349,13 @@ struct AssignmentEditorView: View {
                 Button {
                     addMockFile()
                 } label: {
-                    Text("+ Attach file")
+                    Label("Attach file", systemImage: "paperclip")
                         .font(Theme.sans(13, .semibold))
                         .foregroundStyle(Theme.accent)
                 }
                 .buttonStyle(.plain)
+                .linkPointer()
+                .help("Attach a reference file students can open")
             }
 
             if files.isEmpty {
@@ -364,16 +379,24 @@ struct AssignmentEditorView: View {
                             Text(file.size)
                                 .font(Theme.sans(12))
                                 .foregroundStyle(Theme.muted2)
-                            Button("Remove") { files.removeAll { $0.id == file.id } }
-                                .buttonStyle(.plain)
-                                .font(Theme.sans(12, .semibold))
-                                .foregroundStyle(Theme.bad)
+                            Button("Remove") {
+                                withAnimation(.easeOut(duration: 0.18)) {
+                                    files.removeAll { $0.id == file.id }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .font(Theme.sans(12, .semibold))
+                            .foregroundStyle(Theme.bad)
+                            .linkPointer()
+                            .help("Remove this file")
                         }
                         .padding(.vertical, 8)
                         .padding(.horizontal, 12)
                         .background(fieldBackground)
+                        .rowHover()
                     }
                 }
+                .animation(.easeOut(duration: 0.18), value: files)
             }
         }
     }
@@ -403,13 +426,19 @@ struct AssignmentEditorView: View {
                         .background(fieldBackground)
                     Button("Add") { addLink() }
                         .buttonStyle(.glass)
+                        .help("Add this website to the allow list")
                 }
             }
 
             if let linkError {
-                Text(linkError)
-                    .font(Theme.sans(12, .semibold))
-                    .foregroundStyle(Theme.bad)
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                    Text(linkError)
+                        .font(Theme.sans(12, .semibold))
+                }
+                .foregroundStyle(Theme.bad)
+                .transition(.opacity)
             }
 
             if links.isEmpty {
@@ -425,8 +454,10 @@ struct AssignmentEditorView: View {
                         linkRow($link)
                     }
                 }
+                .animation(.easeOut(duration: 0.18), value: links)
             }
         }
+        .animation(.easeOut(duration: 0.16), value: linkError)
     }
 
     private func linkRow(_ link: Binding<EditorLink>) -> some View {
@@ -452,26 +483,37 @@ struct AssignmentEditorView: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .frame(width: 140)
+            .help("Choose whether students can open the whole site or only this page")
             Button("Remove") {
-                links.removeAll { $0.id == link.wrappedValue.id }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    links.removeAll { $0.id == link.wrappedValue.id }
+                }
             }
             .buttonStyle(.plain)
             .font(Theme.sans(12, .semibold))
             .foregroundStyle(Theme.bad)
+            .linkPointer()
+            .help("Remove this website")
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
         .background(fieldBackground)
+        .rowHover()
     }
 
     // MARK: Footer
 
     private var footer: some View {
         HStack(spacing: Theme.Space.md) {
-            Button(didSave ? "Saved" : "Save assignment") { save() }
-                .buttonStyle(.glassProminent)
-                .tint(Theme.accent)
-                .disabled(didSave)
+            Button {
+                save()
+            } label: {
+                Label(didSave ? "Saved" : "Save assignment",
+                      systemImage: didSave ? "checkmark" : "tray.and.arrow.down")
+            }
+            .buttonStyle(.glassProminent)
+            .tint(Theme.accent)
+            .disabled(didSave)
             Button("Cancel") { onCancel() }
                 .buttonStyle(.glass)
             Spacer()
@@ -483,8 +525,10 @@ struct AssignmentEditorView: View {
                         .font(Theme.sans(13, .semibold))
                         .foregroundStyle(Theme.good)
                 }
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
         }
+        .animation(.easeOut(duration: 0.2), value: didSave)
     }
 
     private var closeButton: some View {
@@ -496,6 +540,8 @@ struct AssignmentEditorView: View {
         }
         .buttonStyle(.plain)
         .padding(Theme.Space.md)
+        .help("Close")
+        .linkPointer()
         .accessibilityLabel("Close")
     }
 
@@ -569,7 +615,9 @@ struct AssignmentEditorView: View {
 
     private func addMockFile() {
         let n = files.count + 1
-        files.append(EditorFile(name: "reference-\(n).pdf", size: "248 KB"))
+        withAnimation(.easeOut(duration: 0.18)) {
+            files.append(EditorFile(name: "reference-\(n).pdf", size: "248 KB"))
+        }
     }
 
     private func addLink() {
@@ -584,7 +632,9 @@ struct AssignmentEditorView: View {
             linkError = "Use a full address starting with https://"
             return
         }
-        links.append(EditorLink(name: name.isEmpty ? href : name, href: href))
+        withAnimation(.easeOut(duration: 0.18)) {
+            links.append(EditorLink(name: name.isEmpty ? href : name, href: href))
+        }
         newLinkName = ""
         newLinkHref = ""
     }

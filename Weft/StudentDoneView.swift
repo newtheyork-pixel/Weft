@@ -113,14 +113,9 @@ struct StudentDoneView: View {
 
     private var head: some View {
         HStack(spacing: 9) {
-            ZStack {
-                Circle()
-                    .fill(Theme.accent.opacity(0.12))
-                    .frame(width: 18, height: 18)
-                Circle()
-                    .stroke(Theme.accent, lineWidth: 1.5)
-                    .frame(width: 8, height: 8)
-            }
+            Image(systemName: "lock.shield")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Theme.accent)
             Text("What we captured, and how long it is kept")
                 .font(Theme.sans(15, .semibold))
                 .foregroundStyle(Theme.inkSoft)
@@ -146,6 +141,7 @@ struct StudentDoneView: View {
                 .padding(.vertical, 9)
             }
         }
+        .animation(.easeOut(duration: 0.18), value: rows.count)
     }
 
     private var retention: some View {

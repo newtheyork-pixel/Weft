@@ -9,6 +9,8 @@ struct SignInView: View {
     @Environment(AppState.self) private var app
 
     private var busy: Bool { app.isLoading }
+    @State private var googleHovering = false
+    @State private var googlePressed = false
 
     var body: some View {
         ZStack {
@@ -77,29 +79,48 @@ struct SignInView: View {
                 .background(.white, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .strokeBorder(Color.black.opacity(0.12))
+                        .strokeBorder(Color.black.opacity(googleHovering ? 0.20 : 0.12))
                 )
+                .shadow(color: Color.black.opacity(googleHovering ? 0.12 : 0.06),
+                        radius: googleHovering ? 7 : 4, y: googleHovering ? 3 : 2)
+                .scaleEffect(googlePressed ? 0.98 : 1)
             }
             .buttonStyle(.plain)
             .disabled(busy)
+            .pointerStyle(.link)
+            .onHover { googleHovering = $0 }
+            .animation(.easeOut(duration: 0.14), value: googleHovering)
+            .animation(.easeOut(duration: 0.12), value: googlePressed)
+            .help("Sign in with your gcschool.org Google account")
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in googlePressed = true }
+                    .onEnded { _ in googlePressed = false }
+            )
 
             if let error = app.errorMessage {
-                Text(error)
-                    .font(Theme.sans(12.5))
-                    .foregroundStyle(Theme.bad)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .transition(.opacity)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                    Text(error)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(Theme.sans(12.5))
+                .foregroundStyle(Theme.bad)
+                .transition(.opacity)
             } else {
                 Text("Use your gcschool.org Google account")
                     .font(Theme.sans(12.5))
                     .foregroundStyle(Theme.muted)
+                    .transition(.opacity)
             }
         }
         .padding(Theme.Space.xl)
         .frame(maxWidth: .infinity)
         .weftGlass(Theme.Radius.lg)
         .animation(.easeOut(duration: 0.2), value: app.errorMessage)
+        .animation(.easeOut(duration: 0.18), value: busy)
     }
 
     // MARK: Role chooser (glass)
@@ -113,20 +134,34 @@ struct SignInView: View {
 
             HStack(spacing: Theme.Space.md) {
                 VStack(spacing: 5) {
-                    Button("Teacher view") { app.enterTeacher() }
-                        .buttonStyle(.glassProminent)
-                        .tint(Theme.accent)
-                        .controlSize(.large)
-                        .frame(maxWidth: .infinity)
+                    Button {
+                        app.enterTeacher()
+                    } label: {
+                        Label("Teacher view", systemImage: "person.fill.checkmark")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .tint(Theme.accent)
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity)
+                    .pointerStyle(.link)
+                    .help("Run and grade exams")
                     Text("RECOMMENDED")
                         .font(.system(size: 9, weight: .bold))
                         .tracking(0.9)
                         .foregroundStyle(Theme.good)
                 }
-                Button("Student view") { app.enterStudent() }
-                    .buttonStyle(.glass)
-                    .controlSize(.large)
-                    .frame(maxWidth: .infinity)
+                Button {
+                    app.enterStudent()
+                } label: {
+                    Label("Student view", systemImage: "square.and.pencil")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.glass)
+                .controlSize(.large)
+                .frame(maxWidth: .infinity)
+                .pointerStyle(.link)
+                .help("Take an exam")
             }
         }
         .padding(Theme.Space.xl)

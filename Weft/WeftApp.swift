@@ -38,7 +38,23 @@ struct WeftApp: App {
             .frame(minWidth: 900, minHeight: 640)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1000, height: 800)
+        .defaultSize(width: 1100, height: 820)
+        .commands {
+            // Trim Mac menus that don't apply to a single-window exam app, and
+            // add an account command.
+            CommandGroup(replacing: .newItem) {}
+            CommandGroup(after: .appSettings) {
+                if app.role != nil {
+                    Divider()
+                    Button("Sign Out") { app.signOut() }
+                }
+            }
+        }
+
+        Settings {
+            SettingsView()
+                .environment(app)
+        }
     }
 }
 

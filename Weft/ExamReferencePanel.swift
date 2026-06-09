@@ -21,6 +21,7 @@ struct ExamReferencePanel: View {
     let signedIn: Bool
     var onHide: () -> Void
 
+    @AppStorage(Prefs.referenceDefaultMode) private var defaultMode = "split"
     @State private var mode: ReferenceMode = .split
     @State private var selectedFileID: String?
     @State private var selectedLinkID: String?
@@ -208,7 +209,9 @@ struct ExamReferencePanel: View {
     private func primeSelection() async {
         if selectedFileID == nil { selectedFileID = files.first?.id }
         if selectedLinkID == nil { selectedLinkID = links.first?.id }
-        // Pick a sensible default mode if one side is empty.
+        // Start from the user's preferred default layout…
+        mode = ReferenceMode(rawValue: defaultMode) ?? .split
+        // …then fall back if one side has nothing to show.
         if files.isEmpty && !links.isEmpty { mode = .web }
         else if links.isEmpty && !files.isEmpty { mode = .pdf }
         await loadPDF()
