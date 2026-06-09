@@ -7,7 +7,8 @@ import SwiftUI
 
 struct SignInView: View {
     @Environment(AppState.self) private var app
-    @State private var busy = false
+
+    private var busy: Bool { app.isLoading }
 
     var body: some View {
         ZStack {
@@ -59,7 +60,7 @@ struct SignInView: View {
     private var signInCard: some View {
         VStack(spacing: Theme.Space.md) {
             Button {
-                app.enterTeacher()
+                Task { await app.signInWithGoogle() }
             } label: {
                 HStack(spacing: 10) {
                     if busy {
@@ -82,19 +83,29 @@ struct SignInView: View {
             .buttonStyle(.plain)
             .disabled(busy)
 
-            Text("Use your gcschool.org Google account")
-                .font(Theme.sans(12.5))
-                .foregroundStyle(Theme.muted)
+            if let error = app.errorMessage {
+                Text(error)
+                    .font(Theme.sans(12.5))
+                    .foregroundStyle(Theme.bad)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .transition(.opacity)
+            } else {
+                Text("Use your gcschool.org Google account")
+                    .font(Theme.sans(12.5))
+                    .foregroundStyle(Theme.muted)
+            }
         }
         .padding(Theme.Space.xl)
         .frame(maxWidth: .infinity)
         .weftGlass(Theme.Radius.lg)
+        .animation(.easeOut(duration: 0.2), value: app.errorMessage)
     }
 
     // MARK: Role chooser (glass)
     private var roleCard: some View {
         VStack(spacing: Theme.Space.lg) {
-            Text("You're an admin. Most users skip this. Teacher view runs and grades exams. Student view takes an exam (for testing).")
+            Text(roleCardCopy)
                 .font(Theme.sans(13))
                 .foregroundStyle(Theme.muted)
                 .multilineTextAlignment(.center)
@@ -121,6 +132,17 @@ struct SignInView: View {
         .padding(Theme.Space.xl)
         .frame(maxWidth: .infinity)
         .weftGlass(Theme.Radius.lg)
+    }
+
+    /// Honest framing for both states: signed-in admins (whose role couldn't be
+    /// auto-resolved) pick a view here; everyone else can use it to preview the
+    /// app without signing in.
+    private var roleCardCopy: String {
+        if app.signedIn {
+            return "Choose how to continue. Teacher view runs and grades exams. Student view takes an exam."
+        } else {
+            return "Or preview without signing in. Teacher view runs and grades exams. Student view takes an exam."
+        }
     }
 
     private var footer: some View {

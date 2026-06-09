@@ -21,6 +21,26 @@ struct ClassRoom: Identifiable, Codable, Hashable, Sendable {
     var joinCode: String
     var archivedAt: Date?
 
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case joinCode = "join_code"
+        case archivedAt = "archived_at"
+    }
+
+    init(id: String, name: String, joinCode: String, archivedAt: Date?) {
+        self.id = id; self.name = name; self.joinCode = joinCode; self.archivedAt = archivedAt
+    }
+
+    /// Tolerant decode: `join_class_by_code` returns id + name but not always a
+    /// `join_code` for the joiner, so default it rather than throwing keyNotFound.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        joinCode = (try? c.decode(String.self, forKey: .joinCode)) ?? ""
+        archivedAt = try? c.decode(Date.self, forKey: .archivedAt)
+    }
+
     static let sample = ClassRoom(id: "c1", name: "AP English", joinCode: "ABC234", archivedAt: nil)
     static let sample2 = ClassRoom(id: "c2", name: "Biology", joinCode: "BIO901", archivedAt: nil)
 }
@@ -64,6 +84,12 @@ struct ExamSession: Identifiable, Codable, Hashable, Sendable {
     var testId: String?
     var classId: String?
     var status: String        // "open" | "closed"
+
+    enum CodingKeys: String, CodingKey {
+        case id, code, status
+        case testId = "test_id"
+        case classId = "class_id"
+    }
 }
 
 // MARK: - Student-facing class work (the list_class_work RPC row)
@@ -80,6 +106,18 @@ struct ClassWorkItem: Identifiable, Codable, Hashable, Sendable {
     var myPointsPossible: Double?
 
     var id: String { versionGroupId }
+
+    enum CodingKeys: String, CodingKey {
+        case versionGroupId = "version_group_id"
+        case title
+        case activeSessionId = "active_session_id"
+        case activeCode = "active_code"
+        case launchedAt = "launched_at"
+        case mySubmittedAt = "my_submitted_at"
+        case myReleasedAt = "my_released_at"
+        case myPoints = "my_points"
+        case myPointsPossible = "my_points_possible"
+    }
 
     enum Section { case active, graded, past }
 

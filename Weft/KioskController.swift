@@ -91,6 +91,17 @@ final class KioskController {
     /// True while we are still inside the post-entry settle window.
     private var settling: Bool { Date().timeIntervalSince(enteredAt) < settleInterval }
 
+    // MARK: Proctor hooks (the file-header TODO, wired)
+
+    /// Fired when, PAST the settle window, the student genuinely leaves the exam
+    /// window (an app switch or a forced exit from full-screen). The exam layer
+    /// uses this to black the question out — the native analogue of the Electron
+    /// `win.webContents.send('proctor:focus-lost')` / panicBlackout. The overlay
+    /// is cleared deterministically by the student (a Resume action), NOT by a
+    /// key-window notification — re-keying the window from the fight-back makes a
+    /// becomeKey-based auto-clear race the very blackout it would dismiss.
+    var onBlackout: (@MainActor () -> Void)?
+
     init() {}
 
     // MARK: Enter
@@ -101,9 +112,19 @@ final class KioskController {
     /// tears down any previous lock so observers and saved state never stack
     /// (the Electron `if (_kioskCleanup) _kioskCleanup()` guard).
     func enterKiosk(window: NSWindow) {
-        // Re-entry (e.g. resume after a transient exit) must not stack
-        // observers or clobber saved state — tear the previous lock down first.
-        if lockedWindow != nil {
+        // Re-entry (e.g. resume after a transient exit) must not stack observers
+        // or clobber saved state. If a DIFFERENT window is still locked, fully
+        // restore it first (level/sharing/full-screen) so we never strand it
+        // pinned-above-everything with content protection on; otherwise just
+        // drop the stale observers.
+        if let previous = lockedWindow, previous !== window {
+            teardownObservers()
+            previous.level = savedLevel
+            previous.sharingType = savedSharingType
+            if previous.styleMask.contains(.fullScreen) {
+                previous.toggleFullScreen(nil)
+            }
+        } else if lockedWindow != nil {
             teardownObservers()
         }
 
@@ -272,15 +293,12 @@ final class KioskController {
         // Electron build. Re-assert level only and return.
         if settling { return }
 
-        // Past settle: a genuine app switch. Re-grab and front.
+        // Past settle: a genuine app switch. Raise the blackout FIRST (so it is
+        // already up as the window comes forward), then re-grab and front. The
+        // overlay stays until the student explicitly resumes.
+        onBlackout?()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-
-        // TODO(proctor): notify the exam layer to black out the question
-        // (the Electron `win.webContents.send('proctor:focus-lost')` /
-        // panicBlackout). In the native app this becomes a callback or an
-        // AppState flag the StudentChecksView / exam view observes. Left as a
-        // hook so this file stays self-contained and compiles standalone.
     }
 
     /// The window left the full-screen space. Re-enter it. During settle this

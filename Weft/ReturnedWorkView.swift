@@ -77,12 +77,28 @@ private func returnedDateLabel(_ d: Date?) -> String {
 struct ReturnedWorkView: View {
     @Environment(AppState.self) private var app
 
-    private let essays: [ReturnedEssay] = ReturnedWorkView.sampleEssays
     @State private var selectedId: String = ReturnedWorkView.sampleEssays.first?.id ?? ""
     @State private var activeCommentId: String?
 
+    /// Mapped essays, cached so the HTML parse runs only when the source changes
+    /// (not on every render). Seeded with the sample for the gallery; replaced by
+    /// `recomputeEssays()` once a real load resolves.
+    @State private var essays: [ReturnedEssay] = ReturnedWorkView.sampleEssays
+
     private var selected: ReturnedEssay {
-        essays.first(where: { $0.id == selectedId }) ?? essays[0]
+        essays.first(where: { $0.id == selectedId }) ?? essays.first
+            ?? ReturnedWorkView.sampleEssays[0]
+    }
+
+    /// Rebuild `essays` from the source of truth: real released work when signed
+    /// in, the rich sample only in the not-signed-in (gallery / unsigned) case.
+    private func recomputeEssays() {
+        let real = app.returnedWork.map(Self.makeEssay)
+        essays = real.isEmpty ? (app.useMockData ? Self.sampleEssays : []) : real
+        if !essays.contains(where: { $0.id == selectedId }) {
+            selectedId = essays.first?.id ?? ""
+            activeCommentId = nil
+        }
     }
 
     var body: some View {
@@ -96,13 +112,19 @@ struct ReturnedWorkView: View {
             }
         }
         .background(AmbientBackground())
+        .task {
+            recomputeEssays()
+            await app.loadReturnedWork()
+            recomputeEssays()
+        }
+        .onChange(of: app.returnedWork) { _, _ in recomputeEssays() }
     }
 
     // MARK: Top-bar (back + title + returned date)
 
     private var backButton: some View {
         Button {
-            app.route = .student
+            app.goToHome()
         } label: {
             Text("Back to my assignments")
                 .font(Theme.sans(13, .semibold))
@@ -412,7 +434,7 @@ struct ReturnedWorkView: View {
                 .foregroundStyle(Theme.muted)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
-            Button("Back to my assignments") { app.route = .student }
+            Button("Back to my assignments") { app.goToHome() }
                 .buttonStyle(.glassProminent)
                 .tint(Theme.accent)
                 .padding(.top, Theme.Space.xs)
@@ -420,6 +442,56 @@ struct ReturnedWorkView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(Theme.Space.xxxl)
+    }
+}
+
+// MARK: - Real data mapping (ReturnedWorkItem -> presentation model)
+
+private extension ReturnedWorkView {
+    /// Map a released-work DTO into the read-only presentation model. The body
+    /// HTML is flattened to plain paragraphs (the inline-highlight ranges from
+    /// the web build aren't reconstructed here; the teacher's comments still show
+    /// in the right rail).
+    nonisolated static func makeEssay(_ item: ReturnedWorkItem) -> ReturnedEssay {
+        ReturnedEssay(
+            id: item.submissionId,
+            title: "Your essay",
+            releasedAt: item.releasedAt,
+            points: item.points,
+            pointsPossible: item.pointsPossible,
+            paragraphs: paragraphs(fromHTML: item.contentHtml),
+            feedback: item.feedback,
+            comments: item.comments.map { c in
+                InlineComment(id: c.id, quote: c.quote ?? "", body: c.body)
+            }
+        )
+    }
+
+    /// Cheap HTML → paragraphs: turn block-level closers into line breaks, strip
+    /// the remaining tags, decode the few common entities, and split into blocks.
+    nonisolated static func paragraphs(fromHTML html: String) -> [EssayParagraph] {
+        var s = html
+        for tag in ["</p>", "<br>", "<br/>", "<br />", "</div>", "</h1>", "</h2>", "</h3>", "</li>"] {
+            s = s.replacingOccurrences(of: tag, with: "\n", options: .caseInsensitive)
+        }
+        let stripped = s.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        let decoded = decodeEntities(stripped)
+        let blocks = decoded
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let paras = blocks.isEmpty ? [decoded.trimmingCharacters(in: .whitespacesAndNewlines)] : blocks
+        return paras
+            .filter { !$0.isEmpty }
+            .map { EssayParagraph(runs: [EssayRun(text: $0, commentId: nil)]) }
+    }
+
+    nonisolated static func decodeEntities(_ s: String) -> String {
+        var out = s
+        let map = ["&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"",
+                   "&#39;": "'", "&apos;": "'", "&nbsp;": " ", "&mdash;": "—", "&ndash;": "–"]
+        for (k, v) in map { out = out.replacingOccurrences(of: k, with: v) }
+        return out
     }
 }
 

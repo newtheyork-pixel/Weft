@@ -7,10 +7,18 @@
 
 import SwiftUI
 
-/// Covers the screen if screen-sharing/recording software appears mid-exam.
-/// Calm, not punitive: close the app and writing resumes automatically.
+/// Full-screen blackout overlay used mid-exam — either because screen-sharing /
+/// recording software appeared, or because the student left the exam window.
+/// Calm, not punitive. Defaults reproduce the original screen-sharing copy so the
+/// dev gallery preview is unchanged.
 struct StudentBlockedView: View {
-    var detectedApp: String = "zoom.us"
+    var title: String = "Writing paused"
+    var message: String = "Screen-sharing software was detected on this machine:"
+    /// The monospaced highlight line (an app name); nil hides it.
+    var detail: String? = "zoom.us"
+    var footnote: String = "Close it and your writing will resume automatically. Your teacher has been notified."
+    var submitTitle: String? = "Can't close it? Submit and exit"
+    var onSubmit: () -> Void = {}
 
     var body: some View {
         ZStack {
@@ -19,25 +27,30 @@ struct StudentBlockedView: View {
                 Image(systemName: "pause.circle.fill")
                     .font(.system(size: 44))
                     .foregroundStyle(.white.opacity(0.9))
-                Text("Writing paused")
+                Text(title)
                     .font(Theme.serif(26, .semibold))
                     .foregroundStyle(.white)
-                Text("Screen-sharing software was detected on this machine:")
-                    .font(Theme.sans(14))
-                    .foregroundStyle(.white.opacity(0.8))
-                    .multilineTextAlignment(.center)
-                Text(detectedApp)
-                    .font(.system(size: 18, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(Color(red: 1.0, green: 0.45, blue: 0.45))
-                Text("Close it and your writing will resume automatically. Your teacher has been notified.")
+                Text(message)
                     .font(Theme.sans(14))
                     .foregroundStyle(.white.opacity(0.8))
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 380)
-                Button("Can't close it? Submit and exit") {}
-                    .buttonStyle(.bordered)
-                    .tint(.red)
-                    .padding(.top, Theme.Space.sm)
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color(red: 1.0, green: 0.45, blue: 0.45))
+                }
+                Text(footnote)
+                    .font(Theme.sans(14))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 380)
+                if let submitTitle {
+                    Button(submitTitle, action: onSubmit)
+                        .buttonStyle(.bordered)
+                        .tint(.red)
+                        .padding(.top, Theme.Space.sm)
+                }
             }
             .padding(Theme.Space.xxxl)
         }

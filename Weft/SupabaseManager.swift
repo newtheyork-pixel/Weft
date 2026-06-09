@@ -274,6 +274,46 @@ final class SupabaseManager: @unchecked Sendable {
         try await rpc("get_my_returned_work")
     }
 
+    /// The signed-in student's classes, via the documented enrollment join
+    /// (`class_enrollments` → `classes`). Mirrors student.js's class list. The
+    /// enrollment row doesn't carry the join code, so `joinCode` is left empty
+    /// (the student home never shows it).
+    func myClasses(userId: String) async throws -> [ClassRoom] {
+        let rows: [EnrollmentRow] = try await rows("class_enrollments", query: [
+            URLQueryItem(name: "select", value: "class_id,classes(id,name,archived_at)"),
+            URLQueryItem(name: "user_id", value: "eq.\(userId)")
+        ])
+        return rows.compactMap { row in
+            guard let c = row.classes else { return nil }
+            return ClassRoom(id: c.id, name: c.name, joinCode: "", archivedAt: c.archivedAt)
+        }
+    }
+
+    // MARK: - User & role
+
+    /// Fetch the signed-in user from GoTrue (`/auth/v1/user`). Requires a token.
+    @MainActor
+    func fetchUser() async throws -> AuthUser {
+        guard accessToken != nil else { throw SupabaseError.notSignedIn }
+        var req = URLRequest(url: SupabaseConfig.url.appendingPathComponent("auth/v1/user"))
+        req.httpMethod = "GET"
+        for (k, v) in headers(contentJSON: false) { req.setValue(v, forHTTPHeaderField: k) }
+        let data = try await perform(req)
+        return try decode(AuthUser.self, from: data)
+    }
+
+    /// Best-effort server-side role lookup. The renderer routes teachers via a
+    /// "Teachers sheet"; the native side asks the server through a `get_my_role`
+    /// RPC that returns 'teacher' | 'student' | 'admin'. If that RPC isn't
+    /// deployed (or returns an unexpected shape) this returns nil and the caller
+    /// falls back to the on-screen role chooser. Never throws.
+    func resolveRole() async -> UserRole? {
+        if let raw: String = try? await rpc("get_my_role") {
+            return UserRole(rawValue: raw)
+        }
+        return nil
+    }
+
     // MARK: - Auth (GoTrue) — OAuth PKCE scaffold
 
     /// Kick off Google sign-in: open GoTrue's `/authorize` in a system web
@@ -442,6 +482,56 @@ struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
         case body
         case visibility
         case createdAt = "created_at"
+    }
+}
+
+// MARK: - User & enrollment DTOs
+
+/// The GoTrue user record (`/auth/v1/user`). Google identities put the name in
+/// `user_metadata.full_name` (sometimes just `name`).
+struct AuthUser: Decodable, Sendable {
+    let id: String
+    let email: String?
+    let userMetadata: Metadata?
+
+    struct Metadata: Decodable, Sendable {
+        let fullName: String?
+        let name: String?
+        let picture: String?
+        enum CodingKeys: String, CodingKey {
+            case fullName = "full_name"
+            case name, picture
+        }
+    }
+
+    var displayName: String? { userMetadata?.fullName ?? userMetadata?.name }
+    var avatarURL: String? { userMetadata?.picture }
+
+    enum CodingKeys: String, CodingKey {
+        case id, email
+        case userMetadata = "user_metadata"
+    }
+}
+
+/// One `class_enrollments` row with the embedded class (PostgREST resource
+/// embedding `classes(...)`). Decoded by `myClasses(userId:)`.
+private struct EnrollmentRow: Decodable {
+    let classId: String
+    let classes: ClassInfo?
+
+    struct ClassInfo: Decodable {
+        let id: String
+        let name: String
+        let archivedAt: Date?
+        enum CodingKeys: String, CodingKey {
+            case id, name
+            case archivedAt = "archived_at"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case classId = "class_id"
+        case classes
     }
 }
 

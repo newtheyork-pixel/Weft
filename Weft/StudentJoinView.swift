@@ -128,7 +128,7 @@ struct StudentJoinView: View {
     // MARK: Back link
     private var backLink: some View {
         Button {
-            // Mock: return to the class home.
+            app.goToHome()
         } label: {
             Text("Back to your classes")
                 .font(Theme.sans(13, .semibold))
@@ -139,15 +139,22 @@ struct StudentJoinView: View {
         .padding(.top, Theme.Space.xs)
     }
 
-    // MARK: Mock action
+    // MARK: Join action
     private func join() {
         guard canJoin else { return }
+        let entered = trimmedCode
         joining = true
-        // No backend yet — simulate the join, then show the confirmation.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+        Task {
+            let result = await app.joinClass(code: entered)
             joining = false
-            withAnimation(.easeOut(duration: 0.2)) { joined = true }
-            code = ""
+            if result != nil {
+                withAnimation(.easeOut(duration: 0.2)) { joined = true }
+                code = ""
+                // Let the confirmation read, then return to the class home where
+                // the newly joined class is selected and its work has loaded.
+                try? await Task.sleep(for: .seconds(1.1))
+                app.goToHome()
+            }
         }
     }
 }

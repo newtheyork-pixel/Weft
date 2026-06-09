@@ -8,7 +8,10 @@ import SwiftUI
 
 struct StudentClassHomeView: View {
     @Environment(AppState.self) private var app
-    @State private var selectedClass: ClassRoom?
+
+    private var selectedClass: ClassRoom? {
+        app.enrolledClasses.first { $0.id == app.selectedClassId } ?? app.enrolledClasses.first
+    }
 
     private var active: [ClassWorkItem] { app.classWork.filter { $0.section == .active } }
     private var graded: [ClassWorkItem] { app.classWork.filter { $0.section == .graded } }
@@ -20,10 +23,12 @@ struct StudentClassHomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Space.lg) {
                     intro
+                    if let error = app.errorMessage { errorBanner(error) }
                     classPicker
                     if !active.isEmpty { sectionCard("Active", active) }
                     if !graded.isEmpty { sectionCard("Graded", graded) }
                     if !past.isEmpty { sectionCard("Past", past) }
+                    if active.isEmpty && graded.isEmpty && past.isEmpty { emptyState }
                     joinAnother
                 }
                 .padding(Theme.Space.xl)
@@ -32,7 +37,33 @@ struct StudentClassHomeView: View {
             }
         }
         .background(AmbientBackground())
-        .onAppear { if selectedClass == nil { selectedClass = app.enrolledClasses.first } }
+        .task { await app.loadStudentHome() }
+    }
+
+    private var emptyState: some View {
+        Text("No assignments yet. Join a class with a class code and your work will appear here.")
+            .font(Theme.sans(13))
+            .foregroundStyle(Theme.muted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, Theme.Space.md)
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: Theme.Space.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Theme.warn)
+            Text(message)
+                .font(Theme.sans(12.5))
+                .foregroundStyle(Theme.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button("Retry") { Task { await app.loadStudentHome() } }
+                .buttonStyle(.plain)
+                .font(Theme.sans(12.5, .semibold))
+                .foregroundStyle(Theme.accent)
+        }
+        .padding(Theme.Space.md)
+        .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
     }
 
     // MARK: Intro
@@ -52,7 +83,7 @@ struct StudentClassHomeView: View {
     private var classPicker: some View {
         Menu {
             ForEach(app.enrolledClasses) { c in
-                Button(c.name) { selectedClass = c }
+                Button(c.name) { app.selectClass(c.id) }
             }
         } label: {
             HStack {
@@ -109,7 +140,7 @@ struct StudentClassHomeView: View {
             Spacer()
             switch item.section {
             case .active:
-                Button("Start writing") {}
+                Button("Start writing") { app.startWriting(item) }
                     .buttonStyle(.glassProminent)
                     .tint(Theme.accent)
             case .graded:
@@ -117,7 +148,7 @@ struct StudentClassHomeView: View {
                     Text("\(fmt(item.myPoints)) / \(fmt(item.myPointsPossible))")
                         .font(.system(size: 15, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Theme.inkSoft)
-                    Button("View returned work") {}
+                    Button("View returned work") { app.openReturnedWork() }
                         .buttonStyle(.plain)
                         .font(Theme.sans(13, .semibold))
                         .foregroundStyle(Theme.accent)
@@ -131,6 +162,7 @@ struct StudentClassHomeView: View {
     // MARK: Join another
     private var joinAnother: some View {
         Button {
+            app.goToJoin()
         } label: {
             Text("Join another class")
                 .font(Theme.sans(13, .semibold))

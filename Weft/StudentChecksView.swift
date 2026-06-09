@@ -12,6 +12,9 @@ import SwiftUI
 struct StudentChecksView: View {
     @Environment(AppState.self) private var app
 
+    @State private var report: ProctoringReport?
+    @State private var running = true
+
     /// "What it checks" — grounded in runChecks()/monitorTick() and the in-exam
     /// loops. Honest, plain-language copy ported from renderTrustLabel().
     private let checks: [String] = [
@@ -40,6 +43,7 @@ struct StudentChecksView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Space.lg) {
                     header
+                    statusCard
                     nutritionLabel
                     enterButton
                 }
@@ -49,6 +53,51 @@ struct StudentChecksView: View {
             }
         }
         .background(AmbientBackground())
+        .task {
+            running = true
+            report = await ProctoringEngine().runChecks(teacherIP: nil)
+            running = false
+        }
+    }
+
+    // MARK: Live check status
+    private var statusCard: some View {
+        GlassCard {
+            HStack(spacing: Theme.Space.md) {
+                if running {
+                    ProgressView().controlSize(.small)
+                    Text("Running checks…")
+                        .font(Theme.sans(14, .semibold))
+                        .foregroundStyle(Theme.inkSoft)
+                } else if let report {
+                    Image(systemName: warnings(report).isEmpty ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(warnings(report).isEmpty ? Theme.good : Theme.warn)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(warnings(report).isEmpty ? "All clear" : "Heads up before you start")
+                            .font(Theme.sans(14, .semibold))
+                            .foregroundStyle(Theme.inkSoft)
+                        Text(warnings(report).isEmpty
+                             ? "No monitoring software detected. You can enter the exam."
+                             : warnings(report).joined(separator: " · "))
+                            .font(Theme.sans(12.5))
+                            .foregroundStyle(Theme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    /// Human-readable warnings derived from the report (advisory only; the
+    /// student can still enter — the exam itself blacks out on a live violation).
+    private func warnings(_ r: ProctoringReport) -> [String] {
+        var w: [String] = []
+        if r.screenCapture { w.append("Screen-share/recording app running" + (r.detectedApps.isEmpty ? "" : " (\(r.detectedApps.joined(separator: ", ")))")) }
+        if r.remote { w.append("Remote-control software detected") }
+        if r.displays > 1 { w.append("\(r.displays) displays connected") }
+        if r.isVM { w.append("Running in a virtual machine") }
+        return w
     }
 
     // MARK: Header
@@ -155,15 +204,16 @@ struct StudentChecksView: View {
     // MARK: Enter exam
     private var enterButton: some View {
         Button {
-            // Backend (kiosk enter + monitoring) wires in a later wave.
+            app.enterExam()
         } label: {
-            Text("Enter exam")
+            Text(running ? "Finishing checks…" : "Enter exam")
                 .font(Theme.sans(15, .semibold))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 4)
         }
         .buttonStyle(.glassProminent)
         .tint(Theme.accent)
+        .disabled(running)
         .padding(.top, Theme.Space.xs)
     }
 }

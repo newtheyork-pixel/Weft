@@ -10,6 +10,8 @@
 import SwiftUI
 
 struct StudentDoneView: View {
+    @Environment(AppState.self) private var app
+
     /// Whether screen pictures were captured this session (governs the
     /// "Screen pictures" row). In Electron this row is always pushed; webcam
     /// stills are conditional on requireWebcam().
@@ -86,10 +88,15 @@ struct StudentDoneView: View {
                 Text("Submitted.")
                     .font(Theme.serif(26, .semibold))
                     .foregroundStyle(Theme.inkSoft)
-                Text("You can close this window.")
+                Text("Your work is in. You can close this window.")
                     .font(Theme.sans(14))
                     .foregroundStyle(Theme.muted)
             }
+
+            Button("Back to my assignments") { app.goToHome() }
+                .buttonStyle(.glassProminent)
+                .tint(Theme.accent)
+                .padding(.top, Theme.Space.xs)
         }
     }
 

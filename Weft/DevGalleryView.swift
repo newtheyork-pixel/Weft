@@ -7,46 +7,66 @@
 
 import SwiftUI
 
-struct DevGalleryView: View {
-    @Environment(AppState.self) private var app
+/// Canonical list of every screen in the app. Drives both the dev gallery
+/// sidebar and the WEFT_SCREEN launch hook (see `WeftApp`).
+enum DevScreen: String, CaseIterable, Identifiable {
+    case signIn
+    case studentHome
+    case join
+    case checks
+    case exam
+    case done
+    case blocked
+    case recovery
+    case returned
+    case teacher
+    case templates
+    case editor
+    case grading
 
-    enum Screen: String, CaseIterable, Identifiable {
-        case signIn      = "Sign in"
-        case studentHome = "Student · Class home"
-        case join        = "Student · Join a class"
-        case checks      = "Student · Pre-exam + privacy"
-        case exam        = "Student · Exam (writing)"
-        case done        = "Student · Done + ledger"
-        case blocked     = "Student · Blocked (sharing)"
-        case recovery    = "Student · Recovery prompt"
-        case returned    = "Student · Returned work"
-        case teacher     = "Teacher · Build / Live"
-        case templates   = "Teacher · Templates"
-        case editor      = "Teacher · Assignment editor"
-        case grading     = "Teacher · Grading"
-        var id: String { rawValue }
-    }
+    var id: String { rawValue }
 
-    @State private var screen: Screen? = .signIn
-
-    var body: some View {
-        NavigationSplitView {
-            List(selection: $screen) {
-                Section("Weft (dev gallery)") {
-                    ForEach(Screen.allCases) { s in
-                        Text(s.rawValue).tag(s)
-                    }
-                }
-            }
-            .navigationSplitViewColumnWidth(min: 210, ideal: 230, max: 280)
-        } detail: {
-            detail
-                .id(screen)
+    /// Human label shown in the gallery sidebar.
+    var title: String {
+        switch self {
+        case .signIn:      return "Sign in"
+        case .studentHome: return "Student · Class home"
+        case .join:        return "Student · Join a class"
+        case .checks:      return "Student · Pre-exam + privacy"
+        case .exam:        return "Student · Exam (writing)"
+        case .done:        return "Student · Done + ledger"
+        case .blocked:     return "Student · Blocked (sharing)"
+        case .recovery:    return "Student · Recovery prompt"
+        case .returned:    return "Student · Returned work"
+        case .teacher:     return "Teacher · Build / Live"
+        case .templates:   return "Teacher · Templates"
+        case .editor:      return "Teacher · Assignment editor"
+        case .grading:     return "Teacher · Grading"
         }
     }
 
-    @ViewBuilder private var detail: some View {
-        switch screen ?? .signIn {
+    /// Extra short aliases accepted by WEFT_SCREEN (the raw case name always
+    /// works too, e.g. WEFT_SCREEN=studentHome or WEFT_SCREEN=home).
+    var aliases: [String] {
+        switch self {
+        case .signIn:      return ["signin", "login"]
+        case .studentHome: return ["home", "studenthome", "classhome"]
+        case .join:        return ["join"]
+        case .checks:      return ["checks", "precheck", "privacy"]
+        case .exam:        return ["exam", "writing", "write"]
+        case .done:        return ["done", "ledger", "submitted"]
+        case .blocked:     return ["blocked", "sharing"]
+        case .recovery:    return ["recovery", "recover"]
+        case .returned:    return ["returned", "feedback"]
+        case .teacher:     return ["teacher", "build", "live"]
+        case .templates:   return ["templates", "template"]
+        case .editor:      return ["editor", "assignment"]
+        case .grading:     return ["grading", "grade", "review"]
+        }
+    }
+
+    @ViewBuilder var view: some View {
+        switch self {
         case .signIn:      SignInView()
         case .studentHome: StudentClassHomeView()
         case .join:        StudentJoinView()
@@ -60,6 +80,32 @@ struct DevGalleryView: View {
         case .templates:   TemplatePickerView()
         case .editor:      AssignmentEditorView()
         case .grading:     ReviewGradingView()
+        }
+    }
+
+    /// Resolve a WEFT_SCREEN value (case-insensitive) to a screen.
+    static func match(_ raw: String) -> DevScreen? {
+        let q = raw.lowercased().trimmingCharacters(in: .whitespaces)
+        return allCases.first { $0.rawValue.lowercased() == q || $0.aliases.contains(q) }
+    }
+}
+
+struct DevGalleryView: View {
+    @State private var screen: DevScreen? = .signIn
+
+    var body: some View {
+        NavigationSplitView {
+            List(selection: $screen) {
+                Section("Weft (dev gallery)") {
+                    ForEach(DevScreen.allCases) { s in
+                        Text(s.title).tag(s)
+                    }
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 210, ideal: 230, max: 280)
+        } detail: {
+            (screen ?? .signIn).view
+                .id(screen)
         }
     }
 }
