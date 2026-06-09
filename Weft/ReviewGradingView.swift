@@ -1,0 +1,535 @@
+//
+//  ReviewGradingView.swift
+//  Weft — the teacher grading / review screen. Ported from the Electron
+//  #review-backdrop / .review-shell (renderer/teacher.html + teacher-grade.css).
+//
+//  Three columns on the glass foundation:
+//    LEFT   roster rail — student names + status chips, one selected.
+//    CENTER the essay on a clean WHITE opaque "paper" card (NOT glass), with
+//           the assignment prompt floated above it.
+//    RIGHT  grading rail — Score (e.g. 92 / 100), a Final comment text area,
+//           and a primary "Share with student" button.
+//  A top bar carries the assignment title, Back / Student N of M / Next, and a
+//  close. Mock roster + essay text only; the backend lands in a later wave.
+//
+
+import SwiftUI
+
+// MARK: - Local mock model
+
+/// A student row in the review roster, plus the essay we read and grade.
+private struct ReviewEntry: Identifiable {
+    let id: String
+    var name: String
+    var status: Status
+    var wordCount: Int
+    var submitted: Bool
+    var returned: Bool
+    var lastEdited: String
+    var score: String          // points entered, empty == not scored yet
+    var finalComment: String
+    var paragraphs: [String]    // the essay body, paragraph by paragraph
+
+    enum Status {
+        case writing, submitted, joined, leftFullscreen
+        var label: String {
+            switch self {
+            case .writing:        "Writing"
+            case .submitted:      "Submitted"
+            case .joined:         "Joined"
+            case .leftFullscreen: "Left fullscreen"
+            }
+        }
+        var chipKind: Chip.Kind {
+            switch self {
+            case .writing, .submitted: .good
+            case .joined:              .warn
+            case .leftFullscreen:      .bad
+            }
+        }
+    }
+
+    var initials: String { String((name.first ?? "?")).uppercased() }
+
+    static let mock: [ReviewEntry] = [
+        ReviewEntry(
+            id: "1", name: "Ava Chen", status: .submitted, wordCount: 612,
+            submitted: true, returned: false, lastEdited: "Last edited today at 10:42 AM",
+            score: "92", finalComment: "A confident, well-argued reading. Tighten the second body paragraph and you are at the top of the class.",
+            paragraphs: avaEssay),
+        ReviewEntry(
+            id: "2", name: "Ben Ortiz", status: .submitted, wordCount: 548,
+            submitted: true, returned: true, lastEdited: "Last edited yesterday at 4:11 PM",
+            score: "85", finalComment: "Strong central claim. Bring in one more textual quotation to ground the conclusion.",
+            paragraphs: benEssay),
+        ReviewEntry(
+            id: "3", name: "Maya Singh", status: .submitted, wordCount: 689,
+            submitted: true, returned: false, lastEdited: "Last edited today at 9:58 AM",
+            score: "", finalComment: "",
+            paragraphs: mayaEssay),
+        ReviewEntry(
+            id: "4", name: "Liam Park", status: .writing, wordCount: 318,
+            submitted: false, returned: false, lastEdited: "Writing now",
+            score: "", finalComment: "",
+            paragraphs: []),
+        ReviewEntry(
+            id: "5", name: "Sofia Rossi", status: .joined, wordCount: 0,
+            submitted: false, returned: false, lastEdited: "",
+            score: "", finalComment: "",
+            paragraphs: []),
+    ]
+
+    private static let avaEssay: [String] = [
+        "In the assigned passage, light and dark imagery does more than set a mood. It carries the argument of the chapter. Each time the narrator reaches for an image of brightness, it arrives only after a stretch of shadow, and that ordering is the point: clarity is shown to be earned, not given.",
+        "Consider the opening, where the lamp is described as \"a small, stubborn coin of gold against the whole weight of the night.\" The diction insists on smallness and effort. The light is a coin, something paid out, and it is stubborn, as if it must hold its ground. The dark, by contrast, is given mass: \"the whole weight of the night.\" By making darkness heavy and light deliberate, the author frames understanding as labor.",
+        "This pattern repeats at the scene's turn. When the character finally speaks the truth she has avoided, the room does not flood with light. Instead, \"a thin line of morning\" appears under the door. The restraint matters. A flood would suggest revelation handed down from outside; a thin line suggests something seeping in slowly, at the edges, the way real recognition tends to arrive.",
+        "Read this way, the imagery is not decoration laid over the plot but the plot's quiet engine. Light keeps its meaning precisely because the text refuses to give it cheaply.",
+    ]
+
+    private static let benEssay: [String] = [
+        "The passage uses light and dark to mark the distance between what the character knows and what she is willing to admit. Darkness is comfort here, not danger, and that inversion is the essay's most interesting move.",
+        "When the narrator lingers in the unlit hall, the prose slows and softens. The shadows are described as \"forgiving,\" a word usually reserved for people. To stay in the dark is to be spared judgment. Light, then, becomes the threat: it is what would reveal her.",
+        "By the close, the single shaft of light through the curtain reads less like hope and more like exposure. The author has trained us, image by image, to feel it that way.",
+    ]
+
+    private static let mayaEssay: [String] = [
+        "Light and dark in this passage are never simply opposites. They bleed into each other, and the author seems most interested in the gray between them, the dusk where neither claim is fully true.",
+        "The recurring image of the \"half-lit window\" is the clearest example. It is not bright and not black; it is the in-between, and it returns at exactly the moments the character is most uncertain. The imagery tracks her doubt rather than her conclusions.",
+        "This is a subtler design than a clean light-equals-good scheme. The author withholds easy symbolism, and in doing so asks the reader to sit in the same uncertainty the character feels.",
+        "If the essay has a thesis, it is that meaning, like light at dusk, is partial. We are given enough to see by, and no more.",
+    ]
+}
+
+// MARK: - The screen
+
+struct ReviewGradingView: View {
+    @Environment(AppState.self) private var app
+
+    @State private var roster: [ReviewEntry] = ReviewEntry.mock
+    @State private var index: Int = 0
+
+    private let assignmentTitle = "Lit essay 1 · AP English"
+    private let pointsPossible = 100
+    private let prompt = "Analyze the use of light and dark imagery in the assigned passage. Support your claim with specific textual evidence."
+
+    private var current: ReviewEntry { roster[index] }
+    private var submittedCount: Int { roster.filter { $0.submitted }.count }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            topBar
+            Divider().overlay(Color.black.opacity(0.08))
+            HStack(spacing: 0) {
+                rosterRail
+                    .frame(width: 268)
+                Divider().overlay(Color.black.opacity(0.08))
+                reader
+                    .frame(maxWidth: .infinity)
+                Divider().overlay(Color.black.opacity(0.08))
+                gradeRail
+                    .frame(width: 320)
+            }
+        }
+        .background(AmbientBackground())
+    }
+
+    // MARK: Top bar
+
+    private var topBar: some View {
+        HStack(spacing: Theme.Space.lg) {
+            Text(assignmentTitle)
+                .font(Theme.sans(15, .semibold))
+                .foregroundStyle(Theme.inkSoft)
+                .lineLimit(1)
+
+            Spacer(minLength: Theme.Space.lg)
+
+            HStack(spacing: Theme.Space.sm) {
+                navButton("Back", system: "chevron.left", disabled: index <= 0) {
+                    if index > 0 { index -= 1 }
+                }
+                Text("Student \(index + 1) of \(roster.count)")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.muted)
+                    .monospacedDigit()
+                    .frame(minWidth: 104)
+                navButton("Next", system: "chevron.right", trailingIcon: true,
+                          disabled: index >= roster.count - 1) {
+                    if index < roster.count - 1 { index += 1 }
+                }
+            }
+
+            Spacer(minLength: Theme.Space.lg)
+
+            Text("\(submittedCount) of \(roster.count) submitted")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.muted)
+                .monospacedDigit()
+                .fixedSize()
+
+            Button {
+                app.route = .teacher
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.muted)
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.glass)
+            .clipShape(Circle())
+            .accessibilityLabel("Close")
+        }
+        .padding(.horizontal, Theme.Space.lg)
+        .padding(.vertical, Theme.Space.md)
+        .background(.regularMaterial)
+    }
+
+    private func navButton(_ title: String, system: String, trailingIcon: Bool = false,
+                           disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: Theme.Space.xs) {
+                if !trailingIcon { Image(systemName: system).font(.system(size: 11, weight: .semibold)) }
+                Text(title)
+                if trailingIcon { Image(systemName: system).font(.system(size: 11, weight: .semibold)) }
+            }
+            .font(Theme.sans(13, .semibold))
+            .foregroundStyle(disabled ? Theme.muted2 : Theme.inkSoft)
+        }
+        .buttonStyle(.glass)
+        .disabled(disabled)
+    }
+
+    // MARK: Left — roster rail
+
+    private var rosterRail: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("STUDENTS")
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.9)
+                .foregroundStyle(Theme.muted)
+                .padding(.horizontal, Theme.Space.lg)
+                .padding(.top, Theme.Space.lg)
+                .padding(.bottom, Theme.Space.sm)
+
+            ScrollView {
+                VStack(spacing: 4) {
+                    ForEach(Array(roster.enumerated()), id: \.element.id) { i, s in
+                        rosterRow(s, active: i == index)
+                            .contentShape(Rectangle())
+                            .onTapGesture { index = i }
+                    }
+                }
+                .padding(.horizontal, Theme.Space.sm)
+                .padding(.bottom, Theme.Space.md)
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(.regularMaterial)
+    }
+
+    private func rosterRow(_ s: ReviewEntry, active: Bool) -> some View {
+        HStack(spacing: Theme.Space.md) {
+            ZStack {
+                Circle()
+                    .fill(Theme.accentSoft.opacity(0.18))
+                Text(s.initials)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+            }
+            .frame(width: 32, height: 32)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(s.name)
+                        .font(Theme.sans(13, .medium))
+                        .foregroundStyle(Theme.inkSoft)
+                        .lineLimit(1)
+                    if s.returned {
+                        Text("Returned")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Theme.good)
+                    }
+                }
+                HStack(spacing: 6) {
+                    Chip(text: s.status.label, kind: s.status.chipKind)
+                    Text(s.submitted ? "\(s.wordCount) words" : "Not submitted")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.muted)
+                        .monospacedDigit()
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 9)
+        .padding(.horizontal, 10)
+        .background {
+            RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                .fill(active ? Theme.accent.opacity(0.10) : Color.clear)
+        }
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(active ? Theme.accent : Color.clear)
+                .frame(width: 3)
+                .padding(.vertical, 4)
+        }
+    }
+
+    // MARK: Center — reader (prompt + white paper)
+
+    private var reader: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            readerHead
+            Divider().overlay(Color.black.opacity(0.08))
+            ScrollView {
+                VStack {
+                    paper
+                }
+                .padding(.horizontal, Theme.Space.xl)
+                .padding(.top, Theme.Space.lg)
+                .padding(.bottom, Theme.Space.xxxl)
+                .frame(maxWidth: .infinity)
+            }
+            .background(Color(red: 0.976, green: 0.984, blue: 0.992)) // #f9fbfd canvas
+        }
+    }
+
+    private var readerHead: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            Text(current.name)
+                .font(Theme.sans(16, .semibold))
+                .foregroundStyle(Theme.inkSoft)
+
+            HStack(spacing: Theme.Space.md) {
+                Chip(text: current.status.label, kind: current.status.chipKind)
+                if current.submitted {
+                    Chip(text: "Submitted", kind: .good)
+                } else {
+                    Chip(text: "In progress", kind: .warn)
+                }
+                Text("\(current.wordCount) words")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.muted)
+                    .monospacedDigit()
+                if !current.lastEdited.isEmpty {
+                    Text(current.lastEdited)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.muted)
+                }
+            }
+
+            Text(prompt)
+                .font(Theme.sans(13))
+                .foregroundStyle(Theme.muted)
+                .lineSpacing(3)
+                .padding(.leading, Theme.Space.md)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(Theme.accentSoft.opacity(0.5))
+                        .frame(width: 3)
+                }
+                .padding(.top, Theme.Space.xs)
+        }
+        .padding(.horizontal, Theme.Space.xl)
+        .padding(.top, Theme.Space.lg)
+        .padding(.bottom, Theme.Space.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial)
+    }
+
+    /// The clean WHITE opaque page. Deliberately NOT glass — this is paper.
+    private var paper: some View {
+        Group {
+            if current.paragraphs.isEmpty {
+                emptyPaper
+            } else {
+                VStack(alignment: .leading, spacing: Theme.Space.lg) {
+                    ForEach(Array(current.paragraphs.enumerated()), id: \.offset) { _, para in
+                        Text(para)
+                            .font(.system(size: 15))
+                            .foregroundStyle(Color.black)
+                            .lineSpacing(5)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(.vertical, 56)
+                .padding(.horizontal, 64)
+                .frame(maxWidth: 760, alignment: .leading)
+                .frame(maxWidth: .infinity)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 2))
+                .shadow(color: Color.black.opacity(0.12), radius: 6, x: 0, y: 2)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 2)
+                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                )
+            }
+        }
+    }
+
+    private var emptyPaper: some View {
+        VStack(spacing: Theme.Space.sm) {
+            Text(current.status == .writing ? "Still writing" : "No submission yet")
+                .font(Theme.sans(18, .semibold))
+                .foregroundStyle(Theme.inkSoft)
+            Text(emptyMessage)
+                .font(Theme.sans(13))
+                .foregroundStyle(Theme.muted)
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+                .frame(maxWidth: 360)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(minHeight: 360)
+        .padding(56)
+        .background(Color.white)
+        .clipShape(RoundedRectangle(cornerRadius: 2))
+        .shadow(color: Color.black.opacity(0.10), radius: 6, x: 0, y: 2)
+    }
+
+    private var emptyMessage: String {
+        switch current.status {
+        case .writing: return "This student is still writing. Nothing has been turned in yet."
+        default:       return "This student has joined but has not started writing."
+        }
+    }
+
+    // MARK: Right — grading rail
+
+    private var gradeRail: some View {
+        VStack(spacing: 0) {
+            if current.submitted {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Theme.Space.xl) {
+                        scoreBlock
+                        finalCommentBlock
+                    }
+                    .padding(Theme.Space.lg)
+                }
+                shareBlock
+            } else {
+                VStack(alignment: .leading, spacing: Theme.Space.md) {
+                    slotHead("Grading")
+                    Text("No submission yet. When this student submits, their essay appears here for grading.")
+                        .font(Theme.sans(12))
+                        .foregroundStyle(Theme.muted)
+                        .lineSpacing(3)
+                    Spacer()
+                }
+                .padding(Theme.Space.lg)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(.regularMaterial)
+    }
+
+    private func slotHead(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.system(size: 11, weight: .semibold))
+            .tracking(0.9)
+            .foregroundStyle(Theme.muted)
+    }
+
+    private var scoreBlock: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.md) {
+            slotHead("Score")
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Space.sm) {
+                TextField("", text: scoreBinding)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 28, weight: .semibold, design: .default))
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.inkSoft)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: 72)
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                            .fill(Color.white.opacity(0.6))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                            .stroke(Color.black.opacity(0.12), lineWidth: 1)
+                    )
+                Text("/ \(pointsPossible) pts")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Theme.muted)
+                    .monospacedDigit()
+            }
+            Text("Enter a score, or leave blank to give feedback only. Half points OK.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.muted)
+                .lineSpacing(2)
+        }
+    }
+
+    private var finalCommentBlock: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.md) {
+            slotHead("Final comment")
+            TextEditor(text: finalCommentBinding)
+                .font(Theme.sans(13))
+                .foregroundStyle(Theme.inkSoft)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .frame(minHeight: 120)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                        .fill(Color.white.opacity(0.6))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                        .stroke(Color.black.opacity(0.10), lineWidth: 1)
+                )
+                .overlay(alignment: .topLeading) {
+                    if current.finalComment.isEmpty {
+                        Text("Write one overall comment for the whole essay.")
+                            .font(Theme.sans(13))
+                            .foregroundStyle(Theme.muted2)
+                            .padding(.horizontal, 13)
+                            .padding(.top, 16)
+                            .allowsHitTesting(false)
+                    }
+                }
+        }
+    }
+
+    private var shareBlock: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            Divider().overlay(Color.black.opacity(0.08))
+                .padding(.bottom, Theme.Space.xs)
+            Button {
+                roster[index].returned = true
+            } label: {
+                Text(current.returned ? "Shared" : "Share with student")
+                    .font(Theme.sans(14, .semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glassProminent)
+            .tint(Theme.accent)
+
+            Text("Once shared, the student sees the score and your Shared comments. Private notes stay hidden.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.muted)
+                .lineSpacing(2)
+        }
+        .padding(Theme.Space.lg)
+    }
+
+    // MARK: Bindings into the current entry
+
+    private var scoreBinding: Binding<String> {
+        Binding(get: { roster[index].score },
+                set: { roster[index].score = $0 })
+    }
+    private var finalCommentBinding: Binding<String> {
+        Binding(get: { roster[index].finalComment },
+                set: { roster[index].finalComment = $0 })
+    }
+}
+
+#Preview {
+    ReviewGradingView()
+        .environment(AppState())
+        .preferredColorScheme(.light)
+        .frame(width: 1180, height: 820)
+}
