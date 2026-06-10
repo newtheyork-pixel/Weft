@@ -209,9 +209,11 @@ struct StudentChecksView: View {
 
     /// True when checks finished but the session resolve is still in flight
     /// (signed-in only). Prevents a misleading "session not found" error while
-    /// the background lookup is ongoing.
+    /// the background lookup is ongoing. A resolve FAILURE sets errorMessage
+    /// and never produces a session, so the error ends the pending state —
+    /// otherwise the spinner would promise a load that already failed.
     private var sessionPending: Bool {
-        app.signedIn && !running && app.activeExamSession == nil
+        app.signedIn && !running && app.activeExamSession == nil && app.errorMessage == nil
     }
 
     /// Begin is enabled once checks are done AND (when signed in) the session

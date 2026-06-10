@@ -225,6 +225,18 @@ struct ExamView: View {
                         guard !Task.isCancelled else { return }
                         submit()
                     }
+                } else {
+                    // Before the deadline, make the failed-save label's
+                    // promise true: keep persisting so the content is durable
+                    // by the time the student presses Submit again.
+                    saveGeneration += 1
+                    let gen = saveGeneration
+                    saveDebounce?.cancel()
+                    saveDebounce = Task {
+                        try? await Task.sleep(for: .seconds(4))
+                        guard !Task.isCancelled else { return }
+                        await persistNow(generation: gen)
+                    }
                 }
                 return
             }
