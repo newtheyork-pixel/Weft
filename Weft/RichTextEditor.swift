@@ -348,12 +348,25 @@ final class RichTextController {
               let style = storage.attribute(.paragraphStyle, at: p.location, effectiveRange: nil) as? NSParagraphStyle,
               let list = style.textLists.first else { return false }
 
+        // A margin click (or arrowing left through the marker) can put the
+        // caret inside the literal "\t<marker>\t" prefix; inserting there
+        // would double the marker into the item text. Clamp the edit to start
+        // after the prefix -- empirically the behavior a margin click should
+        // produce (an empty item above, the text below).
+        var edit = sel
+        if let prefix = Self.markerPrefixLength(of: ns.substring(with: p)),
+           edit.location < p.location + prefix {
+            let clamped = p.location + prefix
+            let end = max(NSMaxRange(edit), clamped)
+            edit = NSRange(location: clamped, length: end - clamped)
+        }
+
         let marker = "\t" + list.marker(forItemNumber: itemNumber(of: p, in: storage) + 1) + "\t"
         let insert = "\n" + marker
-        guard tv.shouldChangeText(in: sel, replacementString: insert) else { return true }
+        guard tv.shouldChangeText(in: edit, replacementString: insert) else { return true }
         storage.beginEditing()
         storage.replaceCharacters(
-            in: sel,
+            in: edit,
             with: NSAttributedString(string: insert, attributes: [
                 .font: RichTextStyle.bodyFont,
                 .foregroundColor: RichTextStyle.inkColor,
@@ -363,7 +376,7 @@ final class RichTextController {
         tv.didChangeText()
         // Caret explicitly after the marker, inside the new item; the implicit
         // post-edit selection fixup would otherwise snap it elsewhere.
-        tv.setSelectedRange(NSRange(location: sel.location + (insert as NSString).length, length: 0))
+        tv.setSelectedRange(NSRange(location: edit.location + (insert as NSString).length, length: 0))
         recountWords()
         return true
     }
