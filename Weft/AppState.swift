@@ -742,19 +742,22 @@ final class AppState {
     /// proctoring contract) and only then enter the locked exam. False (with
     /// errorMessage set) means stay on the checks screen.
     func beginExam(screenCapture: Bool, remote: Bool, displayCount: Int?,
-                   isVM: Bool?, ip: String?) async -> Bool {
+                   isVM: Bool?) async -> Bool {
         guard signedIn else { enterExam(); return true }   // preview path
         guard let session = activeExamSession else {
             errorMessage = "Couldn't reach this assignment's session. Go back and try again."
             return false
         }
         do {
+            // The students schema requires the proctoring facts (NOT NULL, no
+            // defaults), so unknowns get explicit fallbacks rather than
+            // omitted keys. No IP/network matching: product call.
             guard let sid = try await supabase.registerStudent(
                 sessionId: session.id, userId: userId,
                 email: email.isEmpty ? nil : email,
-                name: displayName.isEmpty ? nil : displayName,
-                ip: ip, screenCapture: screenCapture, remote: remote,
-                displayCount: displayCount, isVM: isVM)
+                name: displayName.isEmpty ? (email.isEmpty ? "Student" : email) : displayName,
+                screenCapture: screenCapture, remote: remote,
+                displayCount: displayCount ?? 1, isVM: isVM ?? false)
             else {
                 errorMessage = "Could not register for this exam."
                 return false

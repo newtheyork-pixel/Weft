@@ -19,7 +19,6 @@ struct StudentChecksView: View {
     /// "What it checks" — grounded in runChecks()/monitorTick() and the in-exam
     /// loops. Honest, plain-language copy ported from renderTrustLabel().
     private let checks: [String] = [
-        "Confirms you are on the same network as your teacher (not on a VPN or phone hotspot).",
         "Checks that no remote-control software (such as TeamViewer or Chrome Remote Desktop) is running.",
         "Checks that no screen-sharing or screen-recording software is running.",
         "Counts your displays and looks for a hidden second or virtual screen.",
@@ -232,8 +231,7 @@ struct StudentChecksView: View {
                         screenCapture: report?.screenCapture ?? false,
                         remote: report?.remote ?? false,
                         displayCount: report.map { $0.displays },
-                        isVM: report.map { $0.isVM },
-                        ip: report?.publicIP)
+                        isVM: report.map { $0.isVM })
                     beginBusy = false
                 }
             } label: {

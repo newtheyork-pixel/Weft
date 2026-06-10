@@ -600,24 +600,26 @@ final class SupabaseManager: @unchecked Sendable {
 
     /// Register (or refresh) the caller's `students` row for a session at
     /// checks-pass, carrying the proctoring facts the checks screen computed.
-    /// Mirrors student.js runChecks (onConflict session_id,user_id).
-    /// Re-registration with nil proctoring fields PRESERVES the earlier row's
-    /// values (nil keys are omitted, so merge-duplicates does not overwrite
-    /// them) — pass concrete values whenever the checks screen has them.
+    /// Mirrors student.js runChecks (onConflict session_id,user_id). The
+    /// proctoring fields are REQUIRED: the live schema declares name,
+    /// remote_session, screen_capture, display_count, and is_vm NOT NULL with
+    /// no defaults, so an omitted key is a 23502 at insert time (live QA found
+    /// this). ip / ip_match are deliberately NOT sent: the native app does not
+    /// do IP/network matching (product call, 2026-06-10; the columns were made
+    /// nullable for it — Electron still sends its own values).
     func registerStudent(sessionId: String, userId: String, email: String?,
-                         name: String?, ip: String?, screenCapture: Bool,
-                         remote: Bool, displayCount: Int?, isVM: Bool?) async throws -> String? {
+                         name: String, screenCapture: Bool, remote: Bool,
+                         displayCount: Int, isVM: Bool) async throws -> String? {
         struct Payload: Encodable {
             let session_id: String; let user_id: String
-            let email: String?; let name: String?
-            let ip: String?
+            let email: String?; let name: String
             let remote_session: Bool; let screen_capture: Bool
-            let display_count: Int?; let is_vm: Bool?
+            let display_count: Int; let is_vm: Bool
             let status: String
         }
         let rows: [StudentRowID] = try await upsert("students",
             values: Payload(session_id: sessionId, user_id: userId, email: email,
-                            name: name, ip: ip, remote_session: remote,
+                            name: name, remote_session: remote,
                             screen_capture: screenCapture, display_count: displayCount,
                             is_vm: isVM, status: "joined"),
             onConflict: "session_id,user_id")

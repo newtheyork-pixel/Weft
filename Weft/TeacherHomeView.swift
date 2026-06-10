@@ -205,7 +205,9 @@ struct TeacherHomeView: View {
                         HStack(spacing: Theme.Space.md) {
                             Text(s.name).font(Theme.sans(14)).foregroundStyle(Theme.inkSoft)
                             Spacer()
-                            Text(s.networkSame ? "Same Wi-Fi" : "Different network").font(Theme.sans(12.5)).foregroundStyle(s.networkSame ? Theme.muted : Theme.warn)
+                            if let same = s.networkSame {
+                                Text(same ? "Same Wi-Fi" : "Different network").font(Theme.sans(12.5)).foregroundStyle(same ? Theme.muted : Theme.warn)
+                            }
                             Chip(text: s.status.capitalized, kind: s.signal == .ok ? .good : .warn)
                         }
                         .padding(.horizontal, Theme.Space.xl).padding(.vertical, 13)

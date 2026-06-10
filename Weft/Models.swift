@@ -272,16 +272,18 @@ struct ExamLink: Identifiable, Codable, Hashable, Sendable {
 struct RosterStudent: Identifiable, Codable, Hashable, Sendable {
     let id: String
     var name: String
-    var networkSame: Bool
+    /// nil = the network check was not performed (the native app deliberately
+    /// skips IP matching; Electron rows still carry a real value).
+    var networkSame: Bool?
     var remote: Bool
     var capture: Bool
     var displays: Int
     var isVM: Bool
     var status: String        // "writing" | "review" | "joined" | "submitted"
 
-    /// Overall integrity signal.
+    /// Overall integrity signal. An unperformed network check is not a warning.
     var signal: Signal {
-        if remote || capture || isVM || !networkSame || displays > 1 { return .warn }
+        if remote || capture || isVM || networkSame == false || displays > 1 { return .warn }
         return .ok
     }
     enum Signal { case ok, warn, bad }
@@ -295,7 +297,7 @@ struct RosterStudent: Identifiable, Codable, Hashable, Sendable {
         case isVM = "is_vm"
     }
 
-    init(id: String, name: String, networkSame: Bool, remote: Bool, capture: Bool,
+    init(id: String, name: String, networkSame: Bool?, remote: Bool, capture: Bool,
          displays: Int, isVM: Bool, status: String) {
         self.id = id; self.name = name; self.networkSame = networkSame
         self.remote = remote; self.capture = capture; self.displays = displays
@@ -308,7 +310,7 @@ struct RosterStudent: Identifiable, Codable, Hashable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
         name = (try? c.decode(String.self, forKey: .name)) ?? "Student"
-        networkSame = (try? c.decode(Bool.self, forKey: .networkSame)) ?? true
+        networkSame = try? c.decode(Bool.self, forKey: .networkSame)
         remote = (try? c.decode(Bool.self, forKey: .remote)) ?? false
         capture = (try? c.decode(Bool.self, forKey: .capture)) ?? false
         displays = (try? c.decode(Int.self, forKey: .displays)) ?? 1
