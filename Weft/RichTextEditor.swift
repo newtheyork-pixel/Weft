@@ -13,12 +13,15 @@
 //  read as opaque paper.
 //
 //  Public surface:
-//    RichTextEditor(text: $attr, wordCount: $count, controller: controller)
+//    RichTextEditor(controller: controller, onEdit: { ... })   // view
 //    RichTextToolbar(controller: controller)        // Bold/Italic/Underline/H1/H2/Bulleted list
+//    controller.wordCount / setContent(_:) / snapshot()        // document access
 //
 //  The controller is the shared link between the SwiftUI toolbar and the live
-//  NSTextView: the editor registers its text view on the controller, and the
-//  toolbar buttons route formatting commands back to it.
+//  NSTextView, and it OWNS document access: the text view holds the essay (no
+//  per-keystroke SwiftUI binding round-trip), the editor registers its text
+//  view on the controller, and the toolbar buttons route formatting commands
+//  back to it.
 //
 
 import SwiftUI
