@@ -151,6 +151,12 @@ struct ClassWorkItem: Identifiable, Codable, Hashable, Sendable {
     var myReleasedAt: Date?
     var myPoints: Double?
     var myPointsPossible: Double?
+    /// My submission time for the CURRENTLY OPEN draft (list_class_work v2);
+    /// nil when the RPC is v1, there is no open draft, or I haven't submitted it.
+    var myActiveSubmittedAt: Date?
+    /// Version number of the open draft / highest version in the group.
+    var activeVersion: Int?
+    var latestVersion: Int?
 
     var id: String { versionGroupId }
 
@@ -164,32 +170,49 @@ struct ClassWorkItem: Identifiable, Codable, Hashable, Sendable {
         case myReleasedAt = "my_released_at"
         case myPoints = "my_points"
         case myPointsPossible = "my_points_possible"
+        case myActiveSubmittedAt = "my_active_submitted_at"
+        case activeVersion = "active_version"
+        case latestVersion = "latest_version"
     }
 
     enum Section { case active, graded, past }
 
     /// Which bucket this assignment belongs in for the student class home.
-    var section: Section {
-        if activeSessionId != nil { return .active }
+    /// Active means "there is an open draft I have NOT submitted" — submitting
+    /// the open draft drops the row to Past immediately, and it returns to
+    /// Active when the teacher launches the next draft. nil = nothing for the
+    /// student to act on (closed session, no submission of their own).
+    var section: Section? {
+        if activeSessionId != nil && myActiveSubmittedAt == nil { return .active }
         if myReleasedAt != nil { return .graded }
-        return .past
+        if mySubmittedAt != nil { return .past }
+        return nil
+    }
+
+    /// "Draft N" chip for the Active row; nil on the first draft.
+    var draftLabel: String? {
+        guard let v = activeVersion, v > 1 else { return nil }
+        return "Draft \(v)"
     }
 
     static let active = ClassWorkItem(versionGroupId: "g1", title: "Lit essay 1",
                                       activeSessionId: "s1", activeCode: "483920",
                                       launchedAt: .now, mySubmittedAt: nil,
-                                      myReleasedAt: nil, myPoints: nil, myPointsPossible: nil)
+                                      myReleasedAt: nil, myPoints: nil, myPointsPossible: nil,
+                                      myActiveSubmittedAt: nil, activeVersion: 2, latestVersion: 2)
     static let graded = ClassWorkItem(versionGroupId: "g3", title: "Rhetoric analysis",
                                       activeSessionId: nil, activeCode: nil,
                                       launchedAt: .now.addingTimeInterval(-86400 * 3),
                                       mySubmittedAt: .now.addingTimeInterval(-86400 * 3),
                                       myReleasedAt: .now.addingTimeInterval(-86400 * 2),
-                                      myPoints: 92, myPointsPossible: 100)
+                                      myPoints: 92, myPointsPossible: 100,
+                                      myActiveSubmittedAt: nil, activeVersion: nil, latestVersion: nil)
     static let past = ClassWorkItem(versionGroupId: "g4", title: "Sonnet close reading",
                                     activeSessionId: nil, activeCode: nil,
                                     launchedAt: .now.addingTimeInterval(-86400 * 11),
                                     mySubmittedAt: .now.addingTimeInterval(-86400 * 11),
-                                    myReleasedAt: nil, myPoints: nil, myPointsPossible: nil)
+                                    myReleasedAt: nil, myPoints: nil, myPointsPossible: nil,
+                                    myActiveSubmittedAt: nil, activeVersion: nil, latestVersion: nil)
     static let sampleList = [active, graded, past]
 }
 

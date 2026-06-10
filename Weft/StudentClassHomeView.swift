@@ -193,6 +193,8 @@ struct StudentClassHomeView: View {
                 }
             case .past:
                 Chip(text: "Read-only", kind: .neutral)
+            case nil:
+                EmptyView()
             }
         }
     }
@@ -222,6 +224,7 @@ struct StudentClassHomeView: View {
         case .active: return "Open now"
         case .graded: return "Returned \(shortDate(item.myReleasedAt))"
         case .past:   return "Submitted \(shortDate(item.mySubmittedAt))"
+        case nil:     return ""
         }
     }
     private func fmt(_ d: Double?) -> String {

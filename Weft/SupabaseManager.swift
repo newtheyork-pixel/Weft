@@ -497,6 +497,30 @@ final class SupabaseManager: @unchecked Sendable {
         return result.first
     }
 
+    /// Clone `source` into the next draft of its version group: same group id,
+    /// version_number = nextVersion, a FRESH essay-question id (each draft's
+    /// submissions key on their own question), prompt/limits/files/links
+    /// carried over. Launching the clone is the normal launch path.
+    func createDraftTest(from source: Assignment, teacherUserId: String,
+                         nextVersion: Int) async throws -> Assignment? {
+        struct Payload: Encodable {
+            let teacher_user_id: String; let title: String
+            let questions: [Question]; let time_limit_minutes: Int?
+            let version_group_id: String; let version_number: Int
+        }
+        var questions = source.questions
+        if let q = questions.first {
+            questions[0] = Question(id: "q-\(UUID().uuidString.prefix(8))", kind: q.kind,
+                                    prompt: q.prompt, wordLimit: q.wordLimit,
+                                    fileIds: q.fileIds, urlIds: q.urlIds)
+        }
+        let rows: [Assignment] = try await insert("tests", values: Payload(
+            teacher_user_id: teacherUserId, title: source.title, questions: questions,
+            time_limit_minutes: source.timeLimitMinutes,
+            version_group_id: source.versionGroupId, version_number: nextVersion))
+        return rows.first
+    }
+
     func updateTest(id: String, title: String, questions: [Question], timeLimitMinutes: Int?) async throws {
         struct Payload: Encodable {
             let title: String; let questions: [Question]
@@ -555,6 +579,69 @@ final class SupabaseManager: @unchecked Sendable {
                             points: points, points_possible: pointsPossible, feedback: feedback,
                             released_at: releasedAt),
             onConflict: "submission_id", returning: false)
+    }
+
+    // MARK: - Student exam lifecycle (register / autosave / submit)
+
+    struct StudentRowID: Decodable, Sendable { let id: String }
+
+    /// Register (or refresh) the caller's `students` row for a session at
+    /// checks-pass, carrying the proctoring facts the checks screen computed.
+    /// Mirrors student.js runChecks (onConflict session_id,user_id).
+    func registerStudent(sessionId: String, userId: String, email: String?,
+                         name: String?, ip: String?, screenCapture: Bool,
+                         remote: Bool, displayCount: Int?, isVM: Bool?) async throws -> String? {
+        struct Payload: Encodable {
+            let session_id: String; let user_id: String
+            let email: String?; let name: String?
+            let ip: String?
+            let remote_session: Bool; let screen_capture: Bool
+            let display_count: Int?; let is_vm: Bool?
+            let status: String
+        }
+        let rows: [StudentRowID] = try await upsert("students",
+            values: Payload(session_id: sessionId, user_id: userId, email: email,
+                            name: name, ip: ip, remote_session: remote,
+                            screen_capture: screenCapture, display_count: displayCount,
+                            is_vm: isVM, status: "joined"),
+            onConflict: "session_id,user_id")
+        return rows.first?.id
+    }
+
+    /// Autosave/flush one essay (upsert: the row IS the submission). Returns
+    /// the row id for the submit lock. updated_at is client-stamped: the table
+    /// has no server now() trigger (Electron does the same).
+    func upsertEssaySubmission(sessionId: String, studentId: String, questionId: String,
+                               contentHTML: String, wordCount: Int) async throws -> String? {
+        struct Payload: Encodable {
+            let session_id: String; let student_id: String; let question_id: String
+            let content_html: String; let word_count: Int; let updated_at: String
+        }
+        let rows: [StudentRowID] = try await upsert("essay_submissions",
+            values: Payload(session_id: sessionId, student_id: studentId,
+                            question_id: questionId, content_html: contentHTML,
+                            word_count: wordCount, updated_at: Self.nowISO()),
+            onConflict: "session_id,student_id,question_id")
+        return rows.first?.id
+    }
+
+    /// Lock a submitted essay at the DB layer (SECURITY DEFINER submit_essay:
+    /// stamps submitted_at; RLS then refuses student edits). Best-effort.
+    func submitEssay(submissionId: String) async -> Bool {
+        do {
+            let _: String? = try await rpc("submit_essay",
+                params: ["p_submission_id": submissionId])
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// students.status transition (joined -> submitted). Best-effort.
+    func updateStudentStatus(id: String, status: String) async {
+        struct Payload: Encodable { let status: String }
+        let _: [StudentRowID]? = try? await update("students", values: Payload(status: status),
+            query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
     }
 
     // MARK: - Code + time helpers
