@@ -37,8 +37,7 @@ struct ExamView: View {
     @Environment(AppState.self) private var app
 
     @State private var controller = RichTextController()
-    @State private var essay = NSAttributedString(string: "")
-    @State private var wordCount = 0
+    private var wordCount: Int { controller.wordCount }
     @State private var referencesVisible = true
     @State private var expiryTask: Task<Void, Never>?
     @State private var didSeedPreview = false
@@ -99,7 +98,9 @@ struct ExamView: View {
             // Seed filler text in preview only; a real exam starts blank.
             if !lockdown && !didSeedPreview {
                 didSeedPreview = true
-                essay = NSAttributedString(string: previewEssay)
+                controller.setContent(NSAttributedString(
+                    string: previewEssay,
+                    attributes: RichTextStyle.body.attributes()))
             }
             armExpiry()
         }
@@ -229,10 +230,9 @@ struct ExamView: View {
         VStack(spacing: 0) {
             header
             toolbarRow
-            RichTextEditor(text: $essay, wordCount: $wordCount, controller: controller)
+            RichTextEditor(controller: controller, onEdit: { scheduleSave() })
                 .background(Color.white)
                 .padding(.horizontal, Theme.Space.xl)
-                .onChange(of: essay) { _, _ in scheduleSave() }
             footerBar
         }
         .frame(maxWidth: .infinity)

@@ -35,6 +35,51 @@ final class RichTextController {
     /// controller never keeps a dead view alive.
     weak var textView: NSTextView?
 
+    /// Content handed to `setContent` before the live text view registered
+    /// (e.g. the preview seed runs before makeNSView's async registration).
+    private var pendingContent: NSAttributedString?
+
+    /// Words in the document. Recomputed on every edit; @Observable, so labels
+    /// update without the document itself ever crossing into SwiftUI state.
+    private(set) var wordCount: Int = 0
+
+    /// Called by the editor when the live text view appears. Applies any
+    /// content that arrived early and primes the word count.
+    func register(_ tv: NSTextView) {
+        textView = tv
+        if let pending = pendingContent {
+            pendingContent = nil
+            tv.textStorage?.setAttributedString(pending)
+        }
+        recountWords()
+    }
+
+    /// Replace the whole document (preview seeding; later, draft restore).
+    func setContent(_ text: NSAttributedString) {
+        guard let tv = textView, let storage = tv.textStorage else {
+            pendingContent = text
+            return
+        }
+        storage.setAttributedString(text)
+        tv.typingAttributes = RichTextStyle.body.attributes()
+        recountWords()
+    }
+
+    /// Snapshot for save/submit — the ONLY place the document is copied.
+    func snapshot() -> NSAttributedString {
+        (textView?.attributedString().copy() as? NSAttributedString) ?? NSAttributedString()
+    }
+
+    /// Recompute the published word count from the live document. Matches the
+    /// web editor's `trimmed.split(/\s+/)` rule; the bullet prefix is display
+    /// chrome, not countable text.
+    func recountWords() {
+        guard let tv = textView else { wordCount = 0; return }
+        let plain = tv.string.replacingOccurrences(of: RichTextStyle.bulletPrefix, with: " ")
+        wordCount = plain.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .filter { !$0.isEmpty }.count
+    }
+
     init() {}
 
     // MARK: Inline character formatting
@@ -280,16 +325,19 @@ enum RichTextStyle {
 // MARK: - RichTextEditor (NSViewRepresentable)
 
 /// An editable, selectable rich-text surface. White opaque page, serif body.
+/// The NSTextView OWNS the document; SwiftUI gets `controller.wordCount` and an
+/// `onEdit` ping. Read content via `controller.snapshot()`, write via
+/// `controller.setContent(_:)`.
 struct RichTextEditor: NSViewRepresentable {
-    @Binding var text: NSAttributedString
-    @Binding var wordCount: Int
     var controller: RichTextController
     var isEditable: Bool = true
     /// Inset around the text so the white page has a comfortable margin.
     var pagePadding: CGFloat = 28
+    /// Fired on every edit (cheap; drives the autosave debounce upstream).
+    var onEdit: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, wordCount: $wordCount, controller: controller)
+        Coordinator(controller: controller, onEdit: onEdit)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -336,18 +384,12 @@ struct RichTextEditor: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
 
-        // Seed initial content.
-        if text.length > 0 {
-            textView.textStorage?.setAttributedString(text)
-        }
-
         scrollView.documentView = textView
 
         // Register the live text view with the controller so the toolbar can
         // drive it. Defer to avoid mutating observable state during view build.
         DispatchQueue.main.async {
-            controller.textView = textView
-            context.coordinator.recomputeWordCount(textView)
+            controller.register(textView)
         }
 
         return scrollView
@@ -355,26 +397,12 @@ struct RichTextEditor: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
-
         if textView.isEditable != isEditable {
             textView.isEditable = isEditable
         }
-
-        // Push external text changes in, but only when they actually differ, to
-        // avoid clobbering the caret while the student is typing.
-        if !context.coordinator.isApplyingChange,
-           !textView.attributedString().isEqual(to: text) {
-            let selected = textView.selectedRange()
-            textView.textStorage?.setAttributedString(text)
-            let clamped = NSRange(location: min(selected.location, textView.string.utf16.count),
-                                  length: 0)
-            textView.setSelectedRange(clamped)
-            context.coordinator.recomputeWordCount(textView)
-        }
-
         // Keep the controller pointed at the current view (cheap, idempotent).
         if controller.textView !== textView {
-            controller.textView = textView
+            controller.register(textView)
         }
     }
 
@@ -382,40 +410,17 @@ struct RichTextEditor: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
-        private let text: Binding<NSAttributedString>
-        private let wordCount: Binding<Int>
         private let controller: RichTextController
-        /// Guards the binding write-back so updateNSView doesn't echo our own edit.
-        var isApplyingChange = false
+        private let onEdit: (() -> Void)?
 
-        init(text: Binding<NSAttributedString>,
-             wordCount: Binding<Int>,
-             controller: RichTextController) {
-            self.text = text
-            self.wordCount = wordCount
+        init(controller: RichTextController, onEdit: (() -> Void)?) {
             self.controller = controller
+            self.onEdit = onEdit
         }
 
         func textDidChange(_ notification: Notification) {
-            guard let textView = notification.object as? NSTextView else { return }
-            isApplyingChange = true
-            text.wrappedValue = textView.attributedString().copy() as? NSAttributedString
-                ?? NSAttributedString(string: textView.string)
-            recomputeWordCount(textView)
-            isApplyingChange = false
-        }
-
-        /// Count whitespace-delimited words in the plain text, matching the web
-        /// editor's `trimmed.split(/\s+/)` rule.
-        func recomputeWordCount(_ textView: NSTextView) {
-            let plain = textView.string
-                .replacingOccurrences(of: RichTextStyle.bulletPrefix, with: " ")
-            let words = plain.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
-                .filter { !$0.isEmpty }
-            let count = words.count
-            if wordCount.wrappedValue != count {
-                wordCount.wrappedValue = count
-            }
+            controller.recountWords()
+            onEdit?()
         }
     }
 }
@@ -492,10 +497,6 @@ struct RichTextToolbar: View {
 /// A self-contained host wiring the editor to its toolbar, for previews and as
 /// a usage example for the essay-writing surface.
 struct RichTextEditorDemo: View {
-    @State private var text = NSAttributedString(
-        string: "Start writing your essay…",
-        attributes: RichTextStyle.body.attributes())
-    @State private var wordCount = 0
     @State private var controller = RichTextController()
 
     var body: some View {
@@ -503,12 +504,12 @@ struct RichTextEditorDemo: View {
             HStack {
                 RichTextToolbar(controller: controller)
                 Spacer()
-                Text("\(wordCount) \(wordCount == 1 ? "word" : "words")")
+                Text("\(controller.wordCount) \(controller.wordCount == 1 ? "word" : "words")")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Theme.muted)
             }
 
-            RichTextEditor(text: $text, wordCount: $wordCount, controller: controller)
+            RichTextEditor(controller: controller)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous)
@@ -518,6 +519,11 @@ struct RichTextEditorDemo: View {
         }
         .padding(Theme.Space.xl)
         .frame(minWidth: 640, minHeight: 520)
+        .task {
+            controller.setContent(NSAttributedString(
+                string: "Start writing your essay…",
+                attributes: RichTextStyle.body.attributes()))
+        }
     }
 }
 
