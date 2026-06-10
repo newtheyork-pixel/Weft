@@ -207,17 +207,32 @@ final class KioskController {
         // dock back, menu bar back, Cmd+Tab / Cmd+Q / Apple menu live again.
         NSApp.presentationOptions = []
 
-        // Leave the full-screen space if we are still in it.
-        if window.styleMask.contains(.fullScreen) {
-            window.toggleFullScreen(nil)
-        }
-
         // Un-pin and un-protect, restoring the saved values rather than
         // assuming defaults so a reused window comes back exactly as it was.
         window.level = savedLevel
         window.sharingType = savedSharingType
 
         lockedWindow = nil
+
+        // Leave the full-screen space — verified. macOS silently drops
+        // toggleFullScreen while a fullscreen transition is in flight (e.g. a
+        // submit during the entry animation), so retry until the window is
+        // actually windowed.
+        leaveFullScreen(window)
+    }
+
+    /// Toggle out of full screen and re-check after the animation; retry a few
+    /// times if the toggle was swallowed by an in-flight transition.
+    private func leaveFullScreen(_ window: NSWindow, attempt: Int = 0) {
+        guard window.styleMask.contains(.fullScreen) else { return }
+        window.toggleFullScreen(nil)
+        guard attempt < 5 else { return }
+        Task { @MainActor [weak window] in
+            try? await Task.sleep(for: .seconds(0.8))
+            guard let window, !self.inTest,
+                  window.styleMask.contains(.fullScreen) else { return }
+            self.leaveFullScreen(window, attempt: attempt + 1)
+        }
     }
 
     // MARK: Fight-back
