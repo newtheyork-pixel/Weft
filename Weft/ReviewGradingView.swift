@@ -653,8 +653,12 @@ struct ReviewGradingView: View {
                         Text("Write one overall comment for the whole essay.")
                             .font(Theme.sans(13))
                             .foregroundStyle(Theme.muted2)
+                            // Mirror the editor's exact text origin — 8 outer
+                            // padding + NSTextView's 5pt line-fragment padding,
+                            // zero top inset on macOS — so the caret blinks ON
+                            // the placeholder's first line, not above it.
                             .padding(.horizontal, 13)
-                            .padding(.top, 16)
+                            .padding(.top, 8)
                             .allowsHitTesting(false)
                     }
                 }
