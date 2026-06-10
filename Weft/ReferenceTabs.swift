@@ -47,8 +47,16 @@ final class ReferenceTabStore {
     private(set) var pinnedID: String?
     /// Every material shown at least once; their views stay mounted for the
     /// rest of the exam (instant switching, scroll/zoom/web state preserved).
+    /// One live web view per visited site, no eviction: teacher material
+    /// counts are small (2-6) by design — revisit before a 30-link world.
     private(set) var visitedIDs: Set<String> = []
-    private(set) var pdfStates: [String: PDFState] = [:]   // keyed by ExamFile.id
+    /// Per-file load state, keyed by the raw ExamFile.id (NOT the prefixed
+    /// ReferenceMaterial.id — use the pdfState(for:) accessors, which exist
+    /// precisely because there are two id spaces).
+    private var pdfStates: [String: PDFState] = [:]
+    /// Split divider position (top pane's share). Lives in the store, not the
+    /// panel, so it survives the panel being hidden and re-shown (⌘⇧R).
+    var splitFraction: CGFloat = 0.5
 
     private var signedIn = false
     private var prefetchTasks: [String: Task<Void, Never>] = [:]
@@ -69,6 +77,7 @@ final class ReferenceTabStore {
         if case .pdf(let f) = material { return pdfStates[f.id] }
         return nil
     }
+    func pdfState(for file: ExamFile) -> PDFState? { pdfStates[file.id] }
 
     /// (Re)build the material list. Real materials can arrive after the panel
     /// is shown (loadExamMaterials resolves async), so this keeps the user's

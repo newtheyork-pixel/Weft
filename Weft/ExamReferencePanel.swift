@@ -14,12 +14,10 @@ struct ExamReferencePanel: View {
     let files: [ExamFile]
     let links: [ExamLink]
     let signedIn: Bool
+    let store: ReferenceTabStore
     var onHide: () -> Void
 
-    @State private var store = ReferenceTabStore()
     @State private var blockedHost: String?
-    /// Top pane's share of the height in split mode (drag the divider).
-    @State private var splitFraction: CGFloat = 0.5
 
     private let dividerThickness: CGFloat = 7
 
@@ -54,7 +52,7 @@ struct ExamReferencePanel: View {
                     .background(Theme.bad, in: Capsule())
                     .padding(.top, 52)
                     .transition(.move(edge: .top).combined(with: .opacity))
-                    .task {
+                    .task(id: blockedHost) {
                         try? await Task.sleep(for: .seconds(3))
                         withAnimation { blockedHost = nil }
                     }
@@ -137,7 +135,7 @@ struct ExamReferencePanel: View {
     private var materialCanvas: some View {
         GeometryReader { geo in
             let split = store.splitActive
-            let topH = split ? min(max(120, geo.size.height * splitFraction),
+            let topH = split ? min(max(120, geo.size.height * store.splitFraction),
                                    max(120, geo.size.height - 120 - dividerThickness)) : 0
             let bottomH = split ? max(0, geo.size.height - topH - dividerThickness)
                                 : geo.size.height
@@ -146,8 +144,16 @@ struct ExamReferencePanel: View {
                 ForEach(visitedMaterials) { m in
                     let r = role(of: m)
                     materialView(m)
-                        .frame(width: geo.size.width, height: r == .pinned ? topH : bottomH)
-                        .offset(y: r == .pinned ? 0 : (split ? topH + dividerThickness : 0))
+                        // Hidden views keep a STABLE full-canvas frame: they're
+                        // invisible, and pinning their geometry means a divider
+                        // drag resizes only the two visible panes instead of
+                        // reflowing every mounted web view per tick.
+                        .frame(width: geo.size.width,
+                               height: r == .pinned ? topH
+                                     : r == .active ? bottomH
+                                     : geo.size.height)
+                        .offset(y: r == .pinned ? 0
+                                  : (r == .active && split ? topH + dividerThickness : 0))
                         .opacity(r == .hidden ? 0 : 1)
                         .allowsHitTesting(r != .hidden)
                         .accessibilityHidden(r == .hidden)
@@ -169,12 +175,16 @@ struct ExamReferencePanel: View {
                         Capsule().fill(Color.black.opacity(0.25)).frame(width: 36, height: 3)
                     }
                     .frame(width: geo.size.width, height: dividerThickness)
-                    .offset(y: topH)
+                    // contentShape BEFORE offset: applied after, the hit region
+                    // stays anchored at the layout frame (canvas top) instead of
+                    // moving with the rendered divider — verified empirically.
                     .contentShape(Rectangle())
+                    .offset(y: topH)
                     .gesture(
                         DragGesture(minimumDistance: 1)
                             .onChanged { v in
-                                splitFraction = min(0.8, max(0.2, v.location.y / max(geo.size.height, 1)))
+                                store.splitFraction = min(0.8, max(0.2,
+                                    (v.location.y - dividerThickness / 2) / max(geo.size.height, 1)))
                             }
                     )
                 }
@@ -190,7 +200,7 @@ struct ExamReferencePanel: View {
     }
 
     @ViewBuilder private func pdfView(_ file: ExamFile) -> some View {
-        switch store.pdfStates[file.id] {
+        switch store.pdfState(for: file) {
         case .loaded(let doc):
             PDFKitView(document: doc)
         case .failed:

@@ -38,6 +38,12 @@ struct ExamView: View {
 
     @State private var controller = RichTextController()
     private var wordCount: Int { controller.wordCount }
+    /// Owned here, not by the panel: hiding references (⌘⇧R) unmounts the
+    /// panel, and the store carries the loaded PDFs, tab/pin/visited state,
+    /// and divider position across that. (The web views themselves are torn
+    /// down with the panel; full keep-alive would need zero-width mounting
+    /// under HSplitView and isn't worth it yet.)
+    @State private var refStore = ReferenceTabStore()
     @State private var referencesVisible = true
     @State private var expiryTask: Task<Void, Never>?
     @State private var didSeedPreview = false
@@ -71,6 +77,7 @@ struct ExamView: View {
                     files: app.examFiles,
                     links: app.examLinks,
                     signedIn: app.signedIn,
+                    store: refStore,
                     onHide: { toggleReferences() }
                 )
                 .frame(minWidth: 320, idealWidth: 460)
