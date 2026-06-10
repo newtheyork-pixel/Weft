@@ -109,5 +109,11 @@ enum RichTextHTML {
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
+            // Option+Return inserts U+2028 LINE SEPARATOR, which NSTextView
+            // renders as a soft break but browsers ignore entirely — without
+            // this mapping the student's line break silently vanishes in the
+            // grading view. Safe to inject after escaping: a user-typed "<"
+            // is already &lt; by now, so this is the only "<br>" possible.
+            .replacingOccurrences(of: "\u{2028}", with: "<br>")
     }
 }
