@@ -17,9 +17,9 @@ struct TeacherHomeView: View {
         Binding(get: { app.teacherTab }, set: { app.teacherTab = $0 })
     }
 
-    /// The picked assignment's title, falling back gracefully when nothing is set.
+    /// The picked assignment's title (from grouped rows), falling back gracefully when nothing is set.
     private var pickedAssignmentTitle: String {
-        app.assignments.first(where: { $0.id == app.pickedAssignmentId })?.title ?? "an assignment"
+        app.groupedAssignments.first(where: { $0.id == app.pickedAssignmentId })?.title ?? "an assignment"
     }
     /// The picked class's name, falling back gracefully when nothing is set.
     private var pickedClassName: String {
@@ -75,7 +75,9 @@ struct TeacherHomeView: View {
                         .font(Theme.sans(14))
                         .foregroundStyle(Theme.muted)
                     idPicker("Assignment", value: pickedAssignmentTitle,
-                             items: app.assignments.map { ($0.id, $0.title) }) { app.pickedAssignmentId = $0 }
+                             items: app.groupedAssignments.map { a in
+                                 (a.id, a.versionNumber > 1 ? "\(a.title) · v\(a.versionNumber)" : a.title)
+                             }) { app.pickedAssignmentId = $0 }
                     idPicker("Class", value: pickedClassName,
                              items: app.teacherClasses.map { ($0.id, $0.name) }) { app.pickedClassId = $0 }
                     Button {
@@ -102,13 +104,29 @@ struct TeacherHomeView: View {
                             .linkPointer()
                             .help("Create a new assignment")
                     }
-                    ForEach(app.assignments) { a in
+                    ForEach(app.groupedAssignments) { a in
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(a.title).font(Theme.sans(15, .semibold)).foregroundStyle(Theme.inkSoft)
+                                HStack(spacing: 6) {
+                                    Text(a.title).font(Theme.sans(15, .semibold)).foregroundStyle(Theme.inkSoft)
+                                    if a.versionNumber > 1 {
+                                        Text("v\(a.versionNumber)")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .padding(.horizontal, 6).padding(.vertical, 2)
+                                            .background(Theme.accent.opacity(0.12), in: Capsule())
+                                            .foregroundStyle(Theme.accent)
+                                    }
+                                }
                                 Text("Essay" + (a.timeLimitMinutes.map { " · \($0) min" } ?? "")).font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                             }
                             Spacer()
+                            Button {
+                                Task { await app.createNextDraft(of: a) }
+                            } label: {
+                                Image(systemName: "doc.badge.plus")
+                            }
+                            .buttonStyle(.glass)
+                            .help("New draft (v\(a.versionNumber + 1)): copy this assignment, tweak, launch")
                             Button("Edit") { app.openEditAssignment(a) }.buttonStyle(.glass)
                         }
                         .padding(.vertical, Theme.Space.sm)

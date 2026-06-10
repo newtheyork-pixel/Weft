@@ -91,6 +91,15 @@ final class AppState {
     var liveSession: ExamSession?
     var pickedAssignmentId: String?
     var pickedClassId: String?
+
+    /// One row per assignment family: the LATEST draft of each version group.
+    /// The Build list and the launch picker both present these.
+    var groupedAssignments: [Assignment] {
+        Dictionary(grouping: assignments, by: \.versionGroupId)
+            .values
+            .compactMap { $0.max(by: { $0.versionNumber < $1.versionNumber }) }
+            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    }
     // Class roster (for the Roster screen)
     var classRoster: [ClassEnrollment] = []
     var rosterClassId: String?
@@ -357,8 +366,8 @@ final class AppState {
         do {
             teacherClasses = try await supabase.listTeacherClasses()
             assignments = try await supabase.listTeacherTests(userId: userId)
-            if pickedAssignmentId == nil || !assignments.contains(where: { $0.id == pickedAssignmentId }) {
-                pickedAssignmentId = assignments.first?.id
+            if pickedAssignmentId == nil || !groupedAssignments.contains(where: { $0.id == pickedAssignmentId }) {
+                pickedAssignmentId = groupedAssignments.first?.id
             }
             if pickedClassId == nil || !teacherClasses.contains(where: { $0.id == pickedClassId }) {
                 pickedClassId = teacherClasses.first?.id
@@ -485,6 +494,38 @@ final class AppState {
         if !signedIn { assignments.removeAll { $0.id == a.id }; return }
         do { try await supabase.deleteTest(id: a.id); await loadTeacherHome() }
         catch { errorMessage = describe(error) }
+    }
+
+    /// Clone `source` into the next draft of its group and open the editor on
+    /// it (the teacher tweaks the prompt, then launches it normally).
+    func createNextDraft(of source: Assignment) async {
+        errorMessage = nil
+        let next = (assignments
+            .filter { $0.versionGroupId == source.versionGroupId }
+            .map(\.versionNumber).max() ?? source.versionNumber) + 1
+        if !signedIn {
+            // Preview: local clone so the flow is demoable without a backend.
+            let clone = Assignment(id: "local-\(UUID().uuidString.prefix(6))",
+                                   title: source.title,
+                                   versionGroupId: source.versionGroupId,
+                                   versionNumber: next,
+                                   questions: source.questions,
+                                   timeLimitMinutes: source.timeLimitMinutes)
+            assignments.append(clone)
+            openEditAssignment(clone)
+            return
+        }
+        do {
+            guard let clone = try await supabase.createDraftTest(
+                from: source, teacherUserId: userId, nextVersion: next) else {
+                errorMessage = "Could not create the next draft."
+                return
+            }
+            await loadTeacherHome()
+            openEditAssignment(clone)
+        } catch {
+            errorMessage = describe(error)
+        }
     }
 
     // MARK: - Teacher: live session
