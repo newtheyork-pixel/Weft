@@ -1,0 +1,123 @@
+//
+//  ReferenceTabs.swift
+//  Weft — the exam reference area's model: one unified list of materials
+//  (teacher PDFs + approved websites), which tab is selected / pinned (split),
+//  and per-PDF load state. Documents prefetch once at exam start; the panel
+//  keeps every visited view alive, so switching tabs never reloads anything.
+//
+
+import SwiftUI
+import PDFKit
+
+/// One openable reference material: a teacher PDF or an approved website.
+enum ReferenceMaterial: Identifiable, Hashable {
+    case pdf(ExamFile)
+    case web(ExamLink)
+
+    var id: String {
+        switch self {
+        case .pdf(let f): return "pdf-\(f.id)"
+        case .web(let l): return "web-\(l.id)"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .pdf(let f): return f.originalName
+        case .web(let l): return l.displayName
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .pdf: return "doc.text.fill"
+        case .web: return "globe"
+        }
+    }
+}
+
+@MainActor
+@Observable
+final class ReferenceTabStore {
+    enum PDFState: Equatable { case loading, loaded(PDFDocument), failed }
+
+    private(set) var materials: [ReferenceMaterial] = []
+    private(set) var selectedID: String?
+    /// Split mode: the material pinned to the top pane (nil = single pane).
+    private(set) var pinnedID: String?
+    /// Every material shown at least once; their views stay mounted for the
+    /// rest of the exam (instant switching, scroll/zoom/web state preserved).
+    private(set) var visitedIDs: Set<String> = []
+    private(set) var pdfStates: [String: PDFState] = [:]   // keyed by ExamFile.id
+
+    private var signedIn = false
+    private var prefetchTasks: [String: Task<Void, Never>] = [:]
+
+    var allowedHosts: [String] {
+        materials.compactMap { if case .web(let l) = $0 { return l.host } else { return nil } }
+    }
+    var splitActive: Bool { pinnedID != nil }
+
+    /// (Re)build the material list. Real materials can arrive after the panel
+    /// is shown (loadExamMaterials resolves async), so this keeps the user's
+    /// selection when it still exists and prefetches only new files.
+    func configure(files: [ExamFile], links: [ExamLink], signedIn: Bool) {
+        self.signedIn = signedIn
+        materials = files.map { .pdf($0) } + links.map { .web($0) }
+        if selectedID == nil || !materials.contains(where: { $0.id == selectedID }) {
+            selectedID = materials.first?.id
+        }
+        if let pinned = pinnedID, !materials.contains(where: { $0.id == pinned }) {
+            pinnedID = nil
+        }
+        if let selectedID { visitedIDs.insert(selectedID) }
+        for file in files where pdfStates[file.id] == nil { prefetch(file) }
+    }
+
+    func select(_ id: String) {
+        selectedID = id
+        visitedIDs.insert(id)
+    }
+
+    /// Toggle split: pin the current material on top and move the active tab
+    /// to the next material so the two panes start on different things.
+    func toggleSplit() {
+        if pinnedID != nil { pinnedID = nil; return }
+        guard let current = selectedID, materials.count > 1 else { return }
+        pinnedID = current
+        if let i = materials.firstIndex(where: { $0.id == current }) {
+            select(materials[(i + 1) % materials.count].id)
+        }
+    }
+
+    func retry(file: ExamFile) {
+        prefetchTasks[file.id]?.cancel()
+        pdfStates[file.id] = nil
+        prefetch(file)
+    }
+
+    /// Load a file's PDF once (fresh signed URL each attempt). Sample
+    /// materials (no storage path) and signed-out QA use the bundled sample
+    /// document, exactly like the old panel.
+    private func prefetch(_ file: ExamFile) {
+        guard signedIn, !file.storagePath.isEmpty else {
+            if let doc = SamplePDF.shared {
+                pdfStates[file.id] = .loaded(doc)
+            } else {
+                pdfStates[file.id] = .failed
+            }
+            return
+        }
+        pdfStates[file.id] = .loading
+        prefetchTasks[file.id] = Task {
+            var doc: PDFDocument?
+            do {
+                let url = try await SupabaseManager.shared.signedURL(bucket: "essay-files",
+                                                                     path: file.storagePath)
+                doc = await PDFLoader.load(from: url)
+            } catch { doc = nil }
+            if Task.isCancelled { return }
+            pdfStates[file.id] = doc.map { .loaded($0) } ?? .failed
+        }
+    }
+}
