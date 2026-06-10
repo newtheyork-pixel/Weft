@@ -1,15 +1,16 @@
 //
 //  RichTextHTML.swift
 //  Weft — serialize an exam essay (NSAttributedString) to the sanitized HTML
-//  subset the Electron app produces and the teacher grading view + web portal
-//  already render: <h1> <h2> <p> <ul> <ol> <li> <b> <i> <u> <br> plus
+//  subset the Electron app produces and the teacher grading view already
+//  renders: <h1> <h2> <p> <ul> <ol> <li> <b> <i> <u> <br> plus
 //  <span style="…"> for font-family / font-size / color / background-color.
 //  Pure AppKit, no project dependencies (standalone-testable with swiftc).
 //
-//  ELECTRON SANITIZER CAVEAT: Electron's grading-view sanitizer strips
-//  font-size and line-height style values; font-family, color, and
-//  background-color survive. Students will see family+colors in the teacher
-//  grading view but not their custom sizes or line-spacing changes.
+//  CONSUMER CAVEATS: Electron's grading-view sanitizer strips font-size and
+//  line-height style values; font-family, color, and background-color
+//  survive, so teachers see family+colors there but not custom sizes or
+//  spacing. The web portal forbids the style attribute entirely (DOMPurify
+//  FORBID_ATTR), so it renders the tag subset with no span styles at all.
 //
 
 import AppKit
@@ -139,14 +140,18 @@ enum RichTextHTML {
 
             var styles: [String] = []
             if let font = attrs[.font] as? NSFont {
-                let family = font.familyName ?? ""
+                // Defense in depth: familyName only ever reports an installed
+                // font's name, but the value lands inside a quoted attribute,
+                // so strip the characters that could break out of it or
+                // smuggle an extra declaration past a weaker consumer.
+                let family = (font.familyName ?? "").filter { !"\";<>".contains($0) }
                 if !family.isEmpty, family != defaultFamily {
                     styles.append("font-family: \(family)")
                 }
                 if abs(font.pointSize - defaultSize) > 0.1,
                    // Headings carry their own sizes; don't re-state them.
                    !suppressBold {
-                    styles.append("font-size: \(Int(font.pointSize))px")
+                    styles.append("font-size: \(Int(round(font.pointSize)))px")
                 }
             }
             if let color = attrs[.foregroundColor] as? NSColor,
