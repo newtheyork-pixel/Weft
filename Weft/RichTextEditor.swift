@@ -438,6 +438,102 @@ final class RichTextController {
         return true
     }
 
+    // MARK: Fonts / colors / spacing
+
+    /// Change the font FAMILY across the selection, preserving each run's
+    /// size and bold/italic traits (Google Docs semantics).
+    func setFontFamily(_ family: String) {
+        mutateFonts { current in
+            let traits = current.fontDescriptor.symbolicTraits
+            let base = NSFont(name: family, size: current.pointSize) ?? current
+            let d = base.fontDescriptor.withSymbolicTraits(traits)
+            return NSFont(descriptor: d, size: current.pointSize) ?? base
+        }
+    }
+
+    /// Change the font SIZE across the selection, preserving family + traits.
+    func setFontSize(_ size: CGFloat) {
+        mutateFonts { current in
+            NSFont(descriptor: current.fontDescriptor, size: size) ?? current
+        }
+    }
+
+    /// Shared font-run mutator (selection or typing attributes).
+    private func mutateFonts(_ transform: (NSFont) -> NSFont) {
+        guard let tv = textView, let storage = tv.textStorage else { return }
+        let range = tv.selectedRange()
+        if range.length == 0 {
+            var typing = tv.typingAttributes
+            let base = (typing[.font] as? NSFont) ?? RichTextStyle.bodyFont
+            typing[.font] = transform(base)
+            tv.typingAttributes = typing
+            return
+        }
+        guard tv.shouldChangeText(in: range, replacementString: nil) else { return }
+        storage.beginEditing()
+        storage.enumerateAttribute(.font, in: range, options: []) { value, sub, _ in
+            let current = (value as? NSFont) ?? RichTextStyle.bodyFont
+            storage.addAttribute(.font, value: transform(current), range: sub)
+        }
+        storage.endEditing()
+        tv.didChangeText()
+    }
+
+    /// Text color across the selection (or typing attributes).
+    func setTextColor(_ color: NSColor) {
+        mutateAttribute(.foregroundColor, value: color)
+    }
+
+    /// Highlight across the selection; nil clears it.
+    func setHighlight(_ color: NSColor?) {
+        mutateAttribute(.backgroundColor, value: color)
+    }
+
+    private func mutateAttribute(_ key: NSAttributedString.Key, value: Any?) {
+        guard let tv = textView, let storage = tv.textStorage else { return }
+        let range = tv.selectedRange()
+        if range.length == 0 {
+            var typing = tv.typingAttributes
+            typing[key] = value
+            tv.typingAttributes = typing
+            return
+        }
+        guard tv.shouldChangeText(in: range, replacementString: nil) else { return }
+        storage.beginEditing()
+        if let value {
+            storage.addAttribute(key, value: value, range: range)
+        } else {
+            storage.removeAttribute(key, range: range)
+        }
+        storage.endEditing()
+        tv.didChangeText()
+    }
+
+    /// Line spacing (paragraph-level, like Google Docs): applies the multiple
+    /// to every paragraph touching the selection and to typing attributes.
+    func setLineSpacing(_ multiple: CGFloat) {
+        guard let tv = textView, let storage = tv.textStorage else { return }
+        let range = (storage.string as NSString).paragraphRange(for: tv.selectedRange())
+        let apply: (NSParagraphStyle) -> NSParagraphStyle = { s in
+            let m = (s.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+            m.lineHeightMultiple = multiple
+            return m
+        }
+        var typing = tv.typingAttributes
+        let typingStyle = (typing[.paragraphStyle] as? NSParagraphStyle) ?? RichTextStyle.bodyParagraphStyle()
+        typing[.paragraphStyle] = apply(typingStyle)
+        tv.typingAttributes = typing
+        guard range.length > 0 else { return }
+        guard tv.shouldChangeText(in: range, replacementString: nil) else { return }
+        storage.beginEditing()
+        storage.enumerateAttribute(.paragraphStyle, in: range, options: []) { value, sub, _ in
+            let s = (value as? NSParagraphStyle) ?? RichTextStyle.bodyParagraphStyle()
+            storage.addAttribute(.paragraphStyle, value: apply(s), range: sub)
+        }
+        storage.endEditing()
+        tv.didChangeText()
+    }
+
     // MARK: Private
 
     /// Apply a heading/body run of attributes to the selected paragraph(s).
@@ -484,12 +580,17 @@ final class RichTextController {
 
 // MARK: - Style definitions
 
-/// The small set of paragraph/character styles the editor exposes. Serif body
-/// at ~16pt (New York), larger serif headings, matching Weft's editorial type.
+/// The small set of paragraph/character styles the editor exposes. Times New
+/// Roman 12 at double spacing (the school-essay default), larger serif headings.
 enum RichTextStyle {
     case body, h1, h2
 
-    static let bodyFontSize: CGFloat = 16
+    static let bodyFontSize: CGFloat = 12
+    /// The default font family: Times New Roman, per school-essay convention.
+    static let defaultFontFamily = "Times New Roman"
+    /// Double spacing is the school-essay default; the spacing menu writes
+    /// other multiples per paragraph.
+    static let defaultLineHeightMultiple: CGFloat = 2.0
     static let h1FontSize: CGFloat = 28
     static let h2FontSize: CGFloat = 21
 
@@ -503,9 +604,10 @@ enum RichTextStyle {
     /// Ink color for body text, matching Theme.inkSoft (#22201c).
     static let inkColor = NSColor(red: 0.133, green: 0.125, blue: 0.110, alpha: 1.0)
 
-    /// The serif body font (New York on macOS). Falls back to the system serif
-    /// design if the named face is unavailable.
+    /// The serif body font: Times New Roman 12. Falls back to the system serif
+    /// design if Times New Roman is unavailable on this machine.
     static let bodyFont: NSFont = {
+        if let tnr = NSFont(name: defaultFontFamily, size: bodyFontSize) { return tnr }
         let descriptor = NSFont.systemFont(ofSize: bodyFontSize)
             .fontDescriptor.withDesign(.serif) ?? NSFont.systemFont(ofSize: bodyFontSize).fontDescriptor
         return NSFont(descriptor: descriptor, size: bodyFontSize) ?? NSFont.systemFont(ofSize: bodyFontSize)
@@ -517,10 +619,10 @@ enum RichTextStyle {
         return NSFont(descriptor: descriptor, size: size) ?? base
     }
 
-    /// Default body paragraph style: comfortable line height, no list indent.
+    /// Default body paragraph style: double-spaced (school-essay default), no list indent.
     static func bodyParagraphStyle() -> NSParagraphStyle {
         let p = NSMutableParagraphStyle()
-        p.lineHeightMultiple = 1.4
+        p.lineHeightMultiple = defaultLineHeightMultiple
         p.paragraphSpacing = 6
         return p
     }
@@ -529,7 +631,7 @@ enum RichTextStyle {
     /// NSTextList so AppKit treats the paragraph as a real list item.
     static func listParagraphStyle(_ list: NSTextList, level: Int = 0) -> NSParagraphStyle {
         let p = NSMutableParagraphStyle()
-        p.lineHeightMultiple = 1.4
+        p.lineHeightMultiple = defaultLineHeightMultiple
         p.paragraphSpacing = 4
         let bump = CGFloat(level) * listIndentStep
         p.firstLineHeadIndent = listFirstLineHeadIndent + bump
@@ -576,6 +678,10 @@ enum RichTextStyle {
 struct RichTextEditor: NSViewRepresentable {
     var controller: RichTextController
     var isEditable: Bool = true
+    /// Teacher-controlled per assignment: when false, the system spell-check
+    /// underlining is hidden. Autocorrect stays off unconditionally — an exam
+    /// editor must never silently rewrite a student's words.
+    var spellcheckEnabled: Bool = true
     /// Inset around the text so the white page has a comfortable margin.
     var pagePadding: CGFloat = 28
     /// Fired on every edit (cheap; drives the autosave debounce upstream).
@@ -602,7 +708,7 @@ struct RichTextEditor: NSViewRepresentable {
         textView.isRichText = true
         textView.allowsUndo = true
         textView.isAutomaticSpellingCorrectionEnabled = false
-        textView.isContinuousSpellCheckingEnabled = true
+        textView.isContinuousSpellCheckingEnabled = spellcheckEnabled
         textView.usesFontPanel = false
         textView.importsGraphics = false
         textView.font = RichTextStyle.bodyFont
@@ -646,6 +752,11 @@ struct RichTextEditor: NSViewRepresentable {
         if textView.isEditable != isEditable {
             textView.isEditable = isEditable
         }
+        // Sync teacher-controlled spell-check toggle. Autocorrect stays off
+        // unconditionally regardless of this flag.
+        if textView.isContinuousSpellCheckingEnabled != spellcheckEnabled {
+            textView.isContinuousSpellCheckingEnabled = spellcheckEnabled
+        }
         // Keep the controller pointed at the current view. Deferred for the
         // same reason as in makeNSView: the first updateNSView runs inside the
         // same SwiftUI transaction, and register() mutates observable state
@@ -675,10 +786,32 @@ struct RichTextEditor: NSViewRepresentable {
     }
 }
 
+// MARK: - Toolbar constants
+
+/// Curated, macOS-standard families that also render in the grading view.
+let weftFontFamilies = ["Times New Roman", "Arial", "Georgia", "Helvetica Neue",
+                        "Verdana", "Courier New", "Palatino", "Baskerville",
+                        "Trebuchet MS", "Comic Sans MS", "American Typewriter", "Menlo"]
+/// Point sizes exposed in the size menu.
+let weftFontSizes: [CGFloat] = [8, 9, 10, 11, 12, 14, 16, 18, 24, 30, 36]
+/// Named text (foreground) colors.
+let weftTextColors: [(String, NSColor)] = [
+    ("Ink", RichTextStyle.inkColor), ("Gray", .systemGray), ("Red", .systemRed),
+    ("Orange", .systemOrange), ("Green", .systemGreen), ("Blue", .systemBlue),
+    ("Purple", .systemPurple), ("Brown", .systemBrown)]
+/// Named highlight (background) colors; nil = clear highlight.
+let weftHighlights: [(String, NSColor?)] = [
+    ("None", nil), ("Yellow", .systemYellow), ("Green", .systemGreen),
+    ("Cyan", .systemCyan), ("Pink", .systemPink), ("Orange", .systemOrange)]
+/// Line-spacing multipliers with display names.
+let weftSpacings: [(String, CGFloat)] = [("Single", 1.0), ("1.15", 1.15),
+                                         ("1.5", 1.5), ("Double", 2.0)]
+
 // MARK: - RichTextToolbar (SwiftUI companion)
 
-/// A compact formatting bar: Bold / Italic / Underline / H1 / H2 / Bulleted list / Numbered list.
-/// Routes every action through the shared RichTextController to the live editor.
+/// A compact formatting bar: Bold / Italic / Underline / H1 / H2 / Bulleted list / Numbered list,
+/// plus Font / Size / Color / Spacing menus. Routes every action through the
+/// shared RichTextController to the live editor.
 struct RichTextToolbar: View {
     var controller: RichTextController
 
@@ -698,6 +831,71 @@ struct RichTextToolbar: View {
 
             toolbarButton("list.bullet", label: "Bulleted list (⌘⇧8)") { controller.toggleBulletedList() }
             toolbarButton("list.number", label: "Numbered list (⌘⇧7)") { controller.toggleNumberedList() }
+
+            divider
+
+            // Font family menu: "Aa" label, items call setFontFamily.
+            Menu {
+                ForEach(weftFontFamilies, id: \.self) { family in
+                    Button(family) { controller.setFontFamily(family) }
+                }
+            } label: {
+                Text("Aa")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.inkSoft)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Font")
+
+            // Font size menu: textformat.size icon.
+            Menu {
+                ForEach(weftFontSizes, id: \.self) { size in
+                    Button("\(Int(size))") { controller.setFontSize(size) }
+                }
+            } label: {
+                Image(systemName: "textformat.size")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.inkSoft)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Size")
+
+            // Color menu: text colors + highlight colors in two sections.
+            Menu {
+                Section("Text") {
+                    ForEach(weftTextColors, id: \.0) { name, color in
+                        Button(name) { controller.setTextColor(color) }
+                    }
+                }
+                Section("Highlight") {
+                    ForEach(weftHighlights, id: \.0) { name, color in
+                        Button(name) { controller.setHighlight(color) }
+                    }
+                }
+            } label: {
+                Image(systemName: "paintpalette")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.inkSoft)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Color")
+
+            // Line spacing menu.
+            Menu {
+                ForEach(weftSpacings, id: \.0) { name, multiple in
+                    Button(name) { controller.setLineSpacing(multiple) }
+                }
+            } label: {
+                Image(systemName: "arrow.up.and.down.text.horizontal")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.inkSoft)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Line Spacing")
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)

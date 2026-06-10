@@ -81,4 +81,32 @@ final class WeftTextView: NSTextView {
         if formatting?.changeListLevel(by: -1) == true { return }
         super.insertBacktab(sender)
     }
+
+    // MARK: Caret sizing
+
+    /// Pin the insertion indicator to the typing font's cap height and disable
+    /// the bounce/animation effects so the caret reads as a normal document
+    /// cursor at ALL paragraph line spacings (double-spaced paragraphs otherwise
+    /// produce a double-height bouncing caret via NSTextInsertionIndicator).
+    ///
+    /// Implementation: on macOS 14+ NSTextInsertionIndicator is the subview
+    /// AppKit injects. We locate it after every layout pass, kill its automatic
+    /// mode options (which drive the bounce), then clamp the frame height to the
+    /// typing font's line height when the caret has grown taller than 130% of
+    /// that — the 1.3× slack absorbs sub-pixel rounding without false triggers.
+    override func layout() {
+        super.layout()
+        guard let font = typingAttributes[.font] as? NSFont else { return }
+        let lineHeight = font.ascender - font.descender
+        for case let indicator as NSTextInsertionIndicator in subviews {
+            indicator.automaticModeOptions = []
+            if indicator.frame.height > lineHeight * 1.3 {
+                var f = indicator.frame
+                let inset = (f.height - lineHeight) / 2
+                f.origin.y += inset
+                f.size.height = lineHeight
+                indicator.frame = f
+            }
+        }
+    }
 }
