@@ -63,9 +63,11 @@ struct StudentClassHomeView: View {
                             Text(c.name)
                                 .font(Theme.sans(15, .semibold))
                                 .foregroundStyle(Theme.ink)
-                            Text(openBadge(for: c.id))
-                                .font(Theme.sans(12.5))
-                                .foregroundStyle(Theme.muted)
+                            if let badge = openBadge(for: c.id) {
+                                Text(badge)
+                                    .font(Theme.sans(12.5))
+                                    .foregroundStyle(Theme.muted)
+                            }
                         }
                         Spacer()
                         Image(systemName: "chevron.right")
@@ -78,13 +80,15 @@ struct StudentClassHomeView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .pointerStyle(.link)
+                .linkPointer()
             }
         }
     }
 
-    private func openBadge(for classId: String) -> String {
-        let n = app.classOpenCounts[classId] ?? 0
+    /// nil while the count for this class hasn't loaded yet — a deadlines
+    /// product must not assert "nothing due" it hasn't confirmed.
+    private func openBadge(for classId: String) -> String? {
+        guard let n = app.classOpenCounts[classId] else { return nil }
         if n == 0 { return "Nothing due right now" }
         return n == 1 ? "1 open assignment" : "\(n) open assignments"
     }
@@ -99,7 +103,7 @@ struct StudentClassHomeView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(Theme.accent)
-            .pointerStyle(.link)
+            .linkPointer()
             Text(app.enrolledClasses.first(where: { $0.id == app.selectedClassId })?.name ?? "Class")
                 .font(Theme.serif(24, .semibold))
                 .foregroundStyle(Theme.inkSoft)
@@ -113,7 +117,7 @@ struct StudentClassHomeView: View {
             Image(systemName: "tray")
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.muted2)
-            Text("No assignments yet. Join a class with a class code and your work will appear here.")
+            Text("You're not in any classes yet. Join a class with a class code and your work will appear here.")
                 .font(Theme.sans(13))
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)

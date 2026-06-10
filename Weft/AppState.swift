@@ -70,7 +70,7 @@ final class AppState {
 
     var selectedClassId: String?
     /// Active-assignment count per class id (the classes-list badges).
-    var classOpenCounts: [String: Int] = [:]
+    var classOpenCounts: [String: Int] = [ClassRoom.sample.id: 1, ClassRoom.sample2.id: 0]
     /// The assignment a student is about to take / is taking (drives ExamView).
     var activeAssignment: Assignment?
     /// Reference materials for the active exam (sample defaults; replaced by the
@@ -160,6 +160,7 @@ final class AppState {
         gradesFresh = false
         enrolledClasses = [.sample, .sample2]
         classWork = ClassWorkItem.sampleList
+        classOpenCounts = [ClassRoom.sample.id: 1, ClassRoom.sample2.id: 0]
         returnedWork = []
         // Teacher state back to defaults.
         teacherScreen = .home
@@ -180,6 +181,7 @@ final class AppState {
     private func dropMockData() {
         enrolledClasses = []
         classWork = []
+        classOpenCounts = [:]
         returnedWork = []
         selectedClassId = nil
         activeAssignment = nil
@@ -263,7 +265,10 @@ final class AppState {
                 selectedClassId = classes.first?.id
             }
             await loadClassWork()
-            await loadOpenCounts()
+            if let cid = selectedClassId {
+                classOpenCounts[cid] = classWork.filter { $0.section == .active }.count
+            }
+            await loadOpenCounts(skipping: selectedClassId)
         } catch {
             errorMessage = describe(error)
         }
@@ -280,12 +285,14 @@ final class AppState {
     }
 
     /// Refresh the per-class Active counts for the classes list. Classes are
-    /// few; one small RPC per class, concurrently.
-    func loadOpenCounts() async {
+    /// few; one small RPC per class, concurrently. `skipId` lets the caller
+    /// skip the class whose count was already seeded from a just-loaded
+    /// classWork (avoids a redundant network hop for the current class).
+    func loadOpenCounts(skipping skipId: String? = nil) async {
         guard signedIn else { return }
         let classes = enrolledClasses
         await withTaskGroup(of: (String, Int).self) { group in
-            for c in classes {
+            for c in classes where c.id != skipId {
                 group.addTask {
                     let work: [ClassWorkItem] =
                         (try? await SupabaseManager.shared.listClassWork(classId: c.id)) ?? []
@@ -305,7 +312,8 @@ final class AppState {
 
     func selectClass(_ id: String) {
         selectedClassId = id
-        if signedIn { Task { await loadClassWork() } }
+        // Previous class's rows must never render under the new header.
+        if signedIn { classWork = []; Task { await loadClassWork() } }
     }
 
     /// Pull the signed-in student's released (graded) work for ReturnedWorkView.
@@ -330,7 +338,7 @@ final class AppState {
         do {
             let joined = try await supabase.joinClass(code: code, displayName: displayName)
             await loadStudentHome()
-            if let joined { selectedClassId = joined.id }
+            if let joined { selectClass(joined.id) }
             return joined
         } catch {
             errorMessage = describe(error)
@@ -876,6 +884,7 @@ final class AppState {
         pendingExamCode = nil   // consume immediately
         if let session = try? await supabase.lookupSession(code: code), let cid = session.classId {
             selectedClassId = cid
+            classWork = []   // awaits its own loadClassWork next; stops class A's rows flashing under class B
             await loadClassWork()
             if let item = classWork.first(where: { $0.activeCode == code }) {
                 startWriting(item)
