@@ -486,14 +486,16 @@ final class SupabaseManager: @unchecked Sendable {
 
     @discardableResult
     func createTest(teacherUserId: String, title: String, questions: [Question],
-                    timeLimitMinutes: Int?) async throws -> Assignment? {
+                    timeLimitMinutes: Int?, spellcheckEnabled: Bool = true) async throws -> Assignment? {
         struct Payload: Encodable {
             let teacher_user_id: String; let title: String
             let questions: [Question]; let time_limit_minutes: Int?
+            let spellcheck_enabled: Bool
         }
         let result: [Assignment] = try await insert("tests",
             values: Payload(teacher_user_id: teacherUserId, title: title,
-                            questions: questions, time_limit_minutes: timeLimitMinutes))
+                            questions: questions, time_limit_minutes: timeLimitMinutes,
+                            spellcheck_enabled: spellcheckEnabled))
         return result.first
     }
 
@@ -507,6 +509,7 @@ final class SupabaseManager: @unchecked Sendable {
             let teacher_user_id: String; let title: String
             let questions: [Question]; let time_limit_minutes: Int?
             let version_group_id: String; let version_number: Int
+            let spellcheck_enabled: Bool
         }
         // A pre-versioning source row carries NULL version_group_id in the DB
         // (the model coalesces it to the test's own id). Backfill it before
@@ -530,18 +533,22 @@ final class SupabaseManager: @unchecked Sendable {
         let rows: [Assignment] = try await insert("tests", values: Payload(
             teacher_user_id: teacherUserId, title: source.title, questions: questions,
             time_limit_minutes: source.timeLimitMinutes,
-            version_group_id: source.versionGroupId, version_number: nextVersion))
+            version_group_id: source.versionGroupId, version_number: nextVersion,
+            spellcheck_enabled: source.spellcheckEnabled))
         return rows.first
     }
 
-    func updateTest(id: String, title: String, questions: [Question], timeLimitMinutes: Int?) async throws {
+    func updateTest(id: String, title: String, questions: [Question], timeLimitMinutes: Int?,
+                    spellcheckEnabled: Bool = true) async throws {
         struct Payload: Encodable {
             let title: String; let questions: [Question]
             let time_limit_minutes: Int?; let updated_at: String
+            let spellcheck_enabled: Bool
         }
         let _: [Assignment] = try await update("tests",
             values: Payload(title: title, questions: questions,
-                            time_limit_minutes: timeLimitMinutes, updated_at: Self.nowISO()),
+                            time_limit_minutes: timeLimitMinutes, updated_at: Self.nowISO(),
+                            spellcheck_enabled: spellcheckEnabled),
             query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
     }
 
@@ -595,6 +602,15 @@ final class SupabaseManager: @unchecked Sendable {
     }
 
     // MARK: - Student exam lifecycle (register / autosave / submit)
+
+    /// The caller's newest SUBMITTED essay for an assignment family (the
+    /// read-only viewer behind the Past row). RLS-safe by construction:
+    /// the RPC keys on auth.uid()'s own students rows.
+    func getMySubmission(versionGroupId: String) async throws -> SubmittedEssay? {
+        let rows: [SubmittedEssay] = try await rpc("get_my_submission",
+                                                   params: ["p_version_group_id": versionGroupId])
+        return rows.first
+    }
 
     struct StudentRowID: Decodable, Sendable { let id: String }
 

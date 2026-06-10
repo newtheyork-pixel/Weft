@@ -82,6 +82,9 @@ struct Assignment: Identifiable, Codable, Hashable, Sendable {
     var versionNumber: Int
     var questions: [Question]
     var timeLimitMinutes: Int?
+    /// Teacher-controlled per assignment; default true keeps every existing
+    /// assignment and the Electron editor (which never sends the column) unchanged.
+    var spellcheckEnabled: Bool
 
     var isVersioned: Bool { versionNumber > 1 }
 
@@ -90,13 +93,15 @@ struct Assignment: Identifiable, Codable, Hashable, Sendable {
         case versionGroupId = "version_group_id"
         case versionNumber = "version_number"
         case timeLimitMinutes = "time_limit_minutes"
+        case spellcheckEnabled = "spellcheck_enabled"
     }
 
     init(id: String, title: String, versionGroupId: String, versionNumber: Int,
-         questions: [Question], timeLimitMinutes: Int?) {
+         questions: [Question], timeLimitMinutes: Int?, spellcheckEnabled: Bool = true) {
         self.id = id; self.title = title; self.versionGroupId = versionGroupId
         self.versionNumber = versionNumber; self.questions = questions
         self.timeLimitMinutes = timeLimitMinutes
+        self.spellcheckEnabled = spellcheckEnabled
     }
 
     /// Tolerant decode from a `tests` row: version_group_id/version_number may be
@@ -109,6 +114,7 @@ struct Assignment: Identifiable, Codable, Hashable, Sendable {
         versionGroupId = (try? c.decode(String.self, forKey: .versionGroupId)) ?? id
         versionNumber = (try? c.decode(Int.self, forKey: .versionNumber)) ?? 1
         timeLimitMinutes = try? c.decode(Int.self, forKey: .timeLimitMinutes)
+        spellcheckEnabled = (try? c.decode(Bool.self, forKey: .spellcheckEnabled)) ?? true
     }
 
     static let sample = Assignment(
@@ -365,6 +371,22 @@ struct TeacherSubmission: Identifiable, Codable, Hashable, Sendable {
         case wordCount = "word_count"
         case submittedAt = "submitted_at"
         case updatedAt = "updated_at"
+    }
+}
+
+// MARK: - A submitted (not necessarily graded) essay, via get_my_submission
+
+struct SubmittedEssay: Decodable, Sendable {
+    let title: String
+    let contentHtml: String
+    let wordCount: Int
+    let submittedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case title
+        case contentHtml = "content_html"
+        case wordCount = "word_count"
+        case submittedAt = "submitted_at"
     }
 }
 
