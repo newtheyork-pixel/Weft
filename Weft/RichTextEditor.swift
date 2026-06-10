@@ -202,29 +202,74 @@ final class RichTextController {
 
     /// Toggle a list of `format` on the paragraph(s) touching the selection.
     /// Re-toggling the same format strips it; toggling the other format
-    /// converts in place.
+    /// converts in place. One pass, back-to-front, with the REAL per-paragraph
+    /// edits declared to shouldChangeText so undo restores text and styles
+    /// coherently (a nil replacementString would declare "attributes only" and
+    /// build the undo operation from a lie). Numbering restarts at 1 for each
+    /// toggle; renumber-on-edit is the key-handling task's job.
     private func toggleList(_ format: NSTextList.MarkerFormat) {
         guard let tv = textView, let storage = tv.textStorage else { return }
         let ns = storage.string as NSString
         let pRange = ns.paragraphRange(for: tv.selectedRange())
+        let paragraphs = Self.paragraphRanges(of: ns, in: pRange)
+        guard !paragraphs.isEmpty else { return }
         let already = listFormat(at: pRange.location, in: storage) == format
-        guard tv.shouldChangeText(in: pRange, replacementString: nil) else { return }
+
+        let list = NSTextList(markerFormat: format, options: 0)
+        let style = RichTextStyle.listParagraphStyle(list)
+
+        // Per paragraph: replace the existing "\t<marker>\t" prefix (length 0
+        // when absent) with the new marker, or with nothing when toggling off.
+        var editRanges: [NSRange] = []
+        var editStrings: [String] = []
+        for (n, p) in paragraphs.enumerated() {
+            let isListItem = p.length > 0
+                && ((storage.attribute(.paragraphStyle, at: p.location, effectiveRange: nil)
+                        as? NSParagraphStyle)?.textLists.isEmpty == false)
+            let prefixLen = isListItem
+                ? (Self.markerPrefixLength(of: ns.substring(with: p)) ?? 0) : 0
+            editRanges.append(NSRange(location: p.location, length: prefixLen))
+            editStrings.append(already ? "" : "\t" + list.marker(forItemNumber: n + 1) + "\t")
+        }
+        guard tv.shouldChangeText(inRanges: editRanges.map { NSValue(range: $0) },
+                                  replacementStrings: editStrings) else { return }
+
+        let newParagraphStyle = already ? RichTextStyle.bodyParagraphStyle() : style
         storage.beginEditing()
-        let cleared = removeListMarkers(in: pRange, storage: storage)
-        if !already {
-            applyListMarkers(format, in: cleared, storage: storage)
+        // Back-to-front so earlier paragraph locations stay valid as text
+        // shifts; each paragraph's style range is recomputed post-edit.
+        for i in paragraphs.indices.reversed() {
+            storage.replaceCharacters(
+                in: editRanges[i],
+                with: NSAttributedString(string: editStrings[i], attributes: [
+                    .font: RichTextStyle.bodyFont,
+                    .foregroundColor: RichTextStyle.inkColor,
+                    .paragraphStyle: newParagraphStyle,
+                ]))
+            let widened = (storage.string as NSString)
+                .paragraphRange(for: NSRange(location: paragraphs[i].location, length: 0))
+            storage.addAttribute(.paragraphStyle, value: newParagraphStyle, range: widened)
         }
         storage.endEditing()
         tv.didChangeText()
-        if already { tv.typingAttributes = RichTextStyle.body.attributes() }
+        if already {
+            tv.typingAttributes = RichTextStyle.body.attributes()
+        } else {
+            var typing = tv.typingAttributes
+            typing[.paragraphStyle] = style
+            tv.typingAttributes = typing
+        }
         recountWords()
     }
 
     /// The marker format of the list item at `location`, nil when not a list.
+    /// A caret on the zero-length trailing paragraph has no attributes of its
+    /// own; reading a clamped previous index would leak the PREVIOUS
+    /// paragraph's list state (and make toggling a fresh trailing line a
+    /// no-op), so anything at or past the end is simply "not a list".
     private func listFormat(at location: Int, in storage: NSTextStorage) -> NSTextList.MarkerFormat? {
-        guard storage.length > 0 else { return nil }
-        let loc = min(location, storage.length - 1)
-        let style = storage.attribute(.paragraphStyle, at: loc, effectiveRange: nil) as? NSParagraphStyle
+        guard location < storage.length else { return nil }
+        let style = storage.attribute(.paragraphStyle, at: location, effectiveRange: nil) as? NSParagraphStyle
         return style?.textLists.first?.markerFormat
     }
 
@@ -238,82 +283,62 @@ final class RichTextController {
         return i + 1
     }
 
-    /// Strip "\t<marker>\t" prefixes + list paragraph styles from every list
-    /// paragraph in `range`. Returns the range covering the same paragraphs
-    /// after the removals. Caller wraps in begin/endEditing.
-    @discardableResult
-    private func removeListMarkers(in range: NSRange, storage: NSTextStorage) -> NSRange {
-        var paragraphs: [NSRange] = []
-        (storage.string as NSString).enumerateSubstrings(
-            in: range, options: [.byParagraphs, .substringNotRequired]
-        ) { _, _, enclosing, _ in paragraphs.append(enclosing) }
-        if paragraphs.isEmpty { paragraphs = [range] }
-
-        var removed = 0
-        for p in paragraphs.reversed() {
-            guard p.length > 0,
-                  let style = storage.attribute(.paragraphStyle, at: p.location, effectiveRange: nil) as? NSParagraphStyle,
-                  !style.textLists.isEmpty else { continue }
-            let text = (storage.string as NSString).substring(with: p)
-            if let prefix = Self.markerPrefixLength(of: text) {
-                storage.replaceCharacters(in: NSRange(location: p.location, length: prefix), with: "")
-                removed += prefix
-            }
-            let newP = (storage.string as NSString).paragraphRange(for: NSRange(location: p.location, length: 0))
-            storage.addAttribute(.paragraphStyle, value: RichTextStyle.bodyParagraphStyle(), range: newP)
-        }
-        return NSRange(location: range.location, length: max(0, range.length - removed))
-    }
-
-    /// Insert "\t<marker>\t" prefixes + list paragraph styles across `range`.
-    /// One shared NSTextList per call so numbering is continuous. Caller wraps
-    /// in begin/endEditing.
-    private func applyListMarkers(_ format: NSTextList.MarkerFormat, in range: NSRange, storage: NSTextStorage) {
-        let list = NSTextList(markerFormat: format, options: 0)
-        let style = RichTextStyle.listParagraphStyle(list)
-        var paragraphs: [NSRange] = []
-        (storage.string as NSString).enumerateSubstrings(
-            in: range, options: [.byParagraphs, .substringNotRequired]
-        ) { _, _, enclosing, _ in paragraphs.append(enclosing) }
-        if paragraphs.isEmpty { paragraphs = [(storage.string as NSString).paragraphRange(for: range)] }
-
-        for (n, p) in paragraphs.enumerated().reversed() {
-            let marker = "\t" + list.marker(forItemNumber: n + 1) + "\t"
-            storage.replaceCharacters(
-                in: NSRange(location: p.location, length: 0),
-                with: NSAttributedString(string: marker, attributes: [
-                    .font: RichTextStyle.bodyFont,
-                    .foregroundColor: RichTextStyle.inkColor,
-                    .paragraphStyle: style,
-                ]))
-            let widened = (storage.string as NSString).paragraphRange(for: NSRange(location: p.location, length: 0))
-            storage.addAttribute(.paragraphStyle, value: style, range: widened)
-        }
-        if let tv = textView {
-            var typing = tv.typingAttributes
-            typing[.paragraphStyle] = style
-            tv.typingAttributes = typing
-        }
+    /// Paragraph ranges covering `range`, INCLUDING the zero-length trailing
+    /// paragraph (the empty line after a trailing newline), which NSString's
+    /// .byParagraphs enumeration never emits -- dropping it is how a list's
+    /// empty final item used to lose its marker on conversion.
+    static func paragraphRanges(of ns: NSString, in range: NSRange) -> [NSRange] {
+        var result: [NSRange] = []
+        var loc = range.location
+        repeat {
+            let p = ns.paragraphRange(for: NSRange(location: loc, length: 0))
+            result.append(p)
+            loc = NSMaxRange(p) + (p.length == 0 ? 1 : 0)   // always make progress
+        } while loc < NSMaxRange(range)
+        return result
     }
 
     // MARK: Private
 
     /// Apply a heading/body run of attributes to the selected paragraph(s).
+    /// Headings are not list items: any literal "\t<marker>\t" prefixes are
+    /// stripped in the same declared edit, or the marker text would survive
+    /// restyling as countable words. The whole paragraph range is replaced in
+    /// one shouldChangeText-declared edit so undo stays coherent (headings
+    /// wholesale-restyle the paragraph anyway, exactly like the previous
+    /// setAttributes did).
     private func applyHeading(_ style: RichTextStyle) {
         guard let tv = textView, let storage = tv.textStorage else { return }
-        let range = (tv.string as NSString).paragraphRange(for: tv.selectedRange())
+        let ns = storage.string as NSString
+        let range = ns.paragraphRange(for: tv.selectedRange())
         guard range.length > 0 || tv.string.isEmpty else {
             // Empty paragraph: set typing attributes so the next keystrokes get
             // the heading style.
             tv.typingAttributes = style.attributes()
             return
         }
-        guard tv.shouldChangeText(in: range, replacementString: nil) else { return }
+
+        // Rebuild the paragraph text with marker prefixes dropped.
+        var stripped = ""
+        for p in Self.paragraphRanges(of: ns, in: range) where p.length > 0 {
+            var text = ns.substring(with: p)
+            if let s = storage.attribute(.paragraphStyle, at: p.location, effectiveRange: nil) as? NSParagraphStyle,
+               !s.textLists.isEmpty,
+               let prefix = Self.markerPrefixLength(of: text) {
+                text = (text as NSString).substring(from: prefix)
+            }
+            stripped += text
+        }
+
+        guard tv.shouldChangeText(in: range, replacementString: stripped) else { return }
         storage.beginEditing()
-        storage.setAttributes(style.attributes(), range: range)
+        storage.replaceCharacters(in: range,
+                                  with: NSAttributedString(string: stripped,
+                                                           attributes: style.attributes()))
         storage.endEditing()
         tv.didChangeText()
         tv.typingAttributes = style.attributes()
+        recountWords()
     }
 }
 
@@ -329,7 +354,7 @@ enum RichTextStyle {
     static let h2FontSize: CGFloat = 21
 
     // List geometry. Level 0 markers sit at `listFirstLineHeadIndent`; the item
-    // text starts at `listHeadIndent`. Tab/Shift+Tab move whole levels.
+    // text starts at `listHeadIndent`. The upcoming key-handling pass moves whole levels with Tab/Shift+Tab.
     static let listFirstLineHeadIndent: CGFloat = 8
     static let listHeadIndent: CGFloat = 30
     static let listIndentStep: CGFloat = 24
