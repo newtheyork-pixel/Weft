@@ -236,6 +236,30 @@ final class SupabaseManager: @unchecked Sendable {
         return try decode(T.self, from: data)
     }
 
+    // MARK: - Edge Functions (/functions/v1/<name>)
+
+    /// POST to a Supabase Edge Function. Sends the `apikey` and the signed-in
+    /// user's Bearer token so a `verify_jwt` function accepts the call and can
+    /// re-derive the caller. Returns the raw response data; throws on non-2xx.
+    @discardableResult
+    func callFunction(_ name: String, body: [String: Any]) async throws -> Data {
+        var req = URLRequest(url: SupabaseConfig.url.appendingPathComponent("functions/v1/\(name)"))
+        req.httpMethod = "POST"
+        for (k, v) in await headers(contentJSON: true) { req.setValue(v, forHTTPHeaderField: k) }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+        return try await perform(req)
+    }
+
+    /// Fire a notification-email event (assignment_launched / class_invite /
+    /// grades_published). Best-effort: a failed or unconfigured email must never
+    /// break launching, grading, or joining, so this swallows errors.
+    func notify(_ event: String, body: [String: Any]) async {
+        var payload = body
+        payload["event"] = event
+        do { _ = try await callFunction("notify", body: payload) }
+        catch { print("notify(\(event)) failed: \(error)") }
+    }
+
     // MARK: - Typed RPC calls (the real Weft RPCs)
 
     /// One row per assignment (version_group_id) for a class: active session,

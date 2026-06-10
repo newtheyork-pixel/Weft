@@ -37,6 +37,18 @@ struct StudentJoinView: View {
             }
         }
         .background(AmbientBackground())
+        .onAppear { consumePrefill() }
+        .onChange(of: app.prefilledJoinCode) { _, _ in consumePrefill() }
+    }
+
+    /// Pull a `weft://join?code=…` deep-link code into the field and consume it.
+    /// Driven by both appear and state-change so a link that arrives while the
+    /// join screen is already visible still pre-fills.
+    private func consumePrefill() {
+        guard let pre = app.prefilledJoinCode, !pre.isEmpty else { return }
+        code = String(pre.uppercased().filter { $0.isLetter || $0.isNumber }.prefix(6))
+        app.prefilledJoinCode = nil
+        codeFocused = true
     }
 
     // MARK: Card

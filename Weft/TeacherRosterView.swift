@@ -9,6 +9,8 @@ import SwiftUI
 struct TeacherRosterView: View {
     @Environment(AppState.self) private var app
 
+    @State private var inviteText: String = ""
+
     private var active: [ClassEnrollment] { app.classRoster.filter(\.isActive) }
 
     var body: some View {
@@ -18,6 +20,7 @@ struct TeacherRosterView: View {
                 VStack(alignment: .leading, spacing: Theme.Space.lg) {
                     header
                     if active.isEmpty { emptyState } else { rosterCard }
+                    inviteCard
                 }
                 .padding(Theme.Space.xl)
                 .frame(maxWidth: 620)
@@ -67,6 +70,47 @@ struct TeacherRosterView: View {
                     }
                     .padding(.horizontal, 22).padding(.vertical, 12)
                     .rowHover()
+                }
+            }
+        }
+    }
+
+    private var inviteCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: Theme.Space.md) {
+                HStack {
+                    Image(systemName: "envelope.badge").foregroundStyle(Theme.muted)
+                    Kicker(text: "Invite students")
+                }
+                Text("Email an invitation that includes this class's join code. Separate addresses with commas, spaces, or new lines.")
+                    .font(Theme.sans(13)).foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextEditor(text: $inviteText)
+                    .font(Theme.sans(14))
+                    .foregroundStyle(Theme.inkSoft)
+                    .frame(minHeight: 74)
+                    .padding(8)
+                    .weftGlass(Theme.Radius.md)
+                    .scrollContentBackground(.hidden)
+                HStack(alignment: .firstTextBaseline) {
+                    Button {
+                        let emails = inviteText
+                            .split(whereSeparator: { $0 == "," || $0 == "\n" || $0 == " " || $0 == ";" })
+                            .map(String.init)
+                        Task { await app.inviteStudents(emails: emails); inviteText = "" }
+                    } label: {
+                        Label("Send invitations", systemImage: "paperplane.fill")
+                            .font(Theme.sans(14, .semibold))
+                    }
+                    .buttonStyle(.glassProminent).tint(Theme.accent).linkPointer()
+                    .disabled(inviteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Spacer()
+                    if let status = app.inviteStatus {
+                        Text(status)
+                            .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.trailing)
+                    }
                 }
             }
         }
