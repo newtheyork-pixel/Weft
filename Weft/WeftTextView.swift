@@ -13,15 +13,21 @@ final class WeftTextView: NSTextView {
     weak var formatting: RichTextController?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard event.type == .keyDown, let formatting else {
+        // Key equivalents traverse the whole window's view tree; without the
+        // first-responder guard an UNFOCUSED editor would steal Cmd+B/I/U from
+        // whatever the student is actually typing in (the reference panel's
+        // web forms, for one) and silently mutate the essay.
+        guard event.type == .keyDown,
+              window?.firstResponder === self,
+              !hasMarkedText(),               // never reformat mid-IME composition
+              let formatting else {
             return super.performKeyEquivalent(with: event)
         }
-        // Strip .function too: number-row keys set it on some keyboards and it
-        // survives deviceIndependentFlagsMask, which would silently break the
-        // Cmd+Alt+1 / Cmd+Shift+7 equality checks below.
-        let flags = event.modifierFlags
-            .intersection(.deviceIndependentFlagsMask)
-            .subtracting(.function)
+        // Compare against just the four modifiers we mean: the device mask
+        // also carries .function (number-row keys on some keyboards),
+        // .capsLock, and .numericPad, any of which would break strict
+        // equality and silently kill the shortcut.
+        let flags = event.modifierFlags.intersection([.command, .option, .shift, .control])
         let key = (event.charactersIgnoringModifiers ?? "").lowercased()
 
         // Cmd+B / Cmd+I / Cmd+U — bold / italic / underline.
@@ -54,12 +60,14 @@ final class WeftTextView: NSTextView {
         return super.performKeyEquivalent(with: event)
     }
 
-    // Return inside a list: an empty item ends the list; otherwise make sure
-    // the list continues with the next marker (no-op if AppKit carried it).
+    // Return inside a list: an empty item ends the list; otherwise the
+    // controller inserts newline + next marker as one edit (super must NOT
+    // run for list paragraphs — TextKit 2's native list handling underneath
+    // it inserts stray newlines and fights the caret).
     override func insertNewline(_ sender: Any?) {
         if formatting?.endListIfEmptyItem() == true { return }
+        if formatting?.insertListNewline() == true { return }
         super.insertNewline(sender)
-        formatting?.continueListAfterNewlineIfNeeded()
     }
 
     // Tab / Shift+Tab indent and outdent list items (Google Docs). Outside a

@@ -205,8 +205,7 @@ final class RichTextController {
     /// converts in place. One pass, back-to-front, with the REAL per-paragraph
     /// edits declared to shouldChangeText so undo restores the text coherently
     /// (the reapplied paragraph style rides along and the next toggle resets it).
-    /// Numbering restarts at 1 for each toggle; renumber-on-edit is the
-    /// key-handling task's job.
+    /// Numbering restarts at 1 for each toggle; renumber-on-edit is deferred (TODO).
     private func toggleList(_ format: NSTextList.MarkerFormat) {
         guard let tv = textView, let storage = tv.textStorage else { return }
         let ns = storage.string as NSString
@@ -323,43 +322,50 @@ final class RichTextController {
         storage.addAttribute(.paragraphStyle, value: RichTextStyle.bodyParagraphStyle(), range: newP)
         storage.endEditing()
         tv.didChangeText()
+        // Restore the caret onto the emptied line; the post-edit selection
+        // fixup otherwise leaves it one line below.
+        tv.setSelectedRange(NSRange(location: p.location, length: 0))
         tv.typingAttributes = RichTextStyle.body.attributes()
         recountWords()
         return true
     }
 
-    /// After a plain newline inside a list item, carry the list onto the new
-    /// paragraph with the next marker. No-ops when the previous paragraph is
-    /// not a list item or when the marker is already there (AppKit carried it).
-    func continueListAfterNewlineIfNeeded() {
-        guard let tv = textView, let storage = tv.textStorage else { return }
-        let caret = tv.selectedRange().location
-        guard caret > 0 else { return }
+    /// Return inside a list item: insert the newline AND the next item's
+    /// marker as ONE declared edit, skipping NSTextView's own insertNewline.
+    /// TextKit 2 runs native list behavior underneath super (it can insert a
+    /// second newline at document end), and a combined post-edit attribute
+    /// pass snaps the caret out of the new item; a single replaceCharacters
+    /// with an explicit caret restore avoids both, and makes one keypress =
+    /// one undo step by construction. True = handled (caller must NOT call
+    /// super). Splitting mid-item carries the tail into the new item, like
+    /// Google Docs. Downstream items are not renumbered (deferred: TODO).
+    func insertListNewline() -> Bool {
+        guard let tv = textView, let storage = tv.textStorage else { return false }
         let ns = storage.string as NSString
-        let newP = ns.paragraphRange(for: NSRange(location: caret, length: 0))
-        guard newP.location > 0 else { return }
-        let prevP = ns.paragraphRange(for: NSRange(location: newP.location - 1, length: 0))
-        guard prevP.length > 0,
-              let prevStyle = storage.attribute(.paragraphStyle, at: prevP.location, effectiveRange: nil) as? NSParagraphStyle,
-              let list = prevStyle.textLists.first else { return }
-        if Self.markerPrefixLength(of: ns.substring(with: newP)) != nil { return }   // already carried
+        let sel = tv.selectedRange()
+        let p = ns.paragraphRange(for: sel)
+        guard p.length > 0,
+              let style = storage.attribute(.paragraphStyle, at: p.location, effectiveRange: nil) as? NSParagraphStyle,
+              let list = style.textLists.first else { return false }
 
-        let marker = "\t" + list.marker(forItemNumber: itemNumber(of: prevP, in: storage) + 1) + "\t"
-        let insert = NSRange(location: newP.location, length: 0)
-        guard tv.shouldChangeText(in: insert, replacementString: marker) else { return }
+        let marker = "\t" + list.marker(forItemNumber: itemNumber(of: p, in: storage) + 1) + "\t"
+        let insert = "\n" + marker
+        guard tv.shouldChangeText(in: sel, replacementString: insert) else { return true }
         storage.beginEditing()
         storage.replaceCharacters(
-            in: insert,
-            with: NSAttributedString(string: marker, attributes: [
+            in: sel,
+            with: NSAttributedString(string: insert, attributes: [
                 .font: RichTextStyle.bodyFont,
                 .foregroundColor: RichTextStyle.inkColor,
-                .paragraphStyle: prevStyle,
+                .paragraphStyle: style,
             ]))
-        let widened = (storage.string as NSString).paragraphRange(for: NSRange(location: newP.location, length: 0))
-        storage.addAttribute(.paragraphStyle, value: prevStyle, range: widened)
         storage.endEditing()
         tv.didChangeText()
+        // Caret explicitly after the marker, inside the new item; the implicit
+        // post-edit selection fixup would otherwise snap it elsewhere.
+        tv.setSelectedRange(NSRange(location: sel.location + (insert as NSString).length, length: 0))
         recountWords()
+        return true
     }
 
     /// 1-based position of `paragraph` within its contiguous run of list items
@@ -397,16 +403,14 @@ final class RichTextController {
         guard tv.shouldChangeText(in: range, replacementString: nil) else { return true }
         storage.beginEditing()
         storage.enumerateAttribute(.paragraphStyle, in: range, options: []) { value, sub, _ in
-            guard let s = value as? NSParagraphStyle, !s.textLists.isEmpty,
-                  let m = s.mutableCopy() as? NSMutableParagraphStyle else { return }
+            guard let s = value as? NSParagraphStyle,
+                  let list = s.textLists.first else { return }
             let level = Int(round((s.headIndent - RichTextStyle.listHeadIndent) / RichTextStyle.listIndentStep))
             let newLevel = max(0, min(RichTextStyle.listMaxLevel, level + delta))
             guard newLevel != level else { return }
-            let bump = CGFloat(newLevel) * RichTextStyle.listIndentStep
-            m.firstLineHeadIndent = RichTextStyle.listFirstLineHeadIndent + bump
-            m.headIndent = RichTextStyle.listHeadIndent + bump
-            m.tabStops = [NSTextTab(textAlignment: .left, location: RichTextStyle.listHeadIndent + bump)]
-            storage.addAttribute(.paragraphStyle, value: m, range: sub)
+            storage.addAttribute(.paragraphStyle,
+                                 value: RichTextStyle.listParagraphStyle(list, level: newLevel),
+                                 range: sub)
         }
         storage.endEditing()
         tv.didChangeText()
