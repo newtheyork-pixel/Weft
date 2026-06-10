@@ -152,7 +152,27 @@ struct LockedBrowserView: NSViewRepresentable {
                 decisionHandler(.allow)
             } else {
                 decisionHandler(.cancel)
-                reportBlocked(target)
+                // Only surface the banner for attempts the STUDENT made.
+                // Approved pages routinely embed off-list iframes (ads, video,
+                // consent widgets) that navigate on their own during load;
+                // those stay silently cancelled, or the banner fires "by
+                // itself" with no click. The same applies to a click on an
+                // off-list link INSIDE an allowed iframe: a dead link with no
+                // banner is deliberate, because no public signal reliably
+                // separates that click from the scripted subframe noise this
+                // gate exists to silence.
+                let targetsMainFrame = navigationAction.targetFrame?.isMainFrame ?? false
+                // nil targetFrame = new-window attempt. Cancelling it here
+                // means createWebViewWith never runs for it, so a student's
+                // off-list target="_blank" click must be reported NOW. The
+                // .linkActivated qualifier keeps scripted _blank attempts from
+                // ad iframes quiet (synthetic a.click() can still spoof it, so
+                // this is a strong heuristic, not a proof).
+                let newWindowLinkClick = navigationAction.targetFrame == nil
+                    && navigationAction.navigationType == .linkActivated
+                if targetsMainFrame || newWindowLinkClick {
+                    reportBlocked(target)
+                }
             }
         }
 
@@ -168,7 +188,10 @@ struct LockedBrowserView: NSViewRepresentable {
                 decisionHandler(.allow)
             } else {
                 decisionHandler(.cancel)
-                if let target = navigationResponse.response.url {
+                // Same main-frame-only rule as the action gate: a redirect that
+                // lands a subframe off-list is cancelled silently.
+                if navigationResponse.isForMainFrame,
+                   let target = navigationResponse.response.url {
                     reportBlocked(target)
                 }
             }
