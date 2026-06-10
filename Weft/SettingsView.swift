@@ -9,7 +9,6 @@ import SwiftUI
 
 /// Shared preference keys so views and Settings agree on the same storage.
 enum Prefs {
-    static let referenceDefaultMode = "weft.referenceDefaultMode" // "split"|"pdf"|"web"
     static let confirmBeforeSubmit  = "weft.confirmBeforeSubmit"  // Bool
 }
 
@@ -28,7 +27,6 @@ struct SettingsView: View {
 
 private struct GeneralSettings: View {
     @Environment(AppState.self) private var app
-    @AppStorage(Prefs.referenceDefaultMode) private var referenceMode = "split"
     @AppStorage(Prefs.confirmBeforeSubmit) private var confirmSubmit = true
 
     var body: some View {
@@ -53,11 +51,6 @@ private struct GeneralSettings: View {
             }
 
             Section("Writing") {
-                Picker("Default reference layout", selection: $referenceMode) {
-                    Text("Split (PDF + web)").tag("split")
-                    Text("PDF only").tag("pdf")
-                    Text("Web only").tag("web")
-                }
                 Toggle("Confirm before submitting an exam", isOn: $confirmSubmit)
             }
         }

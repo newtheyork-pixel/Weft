@@ -1,19 +1,14 @@
 //
 //  ExamReferencePanel.swift
-//  Weft — the exam's reference column: the student chooses to see the teacher's
-//  PDFs, the approved web links, or both at once (a native VSplitView), and can
-//  collapse the whole column to write-only. PDFs render for real (PDFKit); the
-//  web pane is the host-locked reference browser.
+//  Weft — the exam's reference area, browser-style: every teacher PDF and
+//  approved website is a TAB. Click to switch instantly; views are created on
+//  first visit and kept alive for the whole exam, so scroll / zoom / page /
+//  web-navigation state survives and nothing ever reloads. A Split toggle
+//  pins the current material above while the tabs drive the lower pane.
 //
 
 import SwiftUI
 import PDFKit
-
-enum ReferenceMode: String, CaseIterable, Identifiable {
-    case split, pdf, web
-    var id: String { rawValue }
-    var label: String { self == .split ? "Split" : (self == .pdf ? "PDF" : "Web") }
-}
 
 struct ExamReferencePanel: View {
     let files: [ExamFile]
@@ -21,16 +16,12 @@ struct ExamReferencePanel: View {
     let signedIn: Bool
     var onHide: () -> Void
 
-    @AppStorage(Prefs.referenceDefaultMode) private var defaultMode = "split"
-    @State private var mode: ReferenceMode = .split
-    @State private var selectedFileID: String?
-    @State private var selectedLinkID: String?
-    @State private var pdf: PDFDocument?
-    @State private var pdfLoading = false
+    @State private var store = ReferenceTabStore()
     @State private var blockedHost: String?
-    @State private var loadTask: Task<Void, Never>?
+    /// Top pane's share of the height in split mode (drag the divider).
+    @State private var splitFraction: CGFloat = 0.5
 
-    private var allowedHosts: [String] { links.map(\.host) }
+    private let dividerThickness: CGFloat = 7
 
     /// Build a loadable URL from an approved link, prepending https:// when the
     /// teacher stored a bare host (otherwise the locked browser silently blocks
@@ -39,52 +30,59 @@ struct ExamReferencePanel: View {
         let s = raw.contains("://") ? raw : "https://" + raw
         return URL(string: s)
     }
-    private var selectedFile: ExamFile? {
-        files.first { $0.id == selectedFileID } ?? files.first
-    }
-    private var selectedLink: ExamLink? {
-        links.first { $0.id == selectedLinkID } ?? links.first
-    }
 
     var body: some View {
         VStack(spacing: 0) {
-            modeBar
+            tabStrip
             Divider()
-            content
-        }
-        .background(Color(white: 0.96))
-        .task { primeSelection() }
-        // The single PDF-load path: selection changes drive reloadPDF (which
-        // cancels any in-flight load and guards against out-of-order results).
-        .onChange(of: selectedFileID) { _, _ in reloadPDF() }
-        // Real materials can arrive after the panel is shown (loadExamMaterials
-        // resolves async). Re-point the selection without resetting the user's
-        // chosen mode.
-        .onChange(of: files) { _, _ in
-            if selectedFileID == nil || !files.contains(where: { $0.id == selectedFileID }) {
-                selectedFileID = files.first?.id   // fires onChange -> reloadPDF
+            if store.materials.isEmpty {
+                emptyState
+            } else {
+                materialCanvas
             }
         }
-        .onChange(of: links) { _, _ in
-            if selectedLinkID == nil || !links.contains(where: { $0.id == selectedLinkID }) {
-                selectedLinkID = links.first?.id
+        .background(Color(white: 0.96))
+        .task { store.configure(files: files, links: links, signedIn: signedIn) }
+        .onChange(of: files) { _, f in store.configure(files: f, links: links, signedIn: signedIn) }
+        .onChange(of: links) { _, l in store.configure(files: files, links: l, signedIn: signedIn) }
+        .overlay(alignment: .top) {
+            if let host = blockedHost {
+                Text("Blocked: \(host) is not on your teacher's list.")
+                    .font(Theme.sans(12, .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, Theme.Space.md).padding(.vertical, Theme.Space.sm)
+                    .background(Theme.bad, in: Capsule())
+                    .padding(.top, 52)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .task {
+                        try? await Task.sleep(for: .seconds(3))
+                        withAnimation { blockedHost = nil }
+                    }
             }
         }
     }
 
-    // MARK: Mode bar
-    private var modeBar: some View {
+    // MARK: Tab strip
+
+    private var tabStrip: some View {
         HStack(spacing: Theme.Space.sm) {
-            Picker("", selection: $mode) {
-                ForEach(ReferenceMode.allCases) { m in Text(m.label).tag(m) }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(store.materials) { m in tabChip(m) }
+                }
+                .padding(.vertical, 2)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-            .help("Show PDFs, web links, or both")
-
             Spacer(minLength: 0)
-
+            if store.materials.count > 1 {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { store.toggleSplit() }
+                } label: {
+                    Image(systemName: store.splitActive ? "rectangle" : "rectangle.split.1x2")
+                }
+                .buttonStyle(.borderless)
+                .help(store.splitActive ? "Back to one pane"
+                                        : "Split: pin this on top, browse another below")
+            }
             Button(action: onHide) {
                 Image(systemName: "sidebar.right")
             }
@@ -96,184 +94,149 @@ struct ExamReferencePanel: View {
         .background(.regularMaterial)
     }
 
-    // MARK: Content (split / pdf / web)
-    @ViewBuilder private var content: some View {
-        switch mode {
-        case .split:
-            VSplitView {
-                pdfPane.frame(minHeight: 140)
-                webPane.frame(minHeight: 140)
+    private func tabChip(_ m: ReferenceMaterial) -> some View {
+        let active = store.selectedID == m.id || store.pinnedID == m.id
+        return Button { store.select(m.id) } label: {
+            HStack(spacing: 5) {
+                if store.pinnedID == m.id {
+                    Image(systemName: "pin.fill").font(.system(size: 9, weight: .semibold))
+                } else if store.pdfState(for: m) == .loading {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: m.icon).font(.system(size: 10, weight: .semibold))
+                }
+                Text(m.title)
+                    .font(Theme.sans(12, active ? .semibold : .regular))
+                    .lineLimit(1)
             }
-        case .pdf:
-            pdfPane
-        case .web:
-            webPane
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(active ? Theme.accent.opacity(0.14) : Color.black.opacity(0.04),
+                        in: Capsule())
+            .foregroundStyle(active ? Theme.accent : Theme.ink)
         }
+        .buttonStyle(.plain)
+        .pointerStyle(.link)
+        .help(m.title)
     }
 
-    // MARK: PDF pane
-    private var pdfPane: some View {
-        VStack(spacing: 0) {
-            paneHeader(icon: "doc.text.fill") {
-                if files.isEmpty {
-                    Text("No reference files").foregroundStyle(Theme.muted)
-                } else if files.count == 1 {
-                    Text(selectedFile?.originalName ?? "Document")
-                        .foregroundStyle(Theme.ink).lineLimit(1)
-                } else {
-                    Menu {
-                        ForEach(files) { f in
-                            Button(f.originalName) { selectedFileID = f.id }
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(selectedFile?.originalName ?? "Document")
-                                .foregroundStyle(Theme.ink).lineLimit(1)
-                            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(Theme.muted)
-                        }
+    // MARK: Material canvas (every visited view stays mounted; frames switch)
+
+    private var visitedMaterials: [ReferenceMaterial] {
+        store.materials.filter { store.visitedIDs.contains($0.id) }
+    }
+
+    private enum PaneRole { case pinned, active, hidden }
+
+    private func role(of m: ReferenceMaterial) -> PaneRole {
+        if store.splitActive, store.pinnedID == m.id { return .pinned }
+        if store.selectedID == m.id { return .active }
+        return .hidden
+    }
+
+    private var materialCanvas: some View {
+        GeometryReader { geo in
+            let split = store.splitActive
+            let topH = split ? min(max(120, geo.size.height * splitFraction),
+                                   max(120, geo.size.height - 120 - dividerThickness)) : 0
+            let bottomH = split ? max(0, geo.size.height - topH - dividerThickness)
+                                : geo.size.height
+
+            ZStack(alignment: .topLeading) {
+                ForEach(visitedMaterials) { m in
+                    let r = role(of: m)
+                    materialView(m)
+                        .frame(width: geo.size.width, height: r == .pinned ? topH : bottomH)
+                        .offset(y: r == .pinned ? 0 : (split ? topH + dividerThickness : 0))
+                        .opacity(r == .hidden ? 0 : 1)
+                        .allowsHitTesting(r != .hidden)
+                        .accessibilityHidden(r == .hidden)
+                }
+
+                // Same material pinned AND selected: the lower pane is empty.
+                if split, store.pinnedID == store.selectedID {
+                    Text("Pick another tab to show here")
+                        .font(Theme.sans(13))
+                        .foregroundStyle(Theme.muted)
+                        .frame(width: geo.size.width, height: bottomH)
+                        .background(Color(white: 0.95))
+                        .offset(y: topH + dividerThickness)
+                }
+
+                if split {
+                    ZStack {
+                        Rectangle().fill(Color.black.opacity(0.08))
+                        Capsule().fill(Color.black.opacity(0.25)).frame(width: 36, height: 3)
                     }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                }
-            }
-            Divider()
-            ZStack {
-                if let pdf {
-                    PDFKitView(document: pdf)
-                } else if pdfLoading {
-                    ProgressView("Loading document…")
-                        .controlSize(.small)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(Color(white: 0.93))
-                } else {
-                    paneEmpty(icon: "doc", text: files.isEmpty
-                              ? "Your teacher didn't attach any files."
-                              : "Couldn't load this document.")
-                }
-            }
-        }
-    }
-
-    // MARK: Web pane
-    private var webPane: some View {
-        VStack(spacing: 0) {
-            paneHeader(icon: "lock.fill") {
-                if links.isEmpty {
-                    Text("No reference links").foregroundStyle(Theme.muted)
-                } else {
-                    Menu {
-                        ForEach(links) { l in
-                            Button { selectedLinkID = l.id; blockedHost = nil } label: {
-                                Text("\(l.displayName) · \(l.host)")
+                    .frame(width: geo.size.width, height: dividerThickness)
+                    .offset(y: topH)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { v in
+                                splitFraction = min(0.8, max(0.2, v.location.y / max(geo.size.height, 1)))
                             }
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(selectedLink.map { "\($0.displayName) · \($0.host)" } ?? "Pick a site")
-                                .foregroundStyle(Theme.ink).lineLimit(1)
-                            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(Theme.muted)
-                        }
-                    }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                }
-            }
-            Divider()
-            ZStack(alignment: .top) {
-                if let link = selectedLink, let url = normalizedURL(link.url) {
-                    LockedBrowserView(url: url, allowedHosts: allowedHosts) { blocked in
-                        blockedHost = blocked.host
-                    }
-                    .id(link.id)
-                } else {
-                    paneEmpty(icon: "globe", text: "Your teacher didn't approve any links.")
-                }
-                if let host = blockedHost {
-                    Text("Blocked: \(host) is not on your teacher's list.")
-                        .font(Theme.sans(12, .medium))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, Theme.Space.md).padding(.vertical, Theme.Space.sm)
-                        .background(Theme.bad, in: Capsule())
-                        .padding(.top, Theme.Space.sm)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                        .task {
-                            try? await Task.sleep(for: .seconds(3))
-                            withAnimation { blockedHost = nil }
-                        }
+                    )
                 }
             }
         }
     }
 
-    // MARK: Shared pane chrome
-    private func paneHeader<Title: View>(icon: String, @ViewBuilder title: () -> Title) -> some View {
-        HStack(spacing: Theme.Space.sm) {
-            Image(systemName: icon)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.accent)
-            title().font(Theme.sans(12.5, .semibold))
-            Spacer(minLength: 0)
+    @ViewBuilder private func materialView(_ m: ReferenceMaterial) -> some View {
+        switch m {
+        case .pdf(let file): pdfView(file)
+        case .web(let link): webView(link)
         }
-        .padding(.horizontal, Theme.Space.md)
-        .padding(.vertical, 7)
-        .background(Color(white: 0.985))
     }
 
-    private func paneEmpty(icon: String, text: String) -> some View {
+    @ViewBuilder private func pdfView(_ file: ExamFile) -> some View {
+        switch store.pdfStates[file.id] {
+        case .loaded(let doc):
+            PDFKitView(document: doc)
+        case .failed:
+            VStack(spacing: Theme.Space.md) {
+                Image(systemName: "doc.questionmark")
+                    .font(.system(size: 26)).foregroundStyle(Theme.muted2)
+                Text("Couldn't load \(file.originalName).")
+                    .font(Theme.sans(13)).foregroundStyle(Theme.muted)
+                    .multilineTextAlignment(.center)
+                Button("Try again") { store.retry(file: file) }
+                    .buttonStyle(.glass)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(white: 0.95))
+        case .loading, nil:
+            ProgressView("Loading document…")
+                .controlSize(.small)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(white: 0.93))
+        }
+    }
+
+    @ViewBuilder private func webView(_ link: ExamLink) -> some View {
+        if let url = normalizedURL(link.url) {
+            LockedBrowserView(url: url, allowedHosts: store.allowedHosts) { blocked in
+                withAnimation { blockedHost = blocked.host ?? "that site" }
+            }
+        } else {
+            VStack(spacing: Theme.Space.sm) {
+                Image(systemName: "globe").font(.system(size: 26)).foregroundStyle(Theme.muted2)
+                Text("This link couldn't be opened.")
+                    .font(Theme.sans(13)).foregroundStyle(Theme.muted)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(white: 0.95))
+        }
+    }
+
+    private var emptyState: some View {
         VStack(spacing: Theme.Space.sm) {
-            Image(systemName: icon).font(.system(size: 26)).foregroundStyle(Theme.muted2)
-            Text(text).font(Theme.sans(13)).foregroundStyle(Theme.muted)
+            Image(systemName: "books.vertical").font(.system(size: 26)).foregroundStyle(Theme.muted2)
+            Text("Your teacher didn't attach any reference materials.")
+                .font(Theme.sans(13)).foregroundStyle(Theme.muted)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(white: 0.95))
-    }
-
-    // MARK: Loading
-
-    /// First appearance: seed selection + the initial layout mode. Setting
-    /// `selectedFileID` from nil fires `.onChange` which performs the single load,
-    /// so we do NOT load here (avoids a double request). Mode is set once here and
-    /// never reset by later data arrivals.
-    private func primeSelection() {
-        if selectedFileID == nil { selectedFileID = files.first?.id }
-        if selectedLinkID == nil { selectedLinkID = links.first?.id }
-        mode = ReferenceMode(rawValue: defaultMode) ?? .split
-        if files.isEmpty && !links.isEmpty { mode = .web }
-        else if links.isEmpty && !files.isEmpty { mode = .pdf }
-    }
-
-    /// Load the selected file's PDF. Cancels any in-flight load, shows the
-    /// spinner during a switch, and discards a result whose file is no longer
-    /// selected (out-of-order completion guard).
-    private func reloadPDF() {
-        loadTask?.cancel()
-        guard let file = selectedFile else { pdf = nil; pdfLoading = false; return }
-        // Sample materials (empty storage path) or not signed in → the bundled
-        // sample document so the viewer is always populated for QA.
-        if file.storagePath.isEmpty || !signedIn {
-            pdf = SamplePDF.shared
-            pdfLoading = false
-            return
-        }
-        pdf = nil
-        pdfLoading = true
-        let targetID = file.id
-        loadTask = Task {
-            let loaded = await loadDocument(for: file)
-            if Task.isCancelled { return }
-            guard selectedFile?.id == targetID else { return }  // selection moved on
-            pdf = loaded
-            pdfLoading = false
-        }
-    }
-
-    private func loadDocument(for file: ExamFile) async -> PDFDocument? {
-        do {
-            let url = try await SupabaseManager.shared.signedURL(bucket: "essay-files", path: file.storagePath)
-            return await PDFLoader.load(from: url)
-        } catch {
-            return nil
-        }
     }
 }

@@ -58,6 +58,18 @@ final class ReferenceTabStore {
     }
     var splitActive: Bool { pinnedID != nil }
 
+    /// The selected / pinned material rows (panel conveniences).
+    var selected: ReferenceMaterial? { materials.first { $0.id == selectedID } }
+    var pinned: ReferenceMaterial? { materials.first { $0.id == pinnedID } }
+
+    /// Load state for a material; nil for web materials (they have no
+    /// prefetch). Bridges the two id spaces: pdfStates is keyed by the raw
+    /// ExamFile.id, everything else by ReferenceMaterial.id.
+    func pdfState(for material: ReferenceMaterial) -> PDFState? {
+        if case .pdf(let f) = material { return pdfStates[f.id] }
+        return nil
+    }
+
     /// (Re)build the material list. Real materials can arrive after the panel
     /// is shown (loadExamMaterials resolves async), so this keeps the user's
     /// selection when it still exists and prefetches only new files.
@@ -69,6 +81,17 @@ final class ReferenceTabStore {
         }
         if let pinned = pinnedID, !materials.contains(where: { $0.id == pinned }) {
             pinnedID = nil
+        }
+        // Materials can be replaced mid-exam (samples -> real). Drop ghost
+        // visited entries and the load state/tasks of files that went away,
+        // so no stale view stays mounted and no cancelled download writes back.
+        let ids = Set(materials.map(\.id))
+        visitedIDs.formIntersection(ids)
+        let fileIDs = Set(files.map(\.id))
+        for staleID in pdfStates.keys where !fileIDs.contains(staleID) {
+            prefetchTasks[staleID]?.cancel()
+            prefetchTasks[staleID] = nil
+            pdfStates[staleID] = nil
         }
         if let selectedID { visitedIDs.insert(selectedID) }
         for file in files where pdfStates[file.id] == nil { prefetch(file) }
