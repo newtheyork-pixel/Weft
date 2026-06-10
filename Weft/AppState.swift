@@ -856,12 +856,16 @@ final class AppState {
     /// Populates `submittedEssay` on success, `submittedEssayError` on failure.
     func loadSubmittedWork(versionGroupId: String) async {
         do {
-            if let essay = try await supabase.getMySubmission(versionGroupId: versionGroupId) {
+            let essay = try await supabase.getMySubmission(versionGroupId: versionGroupId)
+            // A newer open owns the screen now; drop this stale result.
+            guard versionGroupId == submittedVersionGroupId else { return }
+            if let essay {
                 submittedEssay = essay
             } else {
                 submittedEssayError = "Couldn't find your submitted essay."
             }
         } catch {
+            guard versionGroupId == submittedVersionGroupId else { return }
             submittedEssayError = describe(error)
         }
     }

@@ -177,7 +177,7 @@ struct SubmittedWorkView: View {
     /// "Submitted Jan 5 · 312 words" meta line below the title.
     private func metaLine(_ essay: SubmittedEssay) -> String {
         let f = DateFormatter()
-        f.dateFormat = "MMM d, yyyy"
+        f.dateFormat = "MMM d"
         let dateStr = f.string(from: essay.submittedAt)
         let words = essay.wordCount
         return "Submitted \(dateStr) · \(words) \(words == 1 ? "word" : "words")"

@@ -222,8 +222,26 @@ final class RichTextController {
         guard !paragraphs.isEmpty else { return }
         let already = listFormat(at: pRange.location, in: storage) == format
 
+        // Capture typing font/color so the marker run adopts the student's
+        // chosen inline style rather than hardcoding bodyFont/inkColor.
+        let markerFont = (tv.typingAttributes[.font] as? NSFont) ?? RichTextStyle.bodyFont
+        let markerColor = (tv.typingAttributes[.foregroundColor] as? NSColor) ?? RichTextStyle.inkColor
+
+        // Derive the active line-spacing multiple from the first selected
+        // paragraph so toggling a list on a single-spaced paragraph doesn't
+        // silently reset it to double.
+        let firstParaStyle = paragraphs.first.flatMap {
+            $0.length > 0 ? storage.attribute(.paragraphStyle, at: $0.location, effectiveRange: nil) as? NSParagraphStyle : nil
+        }
+        let typingParaStyle = tv.typingAttributes[.paragraphStyle] as? NSParagraphStyle
+        let activeMultiple: CGFloat = {
+            if let m = firstParaStyle?.lineHeightMultiple, m > 0 { return m }
+            if let m = typingParaStyle?.lineHeightMultiple, m > 0 { return m }
+            return RichTextStyle.defaultLineHeightMultiple
+        }()
+
         let list = NSTextList(markerFormat: format, options: 0)
-        let style = RichTextStyle.listParagraphStyle(list)
+        let style = RichTextStyle.listParagraphStyle(list, multiple: activeMultiple)
 
         // Per paragraph: replace the existing "\t<marker>\t" prefix (length 0
         // when absent) with the new marker, or with nothing when toggling off.
@@ -249,8 +267,8 @@ final class RichTextController {
             storage.replaceCharacters(
                 in: editRanges[i],
                 with: NSAttributedString(string: editStrings[i], attributes: [
-                    .font: RichTextStyle.bodyFont,
-                    .foregroundColor: RichTextStyle.inkColor,
+                    .font: markerFont,
+                    .foregroundColor: markerColor,
                     .paragraphStyle: newParagraphStyle,
                 ]))
             let widened = (storage.string as NSString)
@@ -369,6 +387,13 @@ final class RichTextController {
             edit = NSRange(location: clamped, length: end - clamped)
         }
 
+        // Carry the student's current inline style across the Return: the
+        // marker insert would otherwise re-seed typing attributes from its own
+        // hardcoded font and silently revert a chosen font/color (review
+        // harness reproduced Arial 18 -> TNR 12 on every list Return).
+        let typingFont = (tv.typingAttributes[.font] as? NSFont) ?? RichTextStyle.bodyFont
+        let typingColor = (tv.typingAttributes[.foregroundColor] as? NSColor) ?? RichTextStyle.inkColor
+
         let marker = "\t" + list.marker(forItemNumber: itemNumber(of: p, in: storage) + 1) + "\t"
         let insert = "\n" + marker
         guard tv.shouldChangeText(in: edit, replacementString: insert) else { return true }
@@ -376,8 +401,8 @@ final class RichTextController {
         storage.replaceCharacters(
             in: edit,
             with: NSAttributedString(string: insert, attributes: [
-                .font: RichTextStyle.bodyFont,
-                .foregroundColor: RichTextStyle.inkColor,
+                .font: typingFont,
+                .foregroundColor: typingColor,
                 .paragraphStyle: style,
             ]))
         storage.endEditing()
@@ -385,6 +410,13 @@ final class RichTextController {
         // Caret explicitly after the marker, inside the new item; the implicit
         // post-edit selection fixup would otherwise snap it elsewhere.
         tv.setSelectedRange(NSRange(location: edit.location + (insert as NSString).length, length: 0))
+        // Re-assert the student's inline style so the first typed character
+        // in the new item doesn't silently revert (setSelectedRange re-derives
+        // typing attributes from the just-inserted marker run).
+        var typing = tv.typingAttributes
+        typing[.font] = typingFont
+        typing[.foregroundColor] = typingColor
+        tv.typingAttributes = typing
         recountWords()
         return true
     }
@@ -429,8 +461,10 @@ final class RichTextController {
             let level = Int(round((s.headIndent - RichTextStyle.listHeadIndent) / RichTextStyle.listIndentStep))
             let newLevel = max(0, min(RichTextStyle.listMaxLevel, level + delta))
             guard newLevel != level else { return }
+            let itemMultiple = s.lineHeightMultiple > 0 ? s.lineHeightMultiple : RichTextStyle.defaultLineHeightMultiple
             storage.addAttribute(.paragraphStyle,
-                                 value: RichTextStyle.listParagraphStyle(list, level: newLevel),
+                                 value: RichTextStyle.listParagraphStyle(list, level: newLevel,
+                                                                         multiple: itemMultiple),
                                  range: sub)
         }
         storage.endEditing()
@@ -629,9 +663,10 @@ enum RichTextStyle {
 
     /// Paragraph style for a list item at `level` (0-based), carrying the
     /// NSTextList so AppKit treats the paragraph as a real list item.
-    static func listParagraphStyle(_ list: NSTextList, level: Int = 0) -> NSParagraphStyle {
+    static func listParagraphStyle(_ list: NSTextList, level: Int = 0,
+                                   multiple: CGFloat = defaultLineHeightMultiple) -> NSParagraphStyle {
         let p = NSMutableParagraphStyle()
-        p.lineHeightMultiple = defaultLineHeightMultiple
+        p.lineHeightMultiple = multiple
         p.paragraphSpacing = 4
         let bump = CGFloat(level) * listIndentStep
         p.firstLineHeadIndent = listFirstLineHeadIndent + bump

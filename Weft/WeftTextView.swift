@@ -102,8 +102,10 @@ final class WeftTextView: NSTextView {
             indicator.automaticModeOptions = []
             if indicator.frame.height > lineHeight * 1.3 {
                 var f = indicator.frame
-                let inset = (f.height - lineHeight) / 2
-                f.origin.y += inset
+                // The lineHeightMultiple's extra leading sits ABOVE the
+                // glyphs, so bottom-align the clamped caret to land beside
+                // the text instead of floating in the inter-line gap.
+                f.origin.y += f.height - lineHeight
                 f.size.height = lineHeight
                 indicator.frame = f
             }
