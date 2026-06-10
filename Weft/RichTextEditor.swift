@@ -78,6 +78,14 @@ final class RichTextController {
         return pendingContent ?? NSAttributedString()
     }
 
+    /// The document as Electron-compatible subset HTML (for submission writes;
+    /// the grading view and web portal already render this subset).
+    func htmlSnapshot() -> String {
+        RichTextHTML.html(from: snapshot(),
+                          h1Size: RichTextStyle.h1FontSize,
+                          h2Size: RichTextStyle.h2FontSize)
+    }
+
     /// Recompute the published word count from the live document. Matches the
     /// web editor's `trimmed.split(/\s+/)` rule; list markers are layout chrome
     /// and never counted.
