@@ -508,6 +508,17 @@ final class SupabaseManager: @unchecked Sendable {
             let questions: [Question]; let time_limit_minutes: Int?
             let version_group_id: String; let version_number: Int
         }
+        // A pre-versioning source row carries NULL version_group_id in the DB
+        // (the model coalesces it to the test's own id). Backfill it before
+        // inserting the clone so the family chain is coherent server-side for
+        // any consumer, coalescing or not — Electron does the same.
+        struct GroupPatch: Encodable { let version_group_id: String }
+        let _: [Assignment] = (try? await update("tests",
+            values: GroupPatch(version_group_id: source.versionGroupId),
+            query: [URLQueryItem(name: "id", value: "eq.\(source.id)"),
+                    URLQueryItem(name: "version_group_id", value: "is.null")],
+            returning: false)) ?? []
+
         // Single-question app today; later questions would keep their ids
         // across drafts (spec: out of scope).
         var questions = source.questions

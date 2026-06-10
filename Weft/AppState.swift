@@ -56,6 +56,9 @@ final class AppState {
     /// Reentrancy guard so overlapping callers (sign-in, deep link, the home
     /// view's own .task) don't run duplicate concurrent student-home loads.
     private var studentHomeInFlight = false
+    /// Reentrancy guard: a double-clicked New draft would mint two clones with
+    /// the same version number, one of them unreachable in the grouped UI.
+    private var draftCloneInFlight = false
     /// True only after a *successful* grading load, so a first-release email is
     /// never sent off a stale/failed grades cache (which would duplicate).
     private var gradesFresh = false
@@ -499,6 +502,9 @@ final class AppState {
     /// Clone `source` into the next draft of its group and open the editor on
     /// it (the teacher tweaks the prompt, then launches it normally).
     func createNextDraft(of source: Assignment) async {
+        guard !draftCloneInFlight else { return }
+        draftCloneInFlight = true
+        defer { draftCloneInFlight = false }
         errorMessage = nil
         let next = (assignments
             .filter { $0.versionGroupId == source.versionGroupId }
@@ -512,6 +518,7 @@ final class AppState {
                                    questions: source.questions,
                                    timeLimitMinutes: source.timeLimitMinutes)
             assignments.append(clone)
+            pickedAssignmentId = clone.id
             openEditAssignment(clone)
             return
         }
@@ -522,6 +529,7 @@ final class AppState {
                 return
             }
             await loadTeacherHome()
+            pickedAssignmentId = clone.id
             openEditAssignment(clone)
         } catch {
             errorMessage = describe(error)
@@ -531,7 +539,10 @@ final class AppState {
     // MARK: - Teacher: live session
     func launchSession() async {
         errorMessage = nil
-        guard liveSession == nil else { return }   // one live session at a time
+        guard liveSession == nil else {
+            errorMessage = "End the current live session first (Live tab), then launch the new draft."
+            return
+        }
         guard let testId = pickedAssignmentId else {
             errorMessage = "Pick an assignment to launch."
             return
