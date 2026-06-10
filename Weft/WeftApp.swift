@@ -113,12 +113,13 @@ struct StudentFlowView: View {
     var body: some View {
         Group {
             switch app.studentScreen {
-            case .home:     StudentClassHomeView()
-            case .join:     StudentJoinView()
-            case .checks:   StudentChecksView()
-            case .exam:     ExamView(lockdown: true)
-            case .done:     StudentDoneView()
-            case .returned: ReturnedWorkView()
+            case .home:      StudentClassHomeView()
+            case .join:      StudentJoinView()
+            case .checks:    StudentChecksView()
+            case .exam:      ExamView(lockdown: true)
+            case .done:      StudentDoneView()
+            case .returned:  ReturnedWorkView()
+            case .submitted: SubmittedWorkView()
             }
         }
         .animation(.smooth(duration: 0.28), value: app.studentScreen)

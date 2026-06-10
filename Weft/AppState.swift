@@ -16,7 +16,7 @@ final class AppState {
 
     /// Sub-navigation inside the student role (the native analogue of the
     /// Electron #stage-* swap). RootView → StudentFlowView reads this.
-    enum StudentScreen: Equatable { case home, join, checks, exam, done, returned }
+    enum StudentScreen: Equatable { case home, join, checks, exam, done, returned, submitted }
 
     // MARK: Session / identity
     var route: Route = .signIn
@@ -70,6 +70,13 @@ final class AppState {
     var teacherClasses: [ClassRoom] = [.sample, .sample2]
     var roster: [RosterStudent] = RosterStudent.sample
     var returnedWork: [ReturnedWorkItem] = []
+
+    /// The Past-row essay being viewed read-only (nil = loading / none yet).
+    var submittedEssay: SubmittedEssay?
+    var submittedEssayError: String?
+    /// The assignment family being viewed; retained so "Try again" can retry
+    /// without the original ClassWorkItem being in scope.
+    var submittedVersionGroupId: String?
 
     var selectedClassId: String?
     /// Active-assignment count per class id (the classes-list badges).
@@ -822,6 +829,41 @@ final class AppState {
         // ReturnedWorkView owns the load via its own `.task` (auto-cancelled with
         // the view); don't fire a second, detached load here.
         studentScreen = .returned
+    }
+
+    /// Open the read-only viewer for a Past row and begin fetching the essay.
+    /// When not signed in (preview / gallery), seeds a demo essay immediately so
+    /// the screen is fully demoable without a backend session.
+    func openSubmittedWork(_ item: ClassWorkItem) {
+        errorMessage = nil
+        submittedEssay = nil
+        submittedEssayError = nil
+        submittedVersionGroupId = item.versionGroupId
+        studentScreen = .submitted
+        guard signedIn else {
+            // Preview path: render a sample essay so the screen is demoable.
+            submittedEssay = SubmittedEssay(
+                title: item.title,
+                contentHtml: "<p>The interplay of light and shadow works as more than scenery in the passage. The author never lets one exist without the other: every lit window implies a surrounding dark, and every shadow is measured against the nearest lamp.</p><p>What makes this technique effective is its restraint. The imagery is never labelled or explained; it accumulates until the reader is doing the interpretation themselves.</p>",
+                wordCount: 53,
+                submittedAt: item.mySubmittedAt ?? Date())
+            return
+        }
+        Task { await loadSubmittedWork(versionGroupId: item.versionGroupId) }
+    }
+
+    /// Fetch the caller's newest submitted essay for an assignment family.
+    /// Populates `submittedEssay` on success, `submittedEssayError` on failure.
+    func loadSubmittedWork(versionGroupId: String) async {
+        do {
+            if let essay = try await supabase.getMySubmission(versionGroupId: versionGroupId) {
+                submittedEssay = essay
+            } else {
+                submittedEssayError = "Couldn't find your submitted essay."
+            }
+        } catch {
+            submittedEssayError = describe(error)
+        }
     }
 
     func goToJoin()  { studentScreen = .join }

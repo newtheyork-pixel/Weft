@@ -245,7 +245,20 @@ struct StudentClassHomeView: View {
                     .help("Open your graded work")
                 }
             case .past:
-                Chip(text: "Read-only", kind: .neutral)
+                Button {
+                    app.openSubmittedWork(item)
+                } label: {
+                    HStack(spacing: 5) {
+                        Text("Read-only")
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                }
+                .buttonStyle(.plain)
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.accent)
+                .linkPointer()
+                .help("Read your submitted essay")
             case nil:
                 EmptyView()
             }

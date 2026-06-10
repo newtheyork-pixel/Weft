@@ -42,11 +42,15 @@ private struct ReturnedEssay: Identifiable, Hashable {
 
 /// One paragraph of the essay body. A run is either plain text or a span that
 /// carries a comment id (the inline-highlight ranges painted in the web view).
-private struct EssayParagraph: Hashable {
+/// One paragraph of rendered essay text. Widened to internal so
+/// SubmittedWorkView can reuse the same paragraph-rendering logic.
+struct EssayParagraph: Hashable {
     var runs: [EssayRun]
 }
 
-private struct EssayRun: Hashable {
+/// A single run inside an EssayParagraph. Widened to internal alongside
+/// EssayParagraph so SubmittedWorkView can reuse the type.
+struct EssayRun: Hashable {
     var text: String
     var commentId: String?      // non-nil => highlighted, tied to a margin note
 }
@@ -478,30 +482,12 @@ struct ReturnedWorkView: View {
     }
 }
 
-// MARK: - Real data mapping (ReturnedWorkItem -> presentation model)
+// MARK: - HTML parser (internal — shared with SubmittedWorkView)
 
-private extension ReturnedWorkView {
-    /// Map a released-work DTO into the read-only presentation model. The body
-    /// HTML is flattened to plain paragraphs (the inline-highlight ranges from
-    /// the web build aren't reconstructed here; the teacher's comments still show
-    /// in the right rail).
-    nonisolated static func makeEssay(_ item: ReturnedWorkItem) -> ReturnedEssay {
-        ReturnedEssay(
-            id: item.submissionId,
-            title: "Your essay",
-            releasedAt: item.releasedAt,
-            points: item.points,
-            pointsPossible: item.pointsPossible,
-            paragraphs: paragraphs(fromHTML: item.contentHtml),
-            feedback: item.feedback,
-            comments: item.comments.map { c in
-                InlineComment(id: c.id, quote: c.quote ?? "", body: c.body)
-            }
-        )
-    }
-
+extension ReturnedWorkView {
     /// Cheap HTML → paragraphs: turn block-level closers into line breaks, strip
     /// the remaining tags, decode the few common entities, and split into blocks.
+    /// Internal so SubmittedWorkView can reuse the same parser without duplication.
     nonisolated static func paragraphs(fromHTML html: String) -> [EssayParagraph] {
         var s = html
         for tag in ["</p>", "<br>", "<br/>", "<br />", "</div>", "</h1>", "</h2>", "</h3>", "</li>"] {
@@ -525,6 +511,29 @@ private extension ReturnedWorkView {
                    "&#39;": "'", "&apos;": "'", "&nbsp;": " ", "&mdash;": "—", "&ndash;": "–"]
         for (k, v) in map { out = out.replacingOccurrences(of: k, with: v) }
         return out
+    }
+}
+
+// MARK: - Real data mapping (ReturnedWorkItem -> presentation model)
+
+private extension ReturnedWorkView {
+    /// Map a released-work DTO into the read-only presentation model. The body
+    /// HTML is flattened to plain paragraphs (the inline-highlight ranges from
+    /// the web build aren't reconstructed here; the teacher's comments still show
+    /// in the right rail).
+    nonisolated static func makeEssay(_ item: ReturnedWorkItem) -> ReturnedEssay {
+        ReturnedEssay(
+            id: item.submissionId,
+            title: "Your essay",
+            releasedAt: item.releasedAt,
+            points: item.points,
+            pointsPossible: item.pointsPossible,
+            paragraphs: paragraphs(fromHTML: item.contentHtml),
+            feedback: item.feedback,
+            comments: item.comments.map { c in
+                InlineComment(id: c.id, quote: c.quote ?? "", body: c.body)
+            }
+        )
     }
 }
 
