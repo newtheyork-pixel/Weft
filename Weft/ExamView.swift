@@ -59,6 +59,11 @@ struct ExamView: View {
     @State private var kioskEntered = false
     @State private var deadline: Date?
     @State private var saveDebounce: Task<Void, Never>?
+    /// Monotonic save-pipeline generation: each new edit (and exam teardown)
+    /// bumps it, and a persist/retry whose generation is stale exits instead
+    /// of spawning a successor — Task cancellation alone can't reach a
+    /// non-cooperative await mid-flight, so two loops could otherwise coexist.
+    @State private var saveGeneration = 0
     @State private var monitorTask: Task<Void, Never>?
     @State private var showSubmitConfirm = false
     @AppStorage(Prefs.confirmBeforeSubmit) private var confirmBeforeSubmit = true
@@ -147,6 +152,7 @@ struct ExamView: View {
         expiryTask?.cancel()
         expiryTask = nil
         saveDebounce?.cancel()
+        saveGeneration += 1
         guard kioskEntered, let window = examWindow else { return }
         kiosk.exitKiosk(window: window)
         kioskEntered = false
@@ -365,18 +371,20 @@ struct ExamView: View {
     /// newer edit reschedules it (Electron parity); the label tells the truth.
     private func scheduleSave() {
         runtime.saveState = .saving
+        saveGeneration += 1
+        let gen = saveGeneration
         saveDebounce?.cancel()
         saveDebounce = Task {
             try? await Task.sleep(for: .seconds(0.8))
             guard !Task.isCancelled else { return }
-            await persistNow()
+            await persistNow(generation: gen)
         }
     }
 
-    private func persistNow() async {
+    private func persistNow(generation: Int) async {
         let ok = await app.autosaveEssay(html: controller.htmlSnapshot(),
                                          wordCount: controller.wordCount)
-        guard !Task.isCancelled else { return }
+        guard generation == saveGeneration else { return }   // a newer edit owns the pipeline
         if ok {
             runtime.saveState = .saved
         } else {
@@ -384,7 +392,7 @@ struct ExamView: View {
             saveDebounce = Task {
                 try? await Task.sleep(for: .seconds(4))
                 guard !Task.isCancelled else { return }
-                await persistNow()
+                await persistNow(generation: generation)
             }
         }
     }

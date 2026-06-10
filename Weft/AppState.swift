@@ -620,8 +620,10 @@ final class AppState {
     }
 
     /// Resolve the open session + REAL test for `code`, replacing the staged
-    /// placeholder. Submissions must carry the real question id, so the exam
-    /// cannot meaningfully save until this lands (autosave guards on it).
+    /// placeholder. Submissions must carry the real question id, so the
+    /// session is exposed ONLY after the real test is staged — autosave gates
+    /// on `activeExamSession`, and a session paired with the placeholder
+    /// question id would write a corrupt submission row.
     func resolveActiveExam(code: String) async {
         guard signedIn else { return }
         do {
@@ -630,11 +632,13 @@ final class AppState {
                 errorMessage = "This assignment isn't open anymore."
                 return
             }
-            activeExamSession = session
-            if let testId = session.testId,
-               let test = try await supabase.getTest(id: testId) {
-                activeAssignment = test
+            guard let testId = session.testId,
+                  let test = try await supabase.getTest(id: testId) else {
+                errorMessage = "Couldn't load this assignment's prompt. Go back and try again."
+                return
             }
+            activeAssignment = test
+            activeExamSession = session
         } catch {
             errorMessage = describe(error)
         }
