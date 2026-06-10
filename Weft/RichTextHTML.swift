@@ -2,8 +2,14 @@
 //  RichTextHTML.swift
 //  Weft — serialize an exam essay (NSAttributedString) to the sanitized HTML
 //  subset the Electron app produces and the teacher grading view + web portal
-//  already render: <h1> <h2> <p> <ul> <ol> <li> <b> <i> <u> <br>.
+//  already render: <h1> <h2> <p> <ul> <ol> <li> <b> <i> <u> <br> plus
+//  <span style="…"> for font-family / font-size / color / background-color.
 //  Pure AppKit, no project dependencies (standalone-testable with swiftc).
+//
+//  ELECTRON SANITIZER CAVEAT: Electron's grading-view sanitizer strips
+//  font-size and line-height style values; font-family, color, and
+//  background-color survive. Students will see family+colors in the teacher
+//  grading view but not their custom sizes or line-spacing changes.
 //
 
 import AppKit
@@ -15,10 +21,16 @@ enum RichTextHTML {
     /// whose style carries an NSTextList become <li> grouped into <ul>/<ol>;
     /// everything else is a <p>. Inline bold/italic/underline come from font
     /// traits + the underline attribute. Headings suppress <b> (they are
-    /// already visually bold).
+    /// already visually bold). Inline runs whose font-family / font-size /
+    /// foreground-color / background-color differ from the defaults gain a
+    /// <span style="…">. Defaults match RichTextStyle: Times New Roman 12.
+    /// Note: Electron's grading sanitizer strips font-size and line-height;
+    /// family/color/background-color survive.
     static func html(from text: NSAttributedString,
                      h1Size: CGFloat = 28,
-                     h2Size: CGFloat = 21) -> String {
+                     h2Size: CGFloat = 21,
+                     defaultFamily: String = "Times New Roman",
+                     defaultSize: CGFloat = 12) -> String {
         guard text.length > 0 else { return "" }
         let ns = text.string as NSString
 
@@ -56,18 +68,34 @@ enum RichTextHTML {
 
             let suppressBold: Bool
             switch block { case .h1, .h2: suppressBold = true; default: suppressBold = false }
-            let inner = inlineHTML(of: text, in: contentRange, suppressBold: suppressBold)
+            let inner = inlineHTML(of: text, in: contentRange,
+                                   suppressBold: suppressBold,
+                                   defaultFamily: defaultFamily,
+                                   defaultSize: defaultSize)
+
+            // Emit line-height on block when it differs from the 2.0 default.
+            let lineHeightAttr: String = {
+                let attrs = pRange.length > 0
+                    ? text.attributes(at: pRange.location, effectiveRange: nil)
+                    : [:]
+                let style = attrs[.paragraphStyle] as? NSParagraphStyle
+                let multiple = style?.lineHeightMultiple ?? 0
+                if multiple > 0, abs(multiple - 2.0) > 0.01 {
+                    return " style=\"line-height: \(multiple)\""
+                }
+                return ""
+            }()
 
             switch block {
             case .li(let ordered):
                 if openList != ordered { closeList(); out += ordered ? "<ol>" : "<ul>"; openList = ordered }
-                out += "<li>\(inner.isEmpty ? "<br>" : inner)</li>"
+                out += "<li\(lineHeightAttr)>\(inner.isEmpty ? "<br>" : inner)</li>"
             case .h1:
-                closeList(); out += "<h1>\(inner.isEmpty ? "<br>" : inner)</h1>"
+                closeList(); out += "<h1\(lineHeightAttr)>\(inner.isEmpty ? "<br>" : inner)</h1>"
             case .h2:
-                closeList(); out += "<h2>\(inner.isEmpty ? "<br>" : inner)</h2>"
+                closeList(); out += "<h2\(lineHeightAttr)>\(inner.isEmpty ? "<br>" : inner)</h2>"
             case .p:
-                closeList(); out += "<p>\(inner.isEmpty ? "<br>" : inner)</p>"
+                closeList(); out += "<p\(lineHeightAttr)>\(inner.isEmpty ? "<br>" : inner)</p>"
             }
         }
         closeList()
@@ -85,9 +113,18 @@ enum RichTextHTML {
         return i + 1
     }
 
+    // Default ink color tied to RichTextStyle.inkColor (#22201c).
+    private static let defaultInkHex = "#22201c"
+
     /// Serialize the inline runs of one paragraph: escaped text wrapped in
-    /// <b>/<i>/<u> per run.
-    private static func inlineHTML(of text: NSAttributedString, in range: NSRange, suppressBold: Bool) -> String {
+    /// <b>/<i>/<u> and <span style="…"> per run. Span styles are emitted only
+    /// when the run's value differs from the document defaults (family /
+    /// size / ink color) so default-looking text produces no extra markup.
+    private static func inlineHTML(of text: NSAttributedString,
+                                   in range: NSRange,
+                                   suppressBold: Bool,
+                                   defaultFamily: String = "Times New Roman",
+                                   defaultSize: CGFloat = 12) -> String {
         guard range.length > 0 else { return "" }
         var out = ""
         text.enumerateAttributes(in: range, options: []) { attrs, runRange, _ in
@@ -99,9 +136,42 @@ enum RichTextHTML {
             if underlined { piece = "<u>\(piece)</u>" }
             if traits.contains(.italic) { piece = "<i>\(piece)</i>" }
             if traits.contains(.bold), !suppressBold { piece = "<b>\(piece)</b>" }
+
+            var styles: [String] = []
+            if let font = attrs[.font] as? NSFont {
+                let family = font.familyName ?? ""
+                if !family.isEmpty, family != defaultFamily {
+                    styles.append("font-family: \(family)")
+                }
+                if abs(font.pointSize - defaultSize) > 0.1,
+                   // Headings carry their own sizes; don't re-state them.
+                   !suppressBold {
+                    styles.append("font-size: \(Int(font.pointSize))px")
+                }
+            }
+            if let color = attrs[.foregroundColor] as? NSColor,
+               let hex = hexString(color), hex != defaultInkHex {
+                styles.append("color: \(hex)")
+            }
+            if let bg = attrs[.backgroundColor] as? NSColor, let hex = hexString(bg) {
+                styles.append("background-color: \(hex)")
+            }
+            if !styles.isEmpty {
+                piece = "<span style=\"\(styles.joined(separator: "; "))\">\(piece)</span>"
+            }
+
             out += piece
         }
         return out
+    }
+
+    /// sRGB hex ("#rrggbb") for a color; nil when it can't be converted.
+    private static func hexString(_ color: NSColor) -> String? {
+        guard let c = color.usingColorSpace(.sRGB) else { return nil }
+        return String(format: "#%02x%02x%02x",
+                      Int(round(c.redComponent * 255)),
+                      Int(round(c.greenComponent * 255)),
+                      Int(round(c.blueComponent * 255)))
     }
 
     private static func escape(_ s: String) -> String {
