@@ -828,7 +828,12 @@ final class SupabaseManager: @unchecked Sendable {
                 continuation.resume(returning: callbackURL)
             }
             webAuth.presentationContextProvider = anchorProvider
-            webAuth.prefersEphemeralWebBrowserSession = false
+            // Ephemeral = macOS presents the compact auth window ANCHORED TO
+            // OUR WINDOW. Non-ephemeral hands the whole flow to the user's
+            // default browser (Safari jumps to the front — the reported bug)
+            // so it can reuse its cookies. The trade-off we accept: no cookie
+            // reuse, so Google asks for credentials on each sign-in.
+            webAuth.prefersEphemeralWebBrowserSession = true
             // Keep the anchor alive for the lifetime of the session.
             objc_setAssociatedObject(webAuth, &WebAuthPresentationAnchor.key,
                                      anchorProvider, .OBJC_ASSOCIATION_RETAIN)
