@@ -362,16 +362,23 @@ final class RichTextController {
         recountWords()
     }
 
-    /// 1-based position of `paragraph` within its contiguous run of list items.
+    /// 1-based position of `paragraph` within its contiguous run of list items
+    /// OF THE SAME marker format — a bulleted list sitting right above a
+    /// numbered one must not inflate the numbered list's count.
     private func itemNumber(of paragraph: NSRange, in storage: NSTextStorage) -> Int {
         let ns = storage.string as NSString
+        let format = (paragraph.length > 0
+            ? (storage.attribute(.paragraphStyle, at: paragraph.location, effectiveRange: nil)
+                as? NSParagraphStyle)
+            : nil)?.textLists.first?.markerFormat
         var n = 1
         var loc = paragraph.location
         while loc > 0 {
             let prev = ns.paragraphRange(for: NSRange(location: loc - 1, length: 0))
             guard prev.length > 0,
                   let s = storage.attribute(.paragraphStyle, at: prev.location, effectiveRange: nil) as? NSParagraphStyle,
-                  !s.textLists.isEmpty else { break }
+                  let f = s.textLists.first?.markerFormat,
+                  f == format else { break }
             n += 1
             loc = prev.location
         }

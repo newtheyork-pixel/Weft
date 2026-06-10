@@ -16,7 +16,12 @@ final class WeftTextView: NSTextView {
         guard event.type == .keyDown, let formatting else {
             return super.performKeyEquivalent(with: event)
         }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Strip .function too: number-row keys set it on some keyboards and it
+        // survives deviceIndependentFlagsMask, which would silently break the
+        // Cmd+Alt+1 / Cmd+Shift+7 equality checks below.
+        let flags = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting(.function)
         let key = (event.charactersIgnoringModifiers ?? "").lowercased()
 
         // Cmd+B / Cmd+I / Cmd+U — bold / italic / underline.
