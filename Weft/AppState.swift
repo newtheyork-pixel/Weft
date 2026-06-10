@@ -575,6 +575,7 @@ final class AppState {
     /// remaining backend hop; until then we stage a faithful placeholder built
     /// from the work row so the exam screen reads correctly.
     func startWriting(_ item: ClassWorkItem) {
+        errorMessage = nil
         activeAssignment = Assignment(
             id: item.activeSessionId ?? item.id,
             title: item.title,
@@ -663,6 +664,14 @@ final class AppState {
                 displayCount: displayCount, isVM: isVM)
             else {
                 errorMessage = "Could not register for this exam."
+                return false
+            }
+            // The registration round-trip is long enough for the student to
+            // have left checks (deep link, sign-out, back). A late success
+            // must not shove them into the kiosk — or worse, cross-wire a
+            // stale students-row id with a newer session (every autosave
+            // would then fail RLS inside a locked exam).
+            guard studentScreen == .checks, activeExamSession?.id == session.id else {
                 return false
             }
             activeStudentId = sid
@@ -784,6 +793,11 @@ final class AppState {
         let host = (url.host ?? "").lowercased()
         if host == "auth-callback" { return }   // handled by ASWebAuthenticationSession
         guard signedIn else { pendingDeepLink = url; return }
+        // NEVER reroute during a locked exam: a pre-scheduled `open weft://...`
+        // would otherwise unmount ExamView, exit the kiosk, and skip the final
+        // flush — a premeditated escape hatch in a proctoring product. The
+        // link is dropped, not queued: by the time the exam ends it is stale.
+        if role == .student, studentScreen == .exam { return }
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let code = items.first(where: { $0.name == "code" })?.value
         // These links are student-only. Never silently demote a signed-in

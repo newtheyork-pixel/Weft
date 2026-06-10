@@ -206,6 +206,21 @@ struct StudentChecksView: View {
     }
 
     // MARK: Enter exam
+
+    /// True when checks finished but the session resolve is still in flight
+    /// (signed-in only). Prevents a misleading "session not found" error while
+    /// the background lookup is ongoing.
+    private var sessionPending: Bool {
+        app.signedIn && !running && app.activeExamSession == nil
+    }
+
+    /// Begin is enabled once checks are done AND (when signed in) the session
+    /// has resolved. Preview/dev (not signed in) never has a session but must
+    /// still be able to enter, so the session gate is skipped there.
+    private var beginDisabled: Bool {
+        running || beginBusy || sessionPending
+    }
+
     private var enterButton: some View {
         VStack(spacing: Theme.Space.sm) {
             Button {
@@ -221,13 +236,13 @@ struct StudentChecksView: View {
                 }
             } label: {
                 HStack(spacing: Theme.Space.sm) {
-                    if running || beginBusy {
+                    if running || beginBusy || sessionPending {
                         ProgressView().controlSize(.small)
                     } else {
                         Image(systemName: "pencil.and.outline")
                             .font(.system(size: 14, weight: .semibold))
                     }
-                    Text(running ? "Finishing checks…" : beginBusy ? "Starting exam…" : "Enter exam")
+                    Text(running ? "Finishing checks…" : beginBusy ? "Starting exam…" : sessionPending ? "Loading assignment…" : "Enter exam")
                         .font(Theme.sans(15, .semibold))
                 }
                 .frame(maxWidth: .infinity)
@@ -235,11 +250,12 @@ struct StudentChecksView: View {
             }
             .buttonStyle(.glassProminent)
             .tint(Theme.accent)
-            .disabled(running || beginBusy)
-            .pointerStyle((running || beginBusy) ? .default : .link)
-            .help(running ? "Checks are still finishing" : "Enter the exam")
+            .disabled(beginDisabled)
+            .pointerStyle(beginDisabled ? .default : .link)
+            .help(running ? "Checks are still finishing" : sessionPending ? "Loading the assignment…" : "Enter the exam")
             .animation(.easeOut(duration: 0.2), value: running)
             .animation(.easeOut(duration: 0.2), value: beginBusy)
+            .animation(.easeOut(duration: 0.2), value: sessionPending)
 
             if let error = app.errorMessage {
                 HStack(alignment: .top, spacing: Theme.Space.sm) {
@@ -254,6 +270,12 @@ struct StudentChecksView: View {
                 .padding(Theme.Space.md)
                 .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
             }
+
+            Button("Back to home") { app.goToHome() }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.accent)
+                .font(Theme.sans(13))
+                .padding(.top, Theme.Space.xs)
         }
         .padding(.top, Theme.Space.xs)
     }

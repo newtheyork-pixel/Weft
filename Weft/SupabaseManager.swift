@@ -508,7 +508,8 @@ final class SupabaseManager: @unchecked Sendable {
             let questions: [Question]; let time_limit_minutes: Int?
             let version_group_id: String; let version_number: Int
         }
-        // Single-question app today; later questions would keep their ids across drafts (spec: out of scope).
+        // Single-question app today; later questions would keep their ids
+        // across drafts (spec: out of scope).
         var questions = source.questions
         if let q = questions.first {
             questions[0] = Question(id: "q-\(UUID().uuidString.prefix(8))", kind: q.kind,
@@ -589,7 +590,9 @@ final class SupabaseManager: @unchecked Sendable {
     /// Register (or refresh) the caller's `students` row for a session at
     /// checks-pass, carrying the proctoring facts the checks screen computed.
     /// Mirrors student.js runChecks (onConflict session_id,user_id).
-    /// Re-registration with nil proctoring fields PRESERVES the earlier row's values (nil keys are omitted, so merge-duplicates does not overwrite them) — pass concrete values whenever the checks screen has them.
+    /// Re-registration with nil proctoring fields PRESERVES the earlier row's
+    /// values (nil keys are omitted, so merge-duplicates does not overwrite
+    /// them) — pass concrete values whenever the checks screen has them.
     func registerStudent(sessionId: String, userId: String, email: String?,
                          name: String?, ip: String?, screenCapture: Bool,
                          remote: Bool, displayCount: Int?, isVM: Bool?) async throws -> String? {

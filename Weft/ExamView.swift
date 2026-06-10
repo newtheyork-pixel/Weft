@@ -58,6 +58,10 @@ struct ExamView: View {
     @State private var examWindow: NSWindow?
     @State private var kioskEntered = false
     @State private var deadline: Date?
+    /// Flipped at 0:00 (real exams): freezes the editor and keeps the force-
+    /// submit retrying until the flush lands. The deadline must be enforced,
+    /// not merely displayed.
+    @State private var expired = false
     @State private var saveDebounce: Task<Void, Never>?
     /// Monotonic save-pipeline generation: each new edit (and exam teardown)
     /// bumps it, and a persist/retry whose generation is stale exits instead
@@ -128,7 +132,10 @@ struct ExamView: View {
         let interval = deadline.timeIntervalSinceNow
         expiryTask = Task {
             if interval > 0 { try? await Task.sleep(for: .seconds(interval)) }
-            if !Task.isCancelled { submit() }
+            if !Task.isCancelled {
+                expired = true
+                submit()
+            }
         }
     }
 
@@ -209,6 +216,16 @@ struct ExamView: View {
             guard await app.submitExam(html: controller.htmlSnapshot(),
                                        wordCount: controller.wordCount) else {
                 runtime.saveState = .failed
+                // Past the hard deadline nothing else would ever fire (the
+                // expiry task has completed): keep force-submitting so the
+                // exam closes the moment the network returns.
+                if lockdown && expired {
+                    expiryTask = Task {
+                        try? await Task.sleep(for: .seconds(4))
+                        guard !Task.isCancelled else { return }
+                        submit()
+                    }
+                }
                 return
             }
             endExam()
@@ -254,7 +271,8 @@ struct ExamView: View {
         VStack(spacing: 0) {
             header
             toolbarRow
-            RichTextEditor(controller: controller, onEdit: { scheduleSave() })
+            RichTextEditor(controller: controller, isEditable: !expired,
+                           onEdit: { scheduleSave() })
                 .background(Color.white)
                 .padding(.horizontal, Theme.Space.xl)
             footerBar
