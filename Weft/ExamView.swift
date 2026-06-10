@@ -27,7 +27,7 @@ final class ExamRuntime {
     var block: Block?
     var saveState: SaveState = .saved
 
-    enum SaveState: Equatable { case saving, saved }
+    enum SaveState: Equatable { case saving, saved, failed }
 }
 
 struct ExamView: View {
@@ -195,9 +195,19 @@ struct ExamView: View {
         }
     }
 
+    /// Submit = final flush (must succeed) -> DB lock -> leave the exam. A
+    /// failed flush keeps the student in the exam with the failed-save label;
+    /// their work is intact and Submit can be pressed again.
     private func submit() {
-        endExam()
-        app.finishExam()
+        Task {
+            guard await app.submitExam(html: controller.htmlSnapshot(),
+                                       wordCount: controller.wordCount) else {
+                runtime.saveState = .failed
+                return
+            }
+            endExam()
+            app.finishExam()
+        }
     }
 
     private func leave() {
@@ -338,6 +348,9 @@ struct ExamView: View {
             if runtime.saveState == .saving {
                 ProgressView().controlSize(.small).scaleEffect(0.7)
                 Text("Saving…")
+            } else if runtime.saveState == .failed {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warn)
+                Text("Save failed, retrying…")
             } else {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.good)
                 Text("All saved")
@@ -347,14 +360,32 @@ struct ExamView: View {
         .foregroundStyle(Theme.muted)
     }
 
-    // MARK: Autosave (debounced stub — real PostgREST write lands with the
-    // session/submission wave; this drives the honest "Saving…/All saved" label)
+    // MARK: Autosave
+    /// Debounce (0.8s) then persist. A failed save retries every 4s until a
+    /// newer edit reschedules it (Electron parity); the label tells the truth.
     private func scheduleSave() {
         runtime.saveState = .saving
         saveDebounce?.cancel()
         saveDebounce = Task {
             try? await Task.sleep(for: .seconds(0.8))
-            if !Task.isCancelled { runtime.saveState = .saved }
+            guard !Task.isCancelled else { return }
+            await persistNow()
+        }
+    }
+
+    private func persistNow() async {
+        let ok = await app.autosaveEssay(html: controller.htmlSnapshot(),
+                                         wordCount: controller.wordCount)
+        guard !Task.isCancelled else { return }
+        if ok {
+            runtime.saveState = .saved
+        } else {
+            runtime.saveState = .failed
+            saveDebounce = Task {
+                try? await Task.sleep(for: .seconds(4))
+                guard !Task.isCancelled else { return }
+                await persistNow()
+            }
         }
     }
 

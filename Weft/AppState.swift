@@ -35,6 +35,14 @@ final class AppState {
     /// after a successful sign-in + first load so the screens show live data.
     var useMockData: Bool = true
 
+    // MARK: Live exam attempt (set during checks -> exam -> submit)
+    /// The students-row id for the attempt in progress (set at checks-pass).
+    var activeStudentId: String?
+    /// The open session being written in (resolved from the work row's code).
+    var activeExamSession: ExamSession?
+    /// The essay_submissions row id captured from the first durable save.
+    var activeSubmissionId: String?
+
     // MARK: Student in-role navigation
     var studentScreen: StudentScreen = .home
     /// A class join code carried in from a `weft://join?code=...` deep link, so
@@ -146,6 +154,7 @@ final class AppState {
         activeAssignment = nil
         studentScreen = .home
         pendingDeepLink = nil; pendingExamCode = nil; prefilledJoinCode = nil
+        activeStudentId = nil; activeExamSession = nil; activeSubmissionId = nil
         gradesFresh = false
         enrolledClasses = [.sample, .sample2]
         classWork = ClassWorkItem.sampleList
@@ -580,8 +589,14 @@ final class AppState {
         // materials for the active session in the background.
         examFiles = ExamFile.sample
         examLinks = ExamLink.sample
+        activeExamSession = nil
+        activeStudentId = nil
+        activeSubmissionId = nil
         if signedIn, let code = item.activeCode {
-            Task { await loadExamMaterials(code: code) }
+            Task {
+                await resolveActiveExam(code: code)
+                await loadExamMaterials(code: code)
+            }
         }
         studentScreen = .checks
     }
@@ -604,6 +619,96 @@ final class AppState {
         }
     }
 
+    /// Resolve the open session + REAL test for `code`, replacing the staged
+    /// placeholder. Submissions must carry the real question id, so the exam
+    /// cannot meaningfully save until this lands (autosave guards on it).
+    func resolveActiveExam(code: String) async {
+        guard signedIn else { return }
+        do {
+            guard let session = try await supabase.lookupSession(code: code),
+                  session.status == "open" else {
+                errorMessage = "This assignment isn't open anymore."
+                return
+            }
+            activeExamSession = session
+            if let testId = session.testId,
+               let test = try await supabase.getTest(id: testId) {
+                activeAssignment = test
+            }
+        } catch {
+            errorMessage = describe(error)
+        }
+    }
+
+    /// Begin button on the checks screen: register the students row (the
+    /// proctoring contract) and only then enter the locked exam. False (with
+    /// errorMessage set) means stay on the checks screen.
+    func beginExam(screenCapture: Bool, remote: Bool, displayCount: Int?,
+                   isVM: Bool?, ip: String?) async -> Bool {
+        guard signedIn else { enterExam(); return true }   // preview path
+        guard let session = activeExamSession else {
+            errorMessage = "Couldn't reach this assignment's session. Go back and try again."
+            return false
+        }
+        do {
+            guard let sid = try await supabase.registerStudent(
+                sessionId: session.id, userId: userId,
+                email: email.isEmpty ? nil : email,
+                name: displayName.isEmpty ? nil : displayName,
+                ip: ip, screenCapture: screenCapture, remote: remote,
+                displayCount: displayCount, isVM: isVM)
+            else {
+                errorMessage = "Could not register for this exam."
+                return false
+            }
+            activeStudentId = sid
+            activeSubmissionId = nil
+            errorMessage = nil
+            enterExam()
+            return true
+        } catch {
+            errorMessage = describe(error)
+            return false
+        }
+    }
+
+    /// One durable save of the essay (debounced upstream). True = saved.
+    func autosaveEssay(html: String, wordCount: Int) async -> Bool {
+        guard signedIn else { return true }   // preview: nothing to persist
+        guard let session = activeExamSession,
+              let studentId = activeStudentId,
+              let questionId = activeAssignment?.questions.first?.id else { return false }
+        do {
+            if let id = try await supabase.upsertEssaySubmission(
+                sessionId: session.id, studentId: studentId, questionId: questionId,
+                contentHTML: html, wordCount: wordCount) {
+                activeSubmissionId = id
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Final flush + DB lock + status. False = the flush failed and the
+    /// caller must NOT exit the exam (the work would be lost). Does NOT
+    /// route; the exam view orchestrates kiosk exit + finishExam on success.
+    func submitExam(html: String, wordCount: Int) async -> Bool {
+        if signedIn {
+            guard await autosaveEssay(html: html, wordCount: wordCount) else { return false }
+            if let submissionId = activeSubmissionId {
+                _ = await supabase.submitEssay(submissionId: submissionId)   // best-effort lock
+            }
+            if let studentId = activeStudentId {
+                await supabase.updateStudentStatus(id: studentId, status: "submitted")
+            }
+        }
+        activeStudentId = nil
+        activeSubmissionId = nil
+        activeExamSession = nil
+        return true
+    }
+
     func openReturnedWork() {
         // ReturnedWorkView owns the load via its own `.task` (auto-cancelled with
         // the view); don't fire a second, detached load here.
@@ -624,6 +729,7 @@ final class AppState {
             classWork[idx].activeSessionId = nil
             classWork[idx].activeCode = nil
             classWork[idx].mySubmittedAt = Date()
+            classWork[idx].myActiveSubmittedAt = Date()
         }
         activeAssignment = nil
         studentScreen = .done

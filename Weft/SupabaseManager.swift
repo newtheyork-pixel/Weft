@@ -508,6 +508,7 @@ final class SupabaseManager: @unchecked Sendable {
             let questions: [Question]; let time_limit_minutes: Int?
             let version_group_id: String; let version_number: Int
         }
+        // Single-question app today; later questions would keep their ids across drafts (spec: out of scope).
         var questions = source.questions
         if let q = questions.first {
             questions[0] = Question(id: "q-\(UUID().uuidString.prefix(8))", kind: q.kind,
@@ -588,6 +589,7 @@ final class SupabaseManager: @unchecked Sendable {
     /// Register (or refresh) the caller's `students` row for a session at
     /// checks-pass, carrying the proctoring facts the checks screen computed.
     /// Mirrors student.js runChecks (onConflict session_id,user_id).
+    /// Re-registration with nil proctoring fields PRESERVES the earlier row's values (nil keys are omitted, so merge-duplicates does not overwrite them) — pass concrete values whenever the checks screen has them.
     func registerStudent(sessionId: String, userId: String, email: String?,
                          name: String?, ip: String?, screenCapture: Bool,
                          remote: Bool, displayCount: Int?, isVM: Bool?) async throws -> String? {
@@ -633,6 +635,7 @@ final class SupabaseManager: @unchecked Sendable {
                 params: ["p_submission_id": submissionId])
             return true
         } catch {
+            print("submit_essay lock failed: \(error)")
             return false
         }
     }
@@ -640,8 +643,12 @@ final class SupabaseManager: @unchecked Sendable {
     /// students.status transition (joined -> submitted). Best-effort.
     func updateStudentStatus(id: String, status: String) async {
         struct Payload: Encodable { let status: String }
-        let _: [StudentRowID]? = try? await update("students", values: Payload(status: status),
-            query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
+        do {
+            let _: [StudentRowID] = try await update("students", values: Payload(status: status),
+                query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
+        } catch {
+            print("students.status update failed: \(error)")
+        }
     }
 
     // MARK: - Code + time helpers

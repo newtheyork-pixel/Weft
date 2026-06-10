@@ -14,6 +14,7 @@ struct StudentChecksView: View {
 
     @State private var report: ProctoringReport?
     @State private var running = true
+    @State private var beginBusy = false
 
     /// "What it checks" — grounded in runChecks()/monitorTick() and the in-exam
     /// loops. Honest, plain-language copy ported from renderTrustLabel().
@@ -206,28 +207,54 @@ struct StudentChecksView: View {
 
     // MARK: Enter exam
     private var enterButton: some View {
-        Button {
-            app.enterExam()
-        } label: {
-            HStack(spacing: Theme.Space.sm) {
-                if running {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "pencil.and.outline")
-                        .font(.system(size: 14, weight: .semibold))
+        VStack(spacing: Theme.Space.sm) {
+            Button {
+                beginBusy = true
+                Task {
+                    _ = await app.beginExam(
+                        screenCapture: report?.screenCapture ?? false,
+                        remote: report?.remote ?? false,
+                        displayCount: report.map { $0.displays },
+                        isVM: report.map { $0.isVM },
+                        ip: report?.publicIP)
+                    beginBusy = false
                 }
-                Text(running ? "Finishing checks…" : "Enter exam")
-                    .font(Theme.sans(15, .semibold))
+            } label: {
+                HStack(spacing: Theme.Space.sm) {
+                    if running || beginBusy {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "pencil.and.outline")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    Text(running ? "Finishing checks…" : beginBusy ? "Starting exam…" : "Enter exam")
+                        .font(Theme.sans(15, .semibold))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 4)
+            .buttonStyle(.glassProminent)
+            .tint(Theme.accent)
+            .disabled(running || beginBusy)
+            .pointerStyle((running || beginBusy) ? .default : .link)
+            .help(running ? "Checks are still finishing" : "Enter the exam")
+            .animation(.easeOut(duration: 0.2), value: running)
+            .animation(.easeOut(duration: 0.2), value: beginBusy)
+
+            if let error = app.errorMessage {
+                HStack(alignment: .top, spacing: Theme.Space.sm) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Theme.warn)
+                    Text(error)
+                        .font(Theme.sans(12.5))
+                        .foregroundStyle(Theme.inkSoft)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(Theme.Space.md)
+                .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+            }
         }
-        .buttonStyle(.glassProminent)
-        .tint(Theme.accent)
-        .disabled(running)
-        .pointerStyle(running ? .default : .link)
-        .help(running ? "Checks are still finishing" : "Enter the exam")
-        .animation(.easeOut(duration: 0.2), value: running)
         .padding(.top, Theme.Space.xs)
     }
 }
