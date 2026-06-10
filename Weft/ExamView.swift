@@ -208,7 +208,9 @@ struct ExamView: View {
     /// (the 0:00 force-submit bypasses this — the deadline always wins), then
     /// confirm if the preference is on.
     private func requestSubmit() {
-        if let limit = wordLimit, wordCount > limit {
+        // Past 0:00 the editor is frozen, so "shorten your essay" would be an
+        // impossible instruction — the deadline always wins over the limit.
+        if !expired, let limit = wordLimit, wordCount > limit {
             overLimitMessage = "Over the word limit (\(wordCount) / \(limit) words). Shorten your essay before submitting."
             return
         }

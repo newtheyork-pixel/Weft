@@ -92,9 +92,11 @@ enum RichTextHTML {
                 if openList != ordered { closeList(); out += ordered ? "<ol>" : "<ul>"; openList = ordered }
                 out += "<li\(lineHeightAttr)>\(inner.isEmpty ? "<br>" : inner)</li>"
             case .h1:
-                closeList(); out += "<h1\(lineHeightAttr)>\(inner.isEmpty ? "<br>" : inner)</h1>"
+                // Headings carry their own canonical leading (1.15); re-stating
+                // it as line-height would be default-noise, not student intent.
+                closeList(); out += "<h1>\(inner.isEmpty ? "<br>" : inner)</h1>"
             case .h2:
-                closeList(); out += "<h2\(lineHeightAttr)>\(inner.isEmpty ? "<br>" : inner)</h2>"
+                closeList(); out += "<h2>\(inner.isEmpty ? "<br>" : inner)</h2>"
             case .p:
                 closeList(); out += "<p\(lineHeightAttr)>\(inner.isEmpty ? "<br>" : inner)</p>"
             }

@@ -576,13 +576,6 @@ final class SupabaseManager: @unchecked Sendable {
         return result.first
     }
 
-    func endSession(id: String) async throws {
-        struct Payload: Encodable { let status: String; let closed_at: String }
-        let _: [ExamSession] = try await update("sessions",
-            values: Payload(status: "closed", closed_at: Self.nowISO()),
-            query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
-    }
-
     /// Close EVERY open session this teacher owns. End-session uses this
     /// rather than closing one row: the app's invariant is one live session
     /// at a time, so any other open rows are stale leftovers (crashes, old
