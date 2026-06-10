@@ -583,6 +583,19 @@ final class SupabaseManager: @unchecked Sendable {
             query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
     }
 
+    /// Close EVERY open session this teacher owns. End-session uses this
+    /// rather than closing one row: the app's invariant is one live session
+    /// at a time, so any other open rows are stale leftovers (crashes, old
+    /// builds) that loadTeacherHome would otherwise resurrect one by one.
+    func endAllOpenSessions(teacherUserId: String) async throws {
+        struct Payload: Encodable { let status: String; let closed_at: String }
+        let _: [ExamSession] = try await update("sessions",
+            values: Payload(status: "closed", closed_at: Self.nowISO()),
+            query: [URLQueryItem(name: "teacher_user_id", value: "eq.\(teacherUserId)"),
+                    URLQueryItem(name: "status", value: "eq.open")],
+            returning: false)
+    }
+
     /// Upsert a grade. `essay_grades.session_id` and `student_id` are NOT NULL,
     /// so they MUST be supplied (mirrors teacher.js). `releasedAt` is the exact
     /// value to store (the caller decides whether to keep/clear the share time).

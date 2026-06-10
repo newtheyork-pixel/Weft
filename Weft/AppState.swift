@@ -444,6 +444,7 @@ final class AppState {
 
     // MARK: - Teacher: assignments
     func saveAssignment(title: String, prompt: String, wordLimit: Int?, timeLimitMinutes: Int?,
+                        spellcheckEnabled: Bool = true,
                         links: [(name: String, href: String)] = []) async {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -457,17 +458,21 @@ final class AppState {
         if !signedIn {
             // Preview keeps the links on the question so the editor round-trips,
             // but no backend pool ids exist; store the hrefs as the "ids" stand-in.
+            // spellcheckEnabled is stored on the local Assignment so ExamView can
+            // read it back in preview (no backend session required).
             let q = Question(id: qid, kind: "essay", prompt: p, wordLimit: wordLimit,
                              fileIds: existingFileIds, urlIds: links.map(\.href))
             if let id = editingAssignment?.id, let idx = assignments.firstIndex(where: { $0.id == id }) {
                 assignments[idx] = Assignment(id: id, title: t,
                     versionGroupId: assignments[idx].versionGroupId,
                     versionNumber: assignments[idx].versionNumber,
-                    questions: [q], timeLimitMinutes: timeLimitMinutes)
+                    questions: [q], timeLimitMinutes: timeLimitMinutes,
+                    spellcheckEnabled: spellcheckEnabled)
             } else {
                 assignments.append(Assignment(id: "local-\(UUID().uuidString.prefix(6))", title: t,
                     versionGroupId: "g-\(UUID().uuidString.prefix(6))", versionNumber: 1,
-                    questions: [q], timeLimitMinutes: timeLimitMinutes))
+                    questions: [q], timeLimitMinutes: timeLimitMinutes,
+                    spellcheckEnabled: spellcheckEnabled))
             }
             teacherScreen = .home
             return
@@ -479,10 +484,14 @@ final class AppState {
             let q = Question(id: qid, kind: "essay", prompt: p, wordLimit: wordLimit,
                              fileIds: existingFileIds, urlIds: urlIds)
             if let id = editingAssignment?.id {
-                try await supabase.updateTest(id: id, title: t, questions: [q], timeLimitMinutes: timeLimitMinutes)
+                try await supabase.updateTest(id: id, title: t, questions: [q],
+                                             timeLimitMinutes: timeLimitMinutes,
+                                             spellcheckEnabled: spellcheckEnabled)
             } else {
                 _ = try await supabase.createTest(teacherUserId: userId, title: t,
-                                                  questions: [q], timeLimitMinutes: timeLimitMinutes)
+                                                  questions: [q],
+                                                  timeLimitMinutes: timeLimitMinutes,
+                                                  spellcheckEnabled: spellcheckEnabled)
             }
             await loadTeacherHome()
             teacherScreen = .home
@@ -590,9 +599,21 @@ final class AppState {
     }
 
     func endSession() async {
-        if signedIn, let sid = liveSession?.id {
-            try? await supabase.endSession(id: sid)
+        // Signed-in: close EVERY open session this teacher owns, not just the
+        // one displayed in the Live card. The app's invariant is one live session
+        // at a time, so any extra open rows are stale leftovers from crashes or
+        // old builds; loadTeacherHome would otherwise resurrect them one by one.
+        // On network failure we surface the error and KEEP the local Live card —
+        // the session is still open on the server, so hiding it would be a lie.
+        if signedIn {
+            do {
+                try await supabase.endAllOpenSessions(teacherUserId: userId)
+            } catch {
+                errorMessage = "Couldn't end the session. Check your connection and try again."
+                return
+            }
         }
+        // Preview path (not signed in), or successful server close: clear local state.
         liveSession = nil
         gradingSubmissions = []
         grades = [:]

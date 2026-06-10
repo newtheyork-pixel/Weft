@@ -202,6 +202,10 @@ struct AssignmentEditorView: View {
     @State private var prompt: String = ""
     @State private var wordLimit: String = ""
     @State private var timeLimit: String = ""
+    /// Teacher-controlled per assignment; default true keeps students' spell-check
+    /// on unless the teacher explicitly disables it. Primed from the existing
+    /// assignment in prime() so editing round-trips the value faithfully.
+    @State private var spellcheckEnabled: Bool = true
     @State private var files: [EditorFile] = []
     @State private var links: [EditorLink] = []
 
@@ -233,6 +237,7 @@ struct AssignmentEditorView: View {
                         promptField
                         wordLimitField
                         timeLimitField
+                        spellcheckToggle
                         filesSection
                         websitesSection
                     }
@@ -343,6 +348,20 @@ struct AssignmentEditorView: View {
                 .padding(.vertical, 9)
                 .padding(.horizontal, 12)
                 .background(fieldBackground)
+        }
+    }
+
+    private var spellcheckToggle: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Allow spell check while writing", isOn: $spellcheckEnabled)
+                .font(Theme.sans(14))
+                .foregroundStyle(Theme.inkSoft)
+                .toggleStyle(.switch)
+                .help("When off, students see no spelling squiggles during this assignment")
+            Text("Spell check is on by default. Turn it off for assignments where you want students to rely on their own spelling.")
+                .font(Theme.sans(11))
+                .foregroundStyle(Theme.muted2)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -680,6 +699,9 @@ struct AssignmentEditorView: View {
             prompt = existing.questions.first?.prompt ?? ""
             if let wl = existing.questions.first?.wordLimit { wordLimit = String(wl) }
             if let tl = existing.timeLimitMinutes { timeLimit = String(tl) }
+            // Prime the spell-check toggle from the saved assignment so editing
+            // round-trips the value and a teacher can change it on a re-edit.
+            spellcheckEnabled = existing.spellcheckEnabled
             // Load the assignment's saved approved links so editing preserves them.
             Task {
                 let saved = await app.editorLinks(for: existing)
@@ -737,6 +759,7 @@ struct AssignmentEditorView: View {
                 prompt: prompt,
                 wordLimit: positiveInt(wordLimit),
                 timeLimitMinutes: positiveInt(timeLimit),
+                spellcheckEnabled: spellcheckEnabled,
                 links: links.map { (name: $0.name, href: $0.href) }
             )
         }

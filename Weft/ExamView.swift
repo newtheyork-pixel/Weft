@@ -70,6 +70,11 @@ struct ExamView: View {
     @State private var saveGeneration = 0
     @State private var monitorTask: Task<Void, Never>?
     @State private var showSubmitConfirm = false
+    /// Non-nil when the student tries to submit while over the word limit (manual
+    /// path only). Displayed near the footer and cleared automatically when the
+    /// count drops back to or below the limit. The 0:00 force-submit bypasses
+    /// this — the deadline always wins.
+    @State private var overLimitMessage: String?
     @AppStorage(Prefs.confirmBeforeSubmit) private var confirmBeforeSubmit = true
 
     private var assignment: Assignment { app.activeAssignment ?? .sample }
@@ -199,8 +204,15 @@ struct ExamView: View {
         withAnimation(.easeInOut(duration: 0.22)) { referencesVisible.toggle() }
     }
 
-    /// Entry point for the Submit buttons: confirm first if the preference is on.
+    /// Entry point for the Submit buttons: refuse while over the word limit
+    /// (the 0:00 force-submit bypasses this — the deadline always wins), then
+    /// confirm if the preference is on.
     private func requestSubmit() {
+        if let limit = wordLimit, wordCount > limit {
+            overLimitMessage = "Over the word limit (\(wordCount) / \(limit) words). Shorten your essay before submitting."
+            return
+        }
+        overLimitMessage = nil
         if confirmBeforeSubmit {
             showSubmitConfirm = true
         } else {
@@ -284,6 +296,7 @@ struct ExamView: View {
             header
             toolbarRow
             RichTextEditor(controller: controller, isEditable: !expired,
+                           spellcheckEnabled: assignment.spellcheckEnabled,
                            onEdit: { scheduleSave() })
                 .background(Color.white)
                 .padding(.horizontal, Theme.Space.xl)
@@ -364,19 +377,49 @@ struct ExamView: View {
     }
 
     private var footerBar: some View {
-        HStack {
-            Button(lockdown ? "Submit and exit" : "Back") {
-                if lockdown { requestSubmit() } else { leave() }
+        VStack(spacing: 0) {
+            // Over-limit error banner: shown between the editor and the submit
+            // buttons so it reads as a direct gate on the action. Cleared
+            // automatically when wordCount drops to/below the limit.
+            if let msg = overLimitMessage {
+                HStack(alignment: .top, spacing: Theme.Space.sm) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 13))
+                    Text(msg)
+                        .font(Theme.sans(13, .semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(Theme.bad)
+                .padding(.vertical, 10)
+                .padding(.horizontal, Theme.Space.xl)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.bad.opacity(0.08))
+                .transition(.opacity)
             }
-            .buttonStyle(.glass)
-            Spacer()
-            saveStateView
-            Spacer()
-            Button("Submit") { requestSubmit() }
-                .buttonStyle(.glassProminent).tint(Theme.accent)
-                .keyboardShortcut("\r", modifiers: [.command])
+            HStack {
+                Button(lockdown ? "Submit and exit" : "Back") {
+                    if lockdown { requestSubmit() } else { leave() }
+                }
+                .buttonStyle(.glass)
+                Spacer()
+                saveStateView
+                Spacer()
+                Button("Submit") { requestSubmit() }
+                    .buttonStyle(.glassProminent).tint(Theme.accent)
+                    .keyboardShortcut("\r", modifiers: [.command])
+            }
+            .padding(Theme.Space.xl)
         }
-        .padding(Theme.Space.xl)
+        .animation(.easeOut(duration: 0.18), value: overLimitMessage)
+        .onChange(of: wordCount) { _, newCount in
+            // Auto-clear the over-limit message once the student has shortened
+            // their essay to at or below the limit so it doesn't linger.
+            if overLimitMessage != nil, newCount <= (wordLimit ?? Int.max) {
+                overLimitMessage = nil
+            }
+        }
     }
 
     private var saveStateView: some View {
