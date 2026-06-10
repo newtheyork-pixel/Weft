@@ -203,10 +203,10 @@ final class RichTextController {
     /// Toggle a list of `format` on the paragraph(s) touching the selection.
     /// Re-toggling the same format strips it; toggling the other format
     /// converts in place. One pass, back-to-front, with the REAL per-paragraph
-    /// edits declared to shouldChangeText so undo restores text and styles
-    /// coherently (a nil replacementString would declare "attributes only" and
-    /// build the undo operation from a lie). Numbering restarts at 1 for each
-    /// toggle; renumber-on-edit is the key-handling task's job.
+    /// edits declared to shouldChangeText so undo restores the text coherently
+    /// (the reapplied paragraph style rides along and the next toggle resets it).
+    /// Numbering restarts at 1 for each toggle; renumber-on-edit is the
+    /// key-handling task's job.
     private func toggleList(_ format: NSTextList.MarkerFormat) {
         guard let tv = textView, let storage = tv.textStorage else { return }
         let ns = storage.string as NSString
@@ -296,6 +296,114 @@ final class RichTextController {
             loc = NSMaxRange(p) + (p.length == 0 ? 1 : 0)   // always make progress
         } while loc < NSMaxRange(range)
         return result
+    }
+
+    // MARK: List key behavior (called by WeftTextView)
+
+    /// Return on an EMPTY list item ends the list (Google Docs). True = handled.
+    func endListIfEmptyItem() -> Bool {
+        guard let tv = textView, let storage = tv.textStorage else { return false }
+        let ns = storage.string as NSString
+        let p = ns.paragraphRange(for: tv.selectedRange())
+        guard p.length > 0,
+              let style = storage.attribute(.paragraphStyle, at: p.location, effectiveRange: nil) as? NSParagraphStyle,
+              !style.textLists.isEmpty else { return false }
+        let text = ns.substring(with: p)
+        guard let prefix = Self.markerPrefixLength(of: text) else { return false }
+        let rest = (text as NSString).substring(from: prefix)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard rest.isEmpty else { return false }
+
+        // Strip the marker as a DECLARED text edit so undo stays coherent.
+        let strip = NSRange(location: p.location, length: prefix)
+        guard tv.shouldChangeText(in: strip, replacementString: "") else { return true }
+        storage.beginEditing()
+        storage.replaceCharacters(in: strip, with: "")
+        let newP = (storage.string as NSString).paragraphRange(for: NSRange(location: p.location, length: 0))
+        storage.addAttribute(.paragraphStyle, value: RichTextStyle.bodyParagraphStyle(), range: newP)
+        storage.endEditing()
+        tv.didChangeText()
+        tv.typingAttributes = RichTextStyle.body.attributes()
+        recountWords()
+        return true
+    }
+
+    /// After a plain newline inside a list item, carry the list onto the new
+    /// paragraph with the next marker. No-ops when the previous paragraph is
+    /// not a list item or when the marker is already there (AppKit carried it).
+    func continueListAfterNewlineIfNeeded() {
+        guard let tv = textView, let storage = tv.textStorage else { return }
+        let caret = tv.selectedRange().location
+        guard caret > 0 else { return }
+        let ns = storage.string as NSString
+        let newP = ns.paragraphRange(for: NSRange(location: caret, length: 0))
+        guard newP.location > 0 else { return }
+        let prevP = ns.paragraphRange(for: NSRange(location: newP.location - 1, length: 0))
+        guard prevP.length > 0,
+              let prevStyle = storage.attribute(.paragraphStyle, at: prevP.location, effectiveRange: nil) as? NSParagraphStyle,
+              let list = prevStyle.textLists.first else { return }
+        if Self.markerPrefixLength(of: ns.substring(with: newP)) != nil { return }   // already carried
+
+        let marker = "\t" + list.marker(forItemNumber: itemNumber(of: prevP, in: storage) + 1) + "\t"
+        let insert = NSRange(location: newP.location, length: 0)
+        guard tv.shouldChangeText(in: insert, replacementString: marker) else { return }
+        storage.beginEditing()
+        storage.replaceCharacters(
+            in: insert,
+            with: NSAttributedString(string: marker, attributes: [
+                .font: RichTextStyle.bodyFont,
+                .foregroundColor: RichTextStyle.inkColor,
+                .paragraphStyle: prevStyle,
+            ]))
+        let widened = (storage.string as NSString).paragraphRange(for: NSRange(location: newP.location, length: 0))
+        storage.addAttribute(.paragraphStyle, value: prevStyle, range: widened)
+        storage.endEditing()
+        tv.didChangeText()
+        recountWords()
+    }
+
+    /// 1-based position of `paragraph` within its contiguous run of list items.
+    private func itemNumber(of paragraph: NSRange, in storage: NSTextStorage) -> Int {
+        let ns = storage.string as NSString
+        var n = 1
+        var loc = paragraph.location
+        while loc > 0 {
+            let prev = ns.paragraphRange(for: NSRange(location: loc - 1, length: 0))
+            guard prev.length > 0,
+                  let s = storage.attribute(.paragraphStyle, at: prev.location, effectiveRange: nil) as? NSParagraphStyle,
+                  !s.textLists.isEmpty else { break }
+            n += 1
+            loc = prev.location
+        }
+        return n
+    }
+
+    /// Indent (+1) / outdent (-1) the list item(s) under the selection.
+    /// True = the selection was in a list and the Tab was consumed. Pure
+    /// attribute change, so the nil replacementString declaration is correct.
+    func changeListLevel(by delta: Int) -> Bool {
+        guard let tv = textView, let storage = tv.textStorage else { return false }
+        let range = (storage.string as NSString).paragraphRange(for: tv.selectedRange())
+        guard range.length > 0,
+              let style = storage.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle,
+              !style.textLists.isEmpty else { return false }
+        guard tv.shouldChangeText(in: range, replacementString: nil) else { return true }
+        storage.beginEditing()
+        storage.enumerateAttribute(.paragraphStyle, in: range, options: []) { value, sub, _ in
+            guard let s = value as? NSParagraphStyle, !s.textLists.isEmpty,
+                  let m = s.mutableCopy() as? NSMutableParagraphStyle else { return }
+            let level = Int(round((s.headIndent - RichTextStyle.listHeadIndent) / RichTextStyle.listIndentStep))
+            let newLevel = max(0, min(RichTextStyle.listMaxLevel, level + delta))
+            guard newLevel != level else { return }
+            let bump = CGFloat(newLevel) * RichTextStyle.listIndentStep
+            m.firstLineHeadIndent = RichTextStyle.listFirstLineHeadIndent + bump
+            m.headIndent = RichTextStyle.listHeadIndent + bump
+            m.tabStops = [NSTextTab(textAlignment: .left, location: RichTextStyle.listHeadIndent + bump)]
+            storage.addAttribute(.paragraphStyle, value: m, range: sub)
+        }
+        storage.endEditing()
+        tv.didChangeText()
+        return true
     }
 
     // MARK: Private
@@ -454,7 +562,8 @@ struct RichTextEditor: NSViewRepresentable {
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .white
 
-        let textView = NSTextView()
+        let textView = WeftTextView()
+        textView.formatting = controller
         textView.delegate = context.coordinator
         textView.isEditable = isEditable
         textView.isSelectable = true
