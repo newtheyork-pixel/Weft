@@ -130,6 +130,9 @@ struct WeftTopBar: View {
                 if !app.displayName.isEmpty { Text(app.displayName) }
                 if !app.email.isEmpty { Text(app.email) }
                 Divider()
+                if app.canChooseView {
+                    Button("Switch view") { app.switchView() }
+                }
                 Button("Sign out") { app.signOut() }
             } else {
                 Text("Previewing without signing in")

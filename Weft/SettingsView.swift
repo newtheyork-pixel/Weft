@@ -40,6 +40,9 @@ private struct GeneralSettings: View {
                     if let role = app.role {
                         LabeledContent("Role", value: role.rawValue.capitalized)
                     }
+                    if app.canChooseView {
+                        Button("Switch view") { app.switchView() }
+                    }
                     Button("Sign Out", role: .destructive) { app.signOut() }
                 }
             } else if app.role != nil {

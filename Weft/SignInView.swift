@@ -19,8 +19,16 @@ struct SignInView: View {
             VStack(spacing: Theme.Space.xl) {
                 brand
                 headline
-                signInCard
-                roleCard
+                // Before sign-in: only Google. After: students are routed away
+                // automatically, so a signed-in chooser here is a teacher/admin
+                // picking a view (the Google card is gone).
+                if !app.signedIn {
+                    signInCard
+                } else if app.role == nil {
+                    resolvingCard
+                } else {
+                    roleCard
+                }
                 Spacer(minLength: 0)
                 footer
             }
@@ -29,6 +37,8 @@ struct SignInView: View {
             .frame(maxWidth: 440)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.smooth(duration: 0.25), value: app.signedIn)
+        .animation(.smooth(duration: 0.25), value: app.role)
     }
 
     // MARK: Brand
@@ -50,7 +60,9 @@ struct SignInView: View {
                 .foregroundStyle(Theme.inkSoft)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("A cross-device honesty layer for exam apps. Sign in to run, take, or grade an exam.")
+            Text(app.signedIn
+                 ? "Signed in as \(app.email.isEmpty ? app.displayName : app.email)."
+                 : "A cross-device honesty layer for exam apps. Sign in to run, take, or grade an exam.")
                 .font(Theme.sans(14))
                 .foregroundStyle(Theme.muted)
                 .multilineTextAlignment(.center)
@@ -124,7 +136,20 @@ struct SignInView: View {
         .animation(.easeOut(duration: 0.18), value: busy)
     }
 
-    // MARK: Role chooser (glass)
+    // MARK: Resolving (signed in, role not yet known)
+    private var resolvingCard: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text("Checking your account…")
+                .font(Theme.sans(13.5))
+                .foregroundStyle(Theme.muted)
+        }
+        .padding(Theme.Space.xl)
+        .frame(maxWidth: .infinity)
+        .weftGlass(Theme.Radius.lg)
+    }
+
+    // MARK: View chooser (glass) — signed-in teachers/admins only
     private var roleCard: some View {
         VStack(spacing: Theme.Space.lg) {
             Text(roleCardCopy)
@@ -164,21 +189,22 @@ struct SignInView: View {
                 .pointerStyle(.link)
                 .help("Take an exam")
             }
+
+            Button("Not you? Sign out") { app.signOut() }
+                .buttonStyle(.plain)
+                .font(Theme.sans(12))
+                .foregroundStyle(Theme.muted)
+                .pointerStyle(.link)
         }
         .padding(Theme.Space.xl)
         .frame(maxWidth: .infinity)
         .weftGlass(Theme.Radius.lg)
     }
 
-    /// Honest framing for both states: signed-in admins (whose role couldn't be
-    /// auto-resolved) pick a view here; everyone else can use it to preview the
-    /// app without signing in.
+    /// Shown only to signed-in teachers/admins; students are routed straight to
+    /// the portal and never see this card.
     private var roleCardCopy: String {
-        if app.signedIn {
-            return "Choose how to continue. Teacher view runs and grades exams. Student view takes an exam."
-        } else {
-            return "Or preview without signing in. Teacher view runs and grades exams. Student view takes an exam."
-        }
+        "Choose how to continue. Teacher view runs and grades exams. Student view takes an exam."
     }
 
     private var footer: some View {
@@ -211,9 +237,22 @@ struct GoogleG: View {
     }
 }
 
-#Preview {
+#Preview("Signed out (Google only)") {
     SignInView()
         .environment(AppState())
         .preferredColorScheme(.light)   // Weft's identity is light; matches the real app
+        .frame(width: 480, height: 760)
+}
+
+#Preview("Signed in (teacher chooser)") {
+    let app = AppState()
+    app.signedIn = true
+    app.accountRole = .teacher
+    app.role = .teacher
+    app.displayName = "Thomas Seirer"
+    app.email = "tseirer@gcschool.org"
+    return SignInView()
+        .environment(app)
+        .preferredColorScheme(.light)
         .frame(width: 480, height: 760)
 }

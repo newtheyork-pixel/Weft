@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import AppKit
 
 @main
 struct WeftApp: App {
@@ -36,6 +37,12 @@ struct WeftApp: App {
             .environment(app)
             .preferredColorScheme(.light)   // Weft's identity is light
             .frame(minWidth: 900, minHeight: 640)
+            .onOpenURL { url in
+                // weft://exam|join|work|home links (from the /open redirector or
+                // an email). The OAuth callback is filtered out inside the handler.
+                NSApp.activate(ignoringOtherApps: true)
+                app.handleDeepLink(url)
+            }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1100, height: 820)
@@ -46,6 +53,9 @@ struct WeftApp: App {
             CommandGroup(after: .appSettings) {
                 if app.signedIn {
                     Divider()
+                    if app.canChooseView, app.route != .signIn {
+                        Button("Switch View") { app.switchView() }
+                    }
                     Button("Sign Out") { app.signOut() }
                 } else if app.role != nil {
                     Divider()
