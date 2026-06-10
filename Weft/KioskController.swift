@@ -221,16 +221,36 @@ final class KioskController {
         leaveFullScreen(window)
     }
 
-    /// Toggle out of full screen and re-check after the animation; retry a few
-    /// times if the toggle was swallowed by an in-flight transition.
+    /// Grace period between fullscreen-exit re-checks; just longer than the
+    /// space-transition animation so each re-check observes a settled window.
+    private let fullScreenRetryInterval: TimeInterval = 0.8
+
+    /// Hard cap on exit re-checks so the chain always terminates (~4s).
+    private let maxFullScreenRetries = 5
+
+    /// Leave the full-screen space, verified: macOS silently drops
+    /// toggleFullScreen while a transition is in flight, so re-check after the
+    /// animation and try again. The re-check is scheduled even when the
+    /// fullscreen style bit is not set yet — an exit during the first frames
+    /// of the ENTRY transition would otherwise strand the window fullscreen
+    /// with no chain running. The chain stops when a re-check observes a
+    /// windowed window, the cap is reached, or kiosk presentation options
+    /// reappear (a NEW exam session re-entered kiosk, possibly via a different
+    /// controller instance, and owns the window now — presentationOptions is
+    /// app-global, unlike per-instance state). `self` is captured strongly ON
+    /// PURPOSE: the controller is per-ExamView @State and exitKiosk fires from
+    /// onDisappear, so a weak self would deallocate with the view and silently
+    /// kill the pending re-checks exactly when they are needed.
     private func leaveFullScreen(_ window: NSWindow, attempt: Int = 0) {
-        guard window.styleMask.contains(.fullScreen) else { return }
-        window.toggleFullScreen(nil)
-        guard attempt < 5 else { return }
+        if window.styleMask.contains(.fullScreen) {
+            window.toggleFullScreen(nil)
+        }
+        guard attempt < maxFullScreenRetries else { return }
         Task { @MainActor [weak window] in
-            try? await Task.sleep(for: .seconds(0.8))
-            guard let window, !self.inTest,
-                  window.styleMask.contains(.fullScreen) else { return }
+            try? await Task.sleep(for: .seconds(self.fullScreenRetryInterval))
+            guard let window,
+                  window.styleMask.contains(.fullScreen),
+                  NSApp.presentationOptions.isEmpty else { return }
             self.leaveFullScreen(window, attempt: attempt + 1)
         }
     }
