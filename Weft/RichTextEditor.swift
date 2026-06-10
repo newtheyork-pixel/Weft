@@ -494,7 +494,7 @@ enum RichTextStyle {
     static let h2FontSize: CGFloat = 21
 
     // List geometry. Level 0 markers sit at `listFirstLineHeadIndent`; the item
-    // text starts at `listHeadIndent`. The upcoming key-handling pass moves whole levels with Tab/Shift+Tab.
+    // text starts at `listHeadIndent`. Tab/Shift+Tab (WeftTextView) move whole levels.
     static let listFirstLineHeadIndent: CGFloat = 8
     static let listHeadIndent: CGFloat = 30
     static let listIndentStep: CGFloat = 24

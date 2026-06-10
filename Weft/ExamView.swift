@@ -1,9 +1,10 @@
 //
 //  ExamView.swift
 //  Weft — the in-exam writing workspace. A native, resizable two-pane layout:
-//  the writing surface on the left and a reference column on the right that the
-//  student arranges themselves — PDFs, the approved web links, or both at once
-//  (a VSplitView), or collapsed entirely for a distraction-free write-only view.
+//  the writing surface on the left and a reference area on the right where
+//  every teacher PDF and approved website is a browser-style tab (with an
+//  optional split pinning one material above another), or collapsed entirely
+//  for a distraction-free write-only view.
 //
 //  When `lockdown` is true (the real student flow) this also drives the full
 //  exam lifecycle: KioskController locks the window, a ProctoringEngine monitor
