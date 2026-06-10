@@ -69,6 +69,8 @@ final class AppState {
     var returnedWork: [ReturnedWorkItem] = []
 
     var selectedClassId: String?
+    /// Active-assignment count per class id (the classes-list badges).
+    var classOpenCounts: [String: Int] = [:]
     /// The assignment a student is about to take / is taking (drives ExamView).
     var activeAssignment: Assignment?
     /// Reference materials for the active exam (sample defaults; replaced by the
@@ -251,10 +253,17 @@ final class AppState {
         do {
             let classes = try await supabase.myClasses(userId: userId)
             enrolledClasses = classes
-            if selectedClassId == nil || !classes.contains(where: { $0.id == selectedClassId }) {
+            // Class-first home: only auto-enter when there is exactly one
+            // class; otherwise land on the classes list (selectedClassId nil).
+            if let selected = selectedClassId,
+               !classes.contains(where: { $0.id == selected }) {
+                selectedClassId = nil
+            }
+            if selectedClassId == nil && classes.count == 1 {
                 selectedClassId = classes.first?.id
             }
             await loadClassWork()
+            await loadOpenCounts()
         } catch {
             errorMessage = describe(error)
         }
@@ -268,6 +277,30 @@ final class AppState {
         } catch {
             errorMessage = describe(error)
         }
+    }
+
+    /// Refresh the per-class Active counts for the classes list. Classes are
+    /// few; one small RPC per class, concurrently.
+    func loadOpenCounts() async {
+        guard signedIn else { return }
+        let classes = enrolledClasses
+        await withTaskGroup(of: (String, Int).self) { group in
+            for c in classes {
+                group.addTask {
+                    let work: [ClassWorkItem] =
+                        (try? await SupabaseManager.shared.listClassWork(classId: c.id)) ?? []
+                    return (c.id, work.filter { $0.section == .active }.count)
+                }
+            }
+            for await (id, n) in group { classOpenCounts[id] = n }
+        }
+    }
+
+    /// Back from a class detail to the classes list.
+    func leaveClass() {
+        selectedClassId = nil
+        if signedIn { classWork = [] }
+        Task { await loadOpenCounts() }
     }
 
     func selectClass(_ id: String) {

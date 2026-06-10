@@ -1,17 +1,14 @@
 //
 //  StudentClassHomeView.swift
-//  Weft — the student's class home: pick a class, see Active / Graded / Past
-//  assignments, one row each, no codes. Native, on real Liquid Glass.
+//  Weft — the student's class home: classes list (with open-count badges) or
+//  class detail (Active / Graded / Past sections). Two-level navigation, no
+//  chip picker. Native, on real Liquid Glass.
 //
 
 import SwiftUI
 
 struct StudentClassHomeView: View {
     @Environment(AppState.self) private var app
-
-    private var selectedClass: ClassRoom? {
-        app.enrolledClasses.first { $0.id == app.selectedClassId } ?? app.enrolledClasses.first
-    }
 
     private var active: [ClassWorkItem] { app.classWork.filter { $0.section == .active } }
     private var graded: [ClassWorkItem] { app.classWork.filter { $0.section == .graded } }
@@ -22,13 +19,21 @@ struct StudentClassHomeView: View {
             WeftTopBar(role: "Student")
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Space.lg) {
-                    intro
+                    if app.selectedClassId == nil { intro }
                     if let error = app.errorMessage { errorBanner(error) }
-                    classPicker
-                    if !active.isEmpty { sectionCard("Active", active) }
-                    if !graded.isEmpty { sectionCard("Graded", graded) }
-                    if !past.isEmpty { sectionCard("Past", past) }
-                    if active.isEmpty && graded.isEmpty && past.isEmpty { emptyState }
+                    if app.selectedClassId == nil {
+                        if app.enrolledClasses.isEmpty {
+                            emptyState
+                        } else {
+                            classesLevel
+                        }
+                    } else {
+                        detailHeader
+                        if !active.isEmpty { sectionCard("Active", active) }
+                        if !graded.isEmpty { sectionCard("Graded", graded) }
+                        if !past.isEmpty { sectionCard("Past", past) }
+                        if active.isEmpty && graded.isEmpty && past.isEmpty { detailEmpty }
+                    }
                     joinAnother
                 }
                 .padding(Theme.Space.xl)
@@ -36,11 +41,72 @@ struct StudentClassHomeView: View {
                 .frame(maxWidth: .infinity)
                 .animation(.easeOut(duration: 0.2), value: app.classWork.count)
                 .animation(.easeOut(duration: 0.2), value: app.selectedClassId)
+                .animation(.easeOut(duration: 0.2), value: app.enrolledClasses.count)
             }
         }
         .background(AmbientBackground())
         .task { await app.loadStudentHome() }
     }
+
+    // MARK: Classes level
+
+    private var classesLevel: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.md) {
+            Kicker(text: "Your classes")
+            ForEach(app.enrolledClasses) { c in
+                Button { app.selectClass(c.id) } label: {
+                    HStack(spacing: Theme.Space.md) {
+                        Image(systemName: "books.vertical.fill")
+                            .font(.system(size: 15))
+                            .foregroundStyle(Theme.accent)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(c.name)
+                                .font(Theme.sans(15, .semibold))
+                                .foregroundStyle(Theme.ink)
+                            Text(openBadge(for: c.id))
+                                .font(Theme.sans(12.5))
+                                .foregroundStyle(Theme.muted)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.muted2)
+                    }
+                    .padding(Theme.Space.lg)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .weftGlass(Theme.Radius.md)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .pointerStyle(.link)
+            }
+        }
+    }
+
+    private func openBadge(for classId: String) -> String {
+        let n = app.classOpenCounts[classId] ?? 0
+        if n == 0 { return "Nothing due right now" }
+        return n == 1 ? "1 open assignment" : "\(n) open assignments"
+    }
+
+    // MARK: Class detail header
+
+    private var detailHeader: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            Button { app.leaveClass() } label: {
+                Label("Your classes", systemImage: "chevron.left")
+                    .font(Theme.sans(13, .medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.accent)
+            .pointerStyle(.link)
+            Text(app.enrolledClasses.first(where: { $0.id == app.selectedClassId })?.name ?? "Class")
+                .font(Theme.serif(24, .semibold))
+                .foregroundStyle(Theme.inkSoft)
+        }
+    }
+
+    // MARK: Empty states
 
     private var emptyState: some View {
         HStack(alignment: .top, spacing: Theme.Space.sm) {
@@ -54,6 +120,13 @@ struct StudentClassHomeView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, Theme.Space.md)
+    }
+
+    private var detailEmpty: some View {
+        Text("No assignments in this class yet.")
+            .font(Theme.sans(13))
+            .foregroundStyle(Theme.muted)
+            .padding(.vertical, Theme.Space.md)
     }
 
     private func errorBanner(_ message: String) -> some View {
@@ -75,7 +148,7 @@ struct StudentClassHomeView: View {
         .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
     }
 
-    // MARK: Intro
+    // MARK: Intro (classes level only)
     private var intro: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Your assignments")
@@ -86,40 +159,6 @@ struct StudentClassHomeView: View {
                 .foregroundStyle(Theme.muted)
         }
         .padding(.bottom, Theme.Space.sm)
-    }
-
-    // MARK: Class picker
-    private var classPicker: some View {
-        Menu {
-            ForEach(app.enrolledClasses) { c in
-                Button(c.name) { app.selectClass(c.id) }
-            }
-        } label: {
-            HStack(spacing: Theme.Space.md) {
-                Image(systemName: "books.vertical")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(Theme.accent)
-                VStack(alignment: .leading, spacing: 2) {
-                    Kicker(text: "Class")
-                    Text(selectedClass?.name ?? "Select a class")
-                        .font(Theme.sans(17, .semibold))
-                        .foregroundStyle(Theme.inkSoft)
-                }
-                Spacer()
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Theme.muted)
-            }
-            .padding(.vertical, 16)
-            .padding(.horizontal, 20)
-            .frame(maxWidth: .infinity)
-            .weftGlass(Theme.Radius.md)
-            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous))
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .linkPointer()
-        .help("Switch class")
     }
 
     // MARK: Section card
@@ -158,9 +197,19 @@ struct StudentClassHomeView: View {
     private func row(_ item: ClassWorkItem) -> some View {
         HStack(spacing: Theme.Space.lg) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(item.title)
-                    .font(Theme.sans(15, .semibold))
-                    .foregroundStyle(Theme.inkSoft)
+                HStack(spacing: 6) {
+                    Text(item.title)
+                        .font(Theme.sans(15, .semibold))
+                        .foregroundStyle(Theme.inkSoft)
+                    if let draft = item.draftLabel {
+                        Text(draft)
+                            .font(.system(size: 10, weight: .bold))
+                            .tracking(0.6)
+                            .padding(.horizontal, 7).padding(.vertical, 3)
+                            .background(Theme.accent.opacity(0.12), in: Capsule())
+                            .foregroundStyle(Theme.accent)
+                    }
+                }
                 Text(metaText(item))
                     .font(Theme.sans(12.5))
                     .foregroundStyle(Theme.muted)
