@@ -56,9 +56,17 @@ final class AppState {
     /// Reentrancy guard so overlapping callers (sign-in, deep link, the home
     /// view's own .task) don't run duplicate concurrent student-home loads.
     private var studentHomeInFlight = false
+    /// Reentrancy guard (mirrors studentHomeInFlight): the home .task refires
+    /// on every return from editor/roster/grading and overlaps with enterTeacher.
+    private var teacherHomeInFlight = false
     /// Reentrancy guard: a double-clicked New draft would mint two clones with
     /// the same version number, one of them unreachable in the grouped UI.
     private var draftCloneInFlight = false
+    /// Reentrancy guard: launchSession suspends twice (public IP, server
+    /// insert) before liveSession is assigned, so a double-clicked Start
+    /// could pass the `liveSession == nil` guard twice and mint two open
+    /// server sessions — breaking the one-live-session invariant.
+    private var launchInFlight = false
     /// True only after a *successful* grading load, so a first-release email is
     /// never sent off a stale/failed grades cache (which would duplicate).
     private var gradesFresh = false
@@ -91,16 +99,26 @@ final class AppState {
     // MARK: Teacher in-role navigation + state
     enum TeacherScreen: Equatable { case home, editor, grading, roster }
     var teacherScreen: TeacherScreen = .home
-    /// Build/Live segment on the teacher home. Persisted here (not view @State)
-    /// so navigating to roster/grading and back returns to the same tab.
-    enum TeacherTab: Equatable { case build, live }
-    var teacherTab: TeacherTab = .build
+    /// Class-first navigation: nil = "Your classes" level (1), non-nil = that
+    /// class's detail (level 2). Mirrors the student home's selectedClassId;
+    /// AppState-held so roster/grading round-trips return to the same class.
+    var teacherSelectedClassId: String?
+    /// The selected class's session history, newest first. nil = not loaded
+    /// yet (the UI claims nothing it hasn't confirmed), [] = confirmed empty.
+    var classSessions: [ExamSession]?
+    /// Signed-out preview history backing store (ALL classes; loadClassSessions
+    /// filters per class). launchSession/endSession mutate it, so a demo
+    /// session that was launched and ended survives leaving and re-entering
+    /// the class instead of vanishing on the next rebuild.
+    private var previewSessions: [ExamSession] = ExamSession.sampleHistory
     /// The assignment being edited; nil means a brand-new assignment.
     var editingAssignment: Assignment?
-    /// The currently live session (after Start live assignment).
-    var liveSession: ExamSession?
+    /// The currently live session (after Start live assignment). Signed out
+    /// it seeds the open demo session (matching ExamSession.sampleHistory's
+    /// Open row) so the LIVE chip / monitor / Open chip render at rest;
+    /// dropMockData clears it the moment a real session begins.
+    var liveSession: ExamSession? = ExamSession.sampleOpen
     var pickedAssignmentId: String?
-    var pickedClassId: String?
 
     /// One row per assignment family: the LATEST draft of each version group.
     /// The Build list and the launch picker both present these.
@@ -118,6 +136,14 @@ final class AppState {
     var gradingSubmissions: [TeacherSubmission] = []
     var grades: [String: EssayGrade] = [:]   // submissionId -> grade
     var gradingTitle: String = ""
+    /// THE grading key. Grading is always for this EXPLICIT session: live,
+    /// just-closed, or weeks old. NEVER read liveSession in a grading path;
+    /// that coupling is the defect that made closed sessions unreachable.
+    var gradingSession: ExamSession?
+    /// Student names for the session being GRADED. Separate from `roster`
+    /// (the live proctoring monitor) so grading an old session can never
+    /// clobber the monitor of a session that is live right now.
+    var gradingRoster: [RosterStudent] = []
     /// Transient status for the roster "Invite students" action.
     var inviteStatus: String?
     // School-approved websites (from the published Google Sheet), for the editor.
@@ -184,8 +210,14 @@ final class AppState {
         // Teacher state back to defaults.
         teacherScreen = .home
         editingAssignment = nil
-        liveSession = nil
-        pickedAssignmentId = nil; pickedClassId = nil
+        liveSession = ExamSession.sampleOpen
+        previewSessions = ExamSession.sampleHistory
+        pickedAssignmentId = nil
+        teacherSelectedClassId = nil
+        classSessions = nil
+        gradingSession = nil
+        gradingRoster = []
+        gradingTitle = ""
         classRoster = []; rosterClassId = nil; rosterClassName = ""
         gradingSubmissions = []; grades = [:]
         teacherClasses = [.sample, .sample2]
@@ -204,6 +236,17 @@ final class AppState {
         returnedWork = []
         selectedClassId = nil
         activeAssignment = nil
+        roster = []
+        teacherClasses = []
+        assignments = []
+        pickedAssignmentId = nil
+        liveSession = nil
+        teacherSelectedClassId = nil
+        classSessions = nil
+        gradingSession = nil
+        gradingRoster = []
+        gradingSubmissions = []
+        grades = [:]
     }
 
     // MARK: - Auth
@@ -371,25 +414,47 @@ final class AppState {
     // signed in) so every teacher button is demoable without a backend session.
 
     func loadTeacherHome() async {
-        guard signedIn else { return }
+        guard signedIn, !teacherHomeInFlight else { return }
+        teacherHomeInFlight = true
+        defer { teacherHomeInFlight = false }
         errorMessage = nil
         do {
-            teacherClasses = try await supabase.listTeacherClasses()
-            assignments = try await supabase.listTeacherTests(userId: userId)
+            let classes = try await supabase.listTeacherClasses()
+            let tests = try await supabase.listTeacherTests(userId: userId)
+            // Signed out while a fetch was in flight: signOut() already restored
+            // the mock state, so never write the old account's data over it
+            // (it would leak into the NEXT sign-in's pre-load frame).
+            guard signedIn else { return }
+            teacherClasses = classes
+            assignments = tests
             if pickedAssignmentId == nil || !groupedAssignments.contains(where: { $0.id == pickedAssignmentId }) {
                 pickedAssignmentId = groupedAssignments.first?.id
             }
-            if pickedClassId == nil || !teacherClasses.contains(where: { $0.id == pickedClassId }) {
-                pickedClassId = teacherClasses.first?.id
+            // A selection pointing at a class that no longer exists is dropped.
+            if let sel = teacherSelectedClassId, !teacherClasses.contains(where: { $0.id == sel }) {
+                leaveTeacherClass()
             }
             // Restore an already-open session (app relaunch / another device) so
             // the home reflects reality and we never launch a duplicate.
             if liveSession == nil, let open = try? await supabase.listOpenSessions(userId: userId).first {
+                guard signedIn else { return }   // signed out during the fetch
                 liveSession = open
                 await loadLiveRoster()
-                teacherTab = .live
+                guard signedIn else { return }   // signed out during the roster load
+                // Prime the selection ONLY here, inside the restore branch:
+                // a genuine relaunch lands the teacher next to their live exam,
+                // but returning from the editor or grading never yanks a
+                // teacher who deliberately went back to the classes list.
+                if teacherSelectedClassId == nil, let cid = open.classId,
+                   teacherClasses.contains(where: { $0.id == cid }) {
+                    teacherSelectedClassId = cid
+                    classSessions = nil
+                }
             }
+            // Refresh an open detail (covers priming and post-mutation reloads).
+            if teacherSelectedClassId != nil { await loadClassSessions() }
         } catch {
+            guard signedIn else { return }   // a post-signOut failure must not banner the sign-in screen
             errorMessage = describe(error)
         }
     }
@@ -409,13 +474,66 @@ final class AppState {
     func openEditAssignment(_ a: Assignment) { errorMessage = nil; editingAssignment = a; teacherScreen = .editor }
 
     // MARK: - Teacher: classes
+    var selectedTeacherClass: ClassRoom? {
+        teacherClasses.first { $0.id == teacherSelectedClassId }
+    }
+    /// Name of the class that owns the live session; nil for legacy rows
+    /// with no class_id (callers must cope).
+    var liveClassName: String? {
+        guard let cid = liveSession?.classId else { return nil }
+        return teacherClasses.first { $0.id == cid }?.name
+    }
+    /// SINGLE title-resolution path: test_id -> title (+ vN when > 1) from the
+    /// already-loaded `assignments` (ALL versions, so old drafts resolve too).
+    /// Fallback covers deleted tests and the pre-load window.
+    func sessionTitle(_ s: ExamSession) -> String {
+        guard let tid = s.testId,
+              let a = assignments.first(where: { $0.id == tid }) else { return "Assignment" }
+        return a.versionNumber > 1 ? "\(a.title) · v\(a.versionNumber)" : a.title
+    }
+
+    /// Enter a class's detail (level 2). Clears the previous class's history
+    /// FIRST so stale rows never flash under the new header (mirrors selectClass).
+    func selectTeacherClass(_ id: String) {
+        errorMessage = nil
+        teacherSelectedClassId = id
+        classSessions = nil
+        Task { await loadClassSessions() }
+    }
+
+    /// Back to the classes list (level 1).
+    func leaveTeacherClass() {
+        errorMessage = nil
+        teacherSelectedClassId = nil
+        classSessions = nil
+    }
+
+    /// Session history for the selected class, any status, newest first.
+    func loadClassSessions() async {
+        guard let cid = teacherSelectedClassId else { return }
+        if !signedIn {
+            // The mutable preview store is the single source of truth here:
+            // launched and ended demo sessions live in it, so history is
+            // stable across leaving and re-entering the class.
+            classSessions = previewSessions.filter { $0.classId == cid }
+            return
+        }
+        do {
+            let sessions = try await supabase.listClassSessions(classId: cid, teacherUserId: userId)
+            guard teacherSelectedClassId == cid else { return }   // switched class mid-flight; drop stale payload
+            classSessions = sessions
+        } catch {
+            guard teacherSelectedClassId == cid else { return }
+            errorMessage = describe(error)
+        }
+    }
+
     func createClass(name: String) async {
         let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         if !signedIn {
             teacherClasses.append(ClassRoom(id: "local-\(UUID().uuidString.prefix(6))",
                 name: clean, joinCode: SupabaseManager.classCode(), archivedAt: nil))
-            if pickedClassId == nil { pickedClassId = teacherClasses.last?.id }
             return
         }
         do { _ = try await supabase.createClass(name: clean); await loadTeacherHome() }
@@ -554,24 +672,34 @@ final class AppState {
 
     // MARK: - Teacher: live session
     func launchSession() async {
+        guard !launchInFlight else { return }
+        launchInFlight = true
+        defer { launchInFlight = false }
         errorMessage = nil
         guard liveSession == nil else {
-            errorMessage = "End the current live session first (Live tab), then launch the new draft."
+            errorMessage = liveClassName.map {
+                "End the live session in \($0) first, then launch this assignment."
+            } ?? "End the current live session first, then launch this assignment."
             return
         }
         guard let testId = pickedAssignmentId else {
             errorMessage = "Pick an assignment to launch."
             return
         }
-        guard let classId = pickedClassId else {
-            errorMessage = "Pick a class to launch for."
+        guard let classId = teacherSelectedClassId else {
+            errorMessage = "Open a class to launch for."
             return
         }
         if !signedIn {
-            liveSession = ExamSession(id: "local-session", code: SupabaseManager.sessionCode(),
-                                      testId: testId, classId: classId, status: "open")
+            // Unique id per preview launch: relaunching after End session must
+            // never duplicate a ForEach identifier in the Sessions list.
+            let s = ExamSession(id: "local-\(UUID().uuidString.prefix(6))",
+                                code: SupabaseManager.sessionCode(),
+                                testId: testId, classId: classId, status: "open", createdAt: Date())
+            liveSession = s
             roster = RosterStudent.sample
-            teacherTab = .live
+            previewSessions.insert(s, at: 0)
+            classSessions = previewSessions.filter { $0.classId == classId }   // history shows the open row immediately
             return
         }
         isLoading = true
@@ -581,7 +709,7 @@ final class AppState {
             liveSession = try await supabase.launchSession(testId: testId, classId: classId,
                                                            teacherUserId: userId, teacherIP: ip)
             await loadLiveRoster()
-            teacherTab = .live
+            await loadClassSessions()      // the new open session appears as history row 1; NO tab jump
             // Email every enrolled student that the assignment is live. Best
             // effort; never blocks the launch.
             if let sid = liveSession?.id {
@@ -594,8 +722,16 @@ final class AppState {
 
     func loadLiveRoster() async {
         guard signedIn, let sid = liveSession?.id else { return }
-        do { roster = try await supabase.listSessionStudents(sessionId: sid) }
-        catch { errorMessage = describe(error) }
+        do {
+            let students = try await supabase.listSessionStudents(sessionId: sid)
+            // Signed out (or session swapped) mid-flight: don't clobber the
+            // just-restored mock roster with the old account's students.
+            guard signedIn, liveSession?.id == sid else { return }
+            roster = students
+        } catch {
+            guard signedIn else { return }
+            errorMessage = describe(error)
+        }
     }
 
     func endSession() async {
@@ -614,40 +750,73 @@ final class AppState {
             }
         }
         // Preview path (not signed in), or successful server close: clear local state.
+        let ended = liveSession
         liveSession = nil
-        gradingSubmissions = []
-        grades = [:]
-        roster = []
-        teacherTab = .build
+        roster = []        // the live MONITOR roster only
+        // Grading state is deliberately NOT cleared. Grading keys on
+        // gradingSession now; the just-closed session's essays are the very
+        // thing the teacher comes back to grade. Clearing them here was the
+        // old defect's second half.
+        if signedIn {
+            await loadClassSessions()      // the row reappears as Closed in place
+        } else if let s = ended {
+            // Preview: flip the row in the BACKING store (not just the visible
+            // list) so the defect case stays demoable after leaving and
+            // re-entering the class — the closed row must never vanish.
+            if let i = previewSessions.firstIndex(where: { $0.id == s.id }) {
+                previewSessions[i].status = "closed"
+            }
+            if let cid = teacherSelectedClassId {
+                classSessions = previewSessions.filter { $0.classId == cid }
+            }
+        }
     }
 
     // MARK: - Teacher: grading
-    func openGrading() {
+
+    /// Open grading for an EXPLICIT session: the open one or any history row,
+    /// including sessions closed days ago. Never keyed to liveSession.
+    /// Callers MUST pass title: sessionTitle(session); no other source.
+    func openGrading(session: ExamSession, title: String) {
         errorMessage = nil
-        gradingTitle = assignments.first(where: { $0.id == liveSession?.testId })?.title ?? "Submissions"
+        gradingSession = session
+        gradingTitle = title
+        // Pre-clear the PREVIOUS session's caches before navigating so its
+        // essays never render under the new title while the load is in
+        // flight, and a failed load can't leave the wrong session on screen.
+        gradingSubmissions = []
+        grades = [:]
+        gradingRoster = []
+        gradesFresh = false
         teacherScreen = .grading
         Task { await loadGrading() }
     }
 
     func loadGrading() async {
-        guard let sid = liveSession?.id else { return }
+        // Keyed to the EXPLICIT grading session, never liveSession: closed
+        // sessions stay gradeable forever. nil (dev gallery / #Preview) keeps
+        // the silent no-op so the grading screen's mock fallback renders.
+        guard let sid = gradingSession?.id else { return }
         gradesFresh = false
         if !signedIn {
-            // No submissions to load in preview; the grading screen falls back
-            // to its own sample content.
             gradingSubmissions = []
             grades = [:]
             return
         }
         errorMessage = nil
         do {
-            gradingSubmissions = try await supabase.listSessionSubmissions(sessionId: sid)
-            // Refresh the roster too so late-joiner names resolve when grading.
-            roster = try await supabase.listSessionStudents(sessionId: sid)
-            let g = try await supabase.listGrades(submissionIds: gradingSubmissions.map(\.id))
+            let subs = try await supabase.listSessionSubmissions(sessionId: sid)
+            let ros  = try await supabase.listSessionStudents(sessionId: sid)
+            let g    = try await supabase.listGrades(submissionIds: subs.map(\.id))
+            // The teacher may have opened a DIFFERENT session while we loaded;
+            // a stale payload must never overwrite it or set gradesFresh.
+            guard gradingSession?.id == sid else { return }
+            gradingSubmissions = subs
+            gradingRoster = ros
             grades = Dictionary(uniqueKeysWithValues: g.map { ($0.submissionId, $0) })
-            gradesFresh = true   // grades cache now reflects the DB
+            gradesFresh = true   // grades cache now reflects the DB for THIS session
         } catch {
+            guard gradingSession?.id == sid else { return }
             errorMessage = describe(error)
         }
     }

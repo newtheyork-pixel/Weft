@@ -38,7 +38,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .blocked:     return "Student · Blocked (sharing)"
         case .recovery:    return "Student · Recovery prompt"
         case .returned:    return "Student · Returned work"
-        case .teacher:     return "Teacher · Build / Live"
+        case .teacher:     return "Teacher · Classes"
         case .templates:   return "Teacher · Templates"
         case .editor:      return "Teacher · Assignment editor"
         case .grading:     return "Teacher · Grading"

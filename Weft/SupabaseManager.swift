@@ -441,6 +441,20 @@ final class SupabaseManager: @unchecked Sendable {
         ])
     }
 
+    /// All sessions ever run for a class (any status), newest first. This is
+    /// what makes closed-session essays reachable again: grading is entered
+    /// from these rows, not from the live session. The teacher filter is
+    /// defense-in-depth alongside RLS (mirrors listOpenSessions); nullslast
+    /// keeps undated legacy rows at the bottom (Postgres DESC is NULLS FIRST).
+    func listClassSessions(classId: String, teacherUserId: String) async throws -> [ExamSession] {
+        try await rows("sessions", query: [
+            URLQueryItem(name: "select", value: "id,code,test_id,class_id,status,created_at"),
+            URLQueryItem(name: "class_id", value: "eq.\(classId)"),
+            URLQueryItem(name: "teacher_user_id", value: "eq.\(teacherUserId)"),
+            URLQueryItem(name: "order", value: "created_at.desc.nullslast"),
+        ])
+    }
+
     func listSessionStudents(sessionId: String) async throws -> [RosterStudent] {
         try await rows("students", query: [
             URLQueryItem(name: "select", value: "*"),

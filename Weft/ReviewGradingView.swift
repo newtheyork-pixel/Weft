@@ -157,7 +157,18 @@ struct ReviewGradingView: View {
     private var assignmentTitle: String {
         isLive && !app.gradingTitle.isEmpty ? app.gradingTitle : "Lit essay 1 · AP English"
     }
-    private let prompt = "Analyze the use of light and dark imagery in the assigned passage. Support your claim with specific textual evidence."
+    /// The prompt above the essay. Live: resolved from the graded
+    /// session's assignment; nil hides the block (never show the mock
+    /// prompt over a real essay). Preview: the bundled sample prompt.
+    private var prompt: String? {
+        if !isLive {
+            return "Analyze the use of light and dark imagery in the assigned passage. Support your claim with specific textual evidence."
+        }
+        guard let tid = app.gradingSession?.testId,
+              let p = app.assignments.first(where: { $0.id == tid })?.questions.first?.prompt,
+              !p.isEmpty else { return nil }
+        return p
+    }
 
     /// The rows the screen renders — live submissions mapped into `ReviewEntry`,
     /// or the bundled mock essays when there is no real data.
@@ -231,7 +242,7 @@ struct ReviewGradingView: View {
 
     private func liveName(for sub: TeacherSubmission) -> String {
         if let sid = sub.studentId,
-           let r = app.roster.first(where: { $0.id == sid }) {
+           let r = app.gradingRoster.first(where: { $0.id == sid }) {
             return r.name
         }
         return "Student"
@@ -467,28 +478,30 @@ struct ReviewGradingView: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                HStack(spacing: 6) {
-                    Image(systemName: "text.quote")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("PROMPT")
-                        .tracking(0.9)
-                }
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.muted2)
+            if let prompt {
+                VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "text.quote")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("PROMPT")
+                            .tracking(0.9)
+                    }
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.muted2)
 
-                Text(prompt)
-                    .font(Theme.sans(13))
-                    .foregroundStyle(Theme.muted)
-                    .lineSpacing(3)
+                    Text(prompt)
+                        .font(Theme.sans(13))
+                        .foregroundStyle(Theme.muted)
+                        .lineSpacing(3)
+                }
+                .padding(.leading, Theme.Space.md)
+                .overlay(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(Theme.accentSoft.opacity(0.5))
+                        .frame(width: 3)
+                }
+                .padding(.top, Theme.Space.xs)
             }
-            .padding(.leading, Theme.Space.md)
-            .overlay(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Theme.accentSoft.opacity(0.5))
-                    .frame(width: 3)
-            }
-            .padding(.top, Theme.Space.xs)
         }
         .padding(.horizontal, Theme.Space.xl)
         .padding(.top, Theme.Space.lg)

@@ -137,12 +137,57 @@ struct ExamSession: Identifiable, Codable, Hashable, Sendable {
     var testId: String?
     var classId: String?
     var status: String        // "open" | "closed"
+    /// When the session was launched (drives history rows). Optional + tolerant:
+    /// listOpenSessions and the lookup_session_by_code RPC (the STUDENT join
+    /// path) don't select it, and a missing or malformed value must never
+    /// break the student exam flow that shares this model.
+    var createdAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case id, code, status
         case testId = "test_id"
         case classId = "class_id"
+        case createdAt = "created_at"
     }
+
+    init(id: String, code: String, testId: String?, classId: String?,
+         status: String, createdAt: Date? = nil) {
+        self.id = id; self.code = code; self.testId = testId
+        self.classId = classId; self.status = status; self.createdAt = createdAt
+    }
+
+    /// Tolerant decode (house pattern, see ClassRoom/Assignment above):
+    /// id/code/status stay strict; the rest swallow absence AND malformed values.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        code = try c.decode(String.self, forKey: .code)
+        status = try c.decode(String.self, forKey: .status)
+        testId = try? c.decode(String.self, forKey: .testId)
+        classId = try? c.decode(String.self, forKey: .classId)
+        createdAt = try? c.decode(Date.self, forKey: .createdAt)
+    }
+}
+
+extension ExamSession {
+    /// The open demo session for the signed-out preview. It seeds BOTH
+    /// AppState.liveSession and the history's Open row (spec §5: one open +
+    /// one closed at rest), so the LIVE chip, the monitor, and the Open chip
+    /// all render without an interaction. End session flips it to closed
+    /// (the defect case, demoable signed out).
+    static let sampleOpen = ExamSession(
+        id: "local-open-1", code: "738294", testId: Assignment.sample.id,
+        classId: ClassRoom.sample.id, status: "open",
+        createdAt: Date(timeIntervalSinceNow: -45 * 60))
+
+    /// History rows for the signed-out preview (newest first): one open +
+    /// one closed, per the established mock-when-signed-out pattern.
+    static let sampleHistory: [ExamSession] = [
+        .sampleOpen,
+        ExamSession(id: "local-closed-1", code: "K7M2PQ", testId: Assignment.sample2.id,
+                    classId: ClassRoom.sample.id, status: "closed",
+                    createdAt: Date(timeIntervalSinceNow: -3 * 86400)),
+    ]
 }
 
 // MARK: - Student-facing class work (the list_class_work RPC row)

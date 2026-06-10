@@ -87,8 +87,8 @@ struct RootView: View {
     }
 }
 
-/// Sub-router for the teacher role: home (build/live), assignment editor,
-/// grading, and class roster. Driven by `AppState.teacherScreen`.
+/// Sub-router for the teacher role: home (classes list / class detail),
+/// assignment editor, grading, and class roster. Driven by `AppState.teacherScreen`.
 struct TeacherFlowView: View {
     @Environment(AppState.self) private var app
 

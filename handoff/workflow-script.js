@@ -12,7 +12,7 @@ export const meta = {
 const REPO = args.repo
 const CTX = `
 Repo: ${REPO} (native macOS SwiftUI app "Weft" — proctored essay exams; teacher + student roles; Supabase backend).
-Branch: phase2-native-wiring. Do NOT commit. Do NOT touch ${REPO}/Weft.xcodeproj/project.pbxproj.
+Branch: wip/class-first-handoff (already checked out). Do NOT commit. Do NOT touch ${REPO}/Weft.xcodeproj/project.pbxproj.
 Approved spec to honor: ${REPO}/docs/superpowers/specs/2026-06-10-class-first-teacher-design.md (READ IT).
 Build command (must pass): cd ${REPO} && xcodebuild -project Weft.xcodeproj -scheme Weft -configuration Debug CODE_SIGNING_ALLOWED=NO build
 
