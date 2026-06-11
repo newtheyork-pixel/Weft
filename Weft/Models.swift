@@ -85,6 +85,9 @@ struct Assignment: Identifiable, Codable, Hashable, Sendable {
     /// Teacher-controlled per assignment; default true keeps every existing
     /// assignment and the Electron editor (which never sends the column) unchanged.
     var spellcheckEnabled: Bool
+    /// Teacher-controlled per assignment; default false — outlines are opt-in,
+    /// so existing rows (and editors that never send the column) stay outline-free.
+    var outlineAllowed: Bool
 
     var isVersioned: Bool { versionNumber > 1 }
 
@@ -94,14 +97,17 @@ struct Assignment: Identifiable, Codable, Hashable, Sendable {
         case versionNumber = "version_number"
         case timeLimitMinutes = "time_limit_minutes"
         case spellcheckEnabled = "spellcheck_enabled"
+        case outlineAllowed = "outline_allowed"
     }
 
     init(id: String, title: String, versionGroupId: String, versionNumber: Int,
-         questions: [Question], timeLimitMinutes: Int?, spellcheckEnabled: Bool = true) {
+         questions: [Question], timeLimitMinutes: Int?, spellcheckEnabled: Bool = true,
+         outlineAllowed: Bool = false) {
         self.id = id; self.title = title; self.versionGroupId = versionGroupId
         self.versionNumber = versionNumber; self.questions = questions
         self.timeLimitMinutes = timeLimitMinutes
         self.spellcheckEnabled = spellcheckEnabled
+        self.outlineAllowed = outlineAllowed
     }
 
     /// Tolerant decode from a `tests` row: version_group_id/version_number may be
@@ -115,6 +121,7 @@ struct Assignment: Identifiable, Codable, Hashable, Sendable {
         versionNumber = (try? c.decode(Int.self, forKey: .versionNumber)) ?? 1
         timeLimitMinutes = try? c.decode(Int.self, forKey: .timeLimitMinutes)
         spellcheckEnabled = (try? c.decode(Bool.self, forKey: .spellcheckEnabled)) ?? true
+        outlineAllowed = (try? c.decode(Bool.self, forKey: .outlineAllowed)) ?? false
     }
 
     static let sample = Assignment(
@@ -318,11 +325,84 @@ struct ExamLink: Identifiable, Codable, Hashable, Sendable {
     ]
 }
 
+// MARK: - Student outline (an `outline_uploads` row)
+
+/// A student's pre-writing outline for a session (an `outline_uploads` row,
+/// unique per session_id+user_id — one outline each, replace-in-place). The
+/// bytes live in the private `outlines` storage bucket at `storagePath`
+/// (`<user_id>/<session_id>/<filename>`), read back via a signed URL like
+/// `test_files`. The server locks the row via RLS the moment the student's
+/// `students` row exists (i.e. they begin writing).
+struct OutlineUpload: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    var sessionId: String
+    var userId: String
+    var displayName: String
+    var originalName: String
+    var mimeType: String
+    var sizeBytes: Int
+    var storagePath: String
+    var createdAt: Date?
+    var updatedAt: Date?
+
+    var isPDF: Bool { mimeType.contains("pdf") || originalName.lowercased().hasSuffix(".pdf") }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case sessionId = "session_id"
+        case userId = "user_id"
+        case displayName = "display_name"
+        case originalName = "original_name"
+        case mimeType = "mime_type"
+        case sizeBytes = "size_bytes"
+        case storagePath = "storage_path"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    init(id: String, sessionId: String, userId: String, displayName: String,
+         originalName: String, mimeType: String, sizeBytes: Int, storagePath: String,
+         createdAt: Date? = nil, updatedAt: Date? = nil) {
+        self.id = id; self.sessionId = sessionId; self.userId = userId
+        self.displayName = displayName; self.originalName = originalName
+        self.mimeType = mimeType; self.sizeBytes = sizeBytes
+        self.storagePath = storagePath
+        self.createdAt = createdAt; self.updatedAt = updatedAt
+    }
+
+    /// Tolerant decode (house pattern, see RosterStudent): only `id` stays
+    /// strict; display metadata defaults rather than throwing, so a narrower
+    /// future projection or a null column never breaks the upload flow.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        sessionId = (try? c.decode(String.self, forKey: .sessionId)) ?? ""
+        userId = (try? c.decode(String.self, forKey: .userId)) ?? ""
+        displayName = (try? c.decode(String.self, forKey: .displayName)) ?? "Student"
+        originalName = (try? c.decode(String.self, forKey: .originalName)) ?? "Outline"
+        mimeType = (try? c.decode(String.self, forKey: .mimeType)) ?? ""
+        sizeBytes = (try? c.decode(Int.self, forKey: .sizeBytes)) ?? 0
+        storagePath = (try? c.decode(String.self, forKey: .storagePath)) ?? ""
+        createdAt = try? c.decode(Date.self, forKey: .createdAt)
+        updatedAt = try? c.decode(Date.self, forKey: .updatedAt)
+    }
+
+    static let sample = OutlineUpload(
+        id: "o1", sessionId: "s1", userId: "u1", displayName: "Ava Chen",
+        originalName: "Essay outline.pdf", mimeType: "application/pdf",
+        sizeBytes: 48_532, storagePath: "u1/s1/Essay outline.pdf",
+        createdAt: .now)
+}
+
 // MARK: - Live roster (proctoring monitor)
 
 struct RosterStudent: Identifiable, Codable, Hashable, Sendable {
     let id: String
     var name: String
+    /// The auth user behind this students row. Grading needs it to match
+    /// `outline_uploads` rows (keyed by user_id) to submissions (keyed by the
+    /// students-row id). nil on legacy projections that didn't select it.
+    var userId: String?
     /// nil = the network check was not performed (the native app deliberately
     /// skips IP matching; Electron rows still carry a real value).
     var networkSame: Bool?
@@ -341,6 +421,7 @@ struct RosterStudent: Identifiable, Codable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, status
+        case userId = "user_id"
         case networkSame = "ip_match"
         case remote = "remote_session"
         case capture = "screen_capture"
@@ -349,10 +430,10 @@ struct RosterStudent: Identifiable, Codable, Hashable, Sendable {
     }
 
     init(id: String, name: String, networkSame: Bool?, remote: Bool, capture: Bool,
-         displays: Int, isVM: Bool, status: String) {
+         displays: Int, isVM: Bool, status: String, userId: String? = nil) {
         self.id = id; self.name = name; self.networkSame = networkSame
         self.remote = remote; self.capture = capture; self.displays = displays
-        self.isVM = isVM; self.status = status
+        self.isVM = isVM; self.status = status; self.userId = userId
     }
 
     /// Tolerant decode from a `students` row (fields are null for a student who
@@ -361,6 +442,7 @@ struct RosterStudent: Identifiable, Codable, Hashable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
         name = (try? c.decode(String.self, forKey: .name)) ?? "Student"
+        userId = try? c.decode(String.self, forKey: .userId)
         networkSame = try? c.decode(Bool.self, forKey: .networkSame)
         remote = (try? c.decode(Bool.self, forKey: .remote)) ?? false
         capture = (try? c.decode(Bool.self, forKey: .capture)) ?? false
@@ -370,7 +452,7 @@ struct RosterStudent: Identifiable, Codable, Hashable, Sendable {
     }
 
     static let sample = [
-        RosterStudent(id: "1", name: "Ava Chen", networkSame: true, remote: false, capture: false, displays: 1, isVM: false, status: "writing"),
+        RosterStudent(id: "1", name: "Ava Chen", networkSame: true, remote: false, capture: false, displays: 1, isVM: false, status: "writing", userId: "u1"),
         RosterStudent(id: "2", name: "Ben Ortiz", networkSame: false, remote: false, capture: false, displays: 1, isVM: false, status: "review"),
         RosterStudent(id: "3", name: "Maya Singh", networkSame: true, remote: false, capture: false, displays: 2, isVM: false, status: "writing"),
     ]

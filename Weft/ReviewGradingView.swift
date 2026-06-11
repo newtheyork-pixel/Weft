@@ -574,6 +574,9 @@ struct ReviewGradingView: View {
             if current.submitted {
                 ScrollView {
                     VStack(alignment: .leading, spacing: Theme.Space.xl) {
+                        if let outline = currentOutline {
+                            outlineBlock(outline)
+                        }
                         scoreBlock
                         finalCommentBlock
                     }
@@ -608,6 +611,51 @@ struct ReviewGradingView: View {
         }
         .font(.system(size: 11, weight: .semibold))
         .foregroundStyle(Theme.muted)
+    }
+
+    /// The outline the current student uploaded before writing, if any. Live:
+    /// outline_uploads keys on user_id while submissions key on the
+    /// students-row id, so the gradingRoster row bridges the two. Preview:
+    /// the bundled sample outline on its matching mock student, so the block
+    /// is demoable signed out. nil (no upload) renders nothing at all.
+    private var currentOutline: OutlineUpload? {
+        guard isLive else {
+            return current.name == OutlineUpload.sample.displayName ? OutlineUpload.sample : nil
+        }
+        guard let sub = app.gradingSubmissions.first(where: { $0.id == current.id }),
+              let sid = sub.studentId,
+              let uid = app.gradingRoster.first(where: { $0.id == sid })?.userId else { return nil }
+        return app.gradingOutlines.first { $0.userId == uid }
+    }
+
+    /// "Outline" block in the grading rail: the student's pre-writing outline,
+    /// opened in the browser/Preview via a fresh signed URL (private bucket).
+    private func outlineBlock(_ outline: OutlineUpload) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Space.md) {
+            slotHead("Outline", system: "paperclip")
+            Button {
+                Task { await app.openOutline(outline) }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: outline.isPDF ? "doc.richtext" : "doc.text")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(outline.originalName)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.accent)
+            }
+            .buttonStyle(.plain)
+            .linkPointer()
+            .help("Open the outline this student uploaded before writing")
+            Text("Uploaded before the student began writing.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.muted)
+                .lineSpacing(2)
+        }
     }
 
     private var scoreBlock: some View {

@@ -8,6 +8,9 @@
 
 import SwiftUI
 import Observation
+#if canImport(AppKit)
+import AppKit
+#endif
 
 @MainActor
 @Observable
@@ -91,6 +94,29 @@ final class AppState {
     var classOpenCounts: [String: Int] = [ClassRoom.sample.id: 1, ClassRoom.sample2.id: 0]
     /// The assignment a student is about to take / is taking (drives ExamView).
     var activeAssignment: Assignment?
+
+    // MARK: Student outlines (per Active row)
+    /// `tests.outline_allowed` per ACTIVE SESSION id. ClassWorkItem doesn't
+    /// carry the flag, so it's resolved per active row (lookupSession + getTest).
+    /// Keyed by the session — not the assignment family — because the family is
+    /// too coarse: a relaunch is a new session, possibly of a new draft with the
+    /// flag flipped, and a family-keyed cache would serve the old draft's answer
+    /// for the rest of the run. Repeat home reloads of the same session still
+    /// hit the cache, so they never refetch in a loop.
+    /// Preview seeds the sample active session so the affordance demos signed out.
+    var outlineAllowedBySession: [String: Bool] = [OutlineUpload.sample.sessionId: true]
+    /// The signed-in student's own outline per ACTIVE session id (at most one
+    /// each — outline_uploads is unique on session_id+user_id). Preview seeds
+    /// the sample outline on the sample active session.
+    var myOutlines: [String: OutlineUpload] = [OutlineUpload.sample.sessionId: .sample]
+    /// Sessions whose outline is server-locked (the student's `students` row
+    /// exists — they began writing — so RLS refuses outline writes). Local
+    /// begins mark this eagerly; a begin on another device surfaces here the
+    /// moment the server refuses an outline write.
+    var outlineLockedSessionIds: Set<String> = []
+    /// Reentrancy guard (mirrors draftCloneInFlight): a double-clicked
+    /// Replace/Remove must not race two storage writes for the same row.
+    var outlineBusy = false
     /// Reference materials for the active exam (sample defaults; replaced by the
     /// real test_files / test_urls when an active session resolves).
     var examFiles: [ExamFile] = ExamFile.sample
@@ -144,6 +170,9 @@ final class AppState {
     /// (the live proctoring monitor) so grading an old session can never
     /// clobber the monitor of a session that is live right now.
     var gradingRoster: [RosterStudent] = []
+    /// Every outline uploaded for the session being graded (keyed by user_id;
+    /// gradingRoster bridges that to a submission's students-row id).
+    var gradingOutlines: [OutlineUpload] = []
     /// Transient status for the roster "Invite students" action.
     var inviteStatus: String?
     // School-approved websites (from the published Google Sheet), for the editor.
@@ -207,6 +236,10 @@ final class AppState {
         classWork = ClassWorkItem.sampleList
         classOpenCounts = [ClassRoom.sample.id: 1, ClassRoom.sample2.id: 0]
         returnedWork = []
+        outlineAllowedBySession = [OutlineUpload.sample.sessionId: true]
+        myOutlines = [OutlineUpload.sample.sessionId: .sample]
+        outlineLockedSessionIds = []
+        outlineBusy = false
         // Teacher state back to defaults.
         teacherScreen = .home
         editingAssignment = nil
@@ -217,6 +250,7 @@ final class AppState {
         classSessions = nil
         gradingSession = nil
         gradingRoster = []
+        gradingOutlines = []
         gradingTitle = ""
         classRoster = []; rosterClassId = nil; rosterClassName = ""
         gradingSubmissions = []; grades = [:]
@@ -234,6 +268,9 @@ final class AppState {
         classWork = []
         classOpenCounts = [:]
         returnedWork = []
+        outlineAllowedBySession = [:]
+        myOutlines = [:]
+        outlineLockedSessionIds = []
         selectedClassId = nil
         activeAssignment = nil
         roster = []
@@ -245,6 +282,7 @@ final class AppState {
         classSessions = nil
         gradingSession = nil
         gradingRoster = []
+        gradingOutlines = []
         gradingSubmissions = []
         grades = [:]
     }
@@ -350,9 +388,184 @@ final class AppState {
         guard signedIn, let cid = selectedClassId else { return }
         do {
             classWork = try await supabase.listClassWork(classId: cid)
+            await loadOutlineState()
         } catch {
             errorMessage = describe(error)
         }
+    }
+
+    // MARK: - Student outlines
+
+    /// 10 MB cap on outline uploads (PDF/Word outlines are small documents).
+    static let outlineMaxBytes = 10 * 1024 * 1024
+
+    /// Resolve outline permission + the student's own outline for each Active
+    /// row, alongside loadClassWork. Best-effort by design: outlines are an
+    /// enhancement, so a failed hop hides the affordance rather than putting
+    /// an error banner over the class home.
+    func loadOutlineState() async {
+        guard signedIn else { return }
+        for item in classWork {
+            guard item.section == .active, let sid = item.activeSessionId else { continue }
+            // list_class_work doesn't carry outline_allowed, so resolve it via
+            // the active session's test — once per session, then cached (a new
+            // launch is a new session id, so the next draft's flag is re-read;
+            // see outlineAllowedBySession).
+            if outlineAllowedBySession[sid] == nil, let code = item.activeCode {
+                let session = try? await supabase.lookupSession(code: code)
+                if let testId = session?.testId,
+                   let test = try? await supabase.getTest(id: testId) {
+                    outlineAllowedBySession[sid] = test.outlineAllowed
+                }
+            }
+            guard outlineAllowedBySession[sid] == true else { continue }
+            do {
+                // A confirmed "no row" (nil) clears the cache — the student may
+                // have removed the outline on another device.
+                myOutlines[sid] = try await supabase.getMyOutline(sessionId: sid, userId: userId)
+            } catch {
+                // Failed fetch: keep whatever is cached rather than flickering
+                // a real outline away.
+            }
+        }
+    }
+
+    /// Upload (or replace) the student's outline for an Active row: bytes into
+    /// the private bucket first, then the row upsert — the row is what the
+    /// teacher lists, so it must never exist before its bytes do.
+    func uploadOutline(for item: ClassWorkItem, fileURL: URL) async {
+        guard let sid = item.activeSessionId, !outlineBusy else { return }
+        outlineBusy = true
+        defer { outlineBusy = false }
+        errorMessage = nil
+        let name = fileURL.lastPathComponent
+        if !signedIn {
+            // Preview: register the picked file locally so Replace/Remove demo.
+            let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            myOutlines[sid] = OutlineUpload(
+                id: "local-\(UUID().uuidString.prefix(6))", sessionId: sid, userId: "u1",
+                displayName: displayName, originalName: name,
+                mimeType: outlineMime(for: fileURL), sizeBytes: size,
+                storagePath: "", createdAt: .now)
+            return
+        }
+        // The picker's URL is security-scoped; harmless when not sandboxed.
+        let scoped = fileURL.startAccessingSecurityScopedResource()
+        defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
+        // Replacing under a new filename leaves the old object behind in the
+        // private bucket; capture its path now so it can be cleaned up — but
+        // only after the new bytes AND row are in place (deleting it first
+        // would leave the teacher's listed row pointing at destroyed bytes
+        // whenever the upload is then refused).
+        let previousPath = myOutlines[sid]?.storagePath
+        do {
+            let data = try Data(contentsOf: fileURL)
+            guard data.count <= Self.outlineMaxBytes else {
+                errorMessage = "Outlines can be up to 10 MB. Choose a smaller file."
+                return
+            }
+            let mime = outlineMime(for: fileURL)
+            let path = "\(userId)/\(sid)/\(name)"
+            try await supabase.uploadOutlineFile(data: data, path: path, contentType: mime)
+            let row = try await supabase.upsertOutline(
+                sessionId: sid, displayName: displayName, originalName: name,
+                mimeType: mime, sizeBytes: data.count, storagePath: path)
+            // Both writes succeeded: clear the renamed-away object, best-effort
+            // (mirrors deleteOutline's cleanup; a failure merely orphans an
+            // unreadable object).
+            if let old = previousPath, !old.isEmpty, old != path {
+                await supabase.removeOutlineObject(path: old)
+            }
+            // Signed out while the writes were in flight: signOut() restored
+            // the mock state, so never write a real account's row over it
+            // (the loadTeacherHome pattern).
+            guard signedIn else { return }
+            if let row {
+                myOutlines[sid] = row
+            } else if let fetched = try? await supabase.getMyOutline(sessionId: sid, userId: userId) {
+                // The upsert returned no representation; refresh best-effort.
+                guard signedIn else { return }
+                myOutlines[sid] = fetched
+            }
+        } catch {
+            // A post-signOut failure must not banner the sign-in screen.
+            guard signedIn else { return }
+            if isOutlineLock(error) { outlineLockedSessionIds.insert(sid) }
+            else { errorMessage = describe(error) }
+        }
+    }
+
+    /// Remove the student's outline for an Active row. A refused delete is the
+    /// RLS begin-writing lock: the row (and the teacher's copy) survives, and
+    /// the affordance flips to the inline locked note. The refusal arrives as
+    /// a verified zero-row delete (deleteOutline returns false), NOT an error:
+    /// PostgREST hides locked rows from DELETE and reports success.
+    func removeOutline(for item: ClassWorkItem) async {
+        guard let sid = item.activeSessionId, !outlineBusy else { return }
+        outlineBusy = true
+        defer { outlineBusy = false }
+        errorMessage = nil
+        if !signedIn { myOutlines[sid] = nil; return }
+        do {
+            let deleted = try await supabase.deleteOutline(sessionId: sid, userId: userId)
+            // Signed out while the delete was in flight: signOut() restored the
+            // mock state, so never write over it (the loadTeacherHome pattern).
+            guard signedIn else { return }
+            if deleted {
+                myOutlines[sid] = nil
+            } else {
+                // The row survived the delete: the student began writing,
+                // possibly on another device. Keep the outline on screen and
+                // show the locked note — the stored bytes were never touched.
+                outlineLockedSessionIds.insert(sid)
+            }
+        } catch {
+            // A post-signOut failure must not banner the sign-in screen.
+            guard signedIn else { return }
+            if isOutlineLock(error) { outlineLockedSessionIds.insert(sid) }
+            else { errorMessage = describe(error) }
+        }
+    }
+
+    /// Open a student's outline (teacher-side, while grading) in the default
+    /// app via a fresh signed URL — the bucket is private, so every read is
+    /// time-limited (the essay-files pattern).
+    func openOutline(_ outline: OutlineUpload) async {
+        guard signedIn, !outline.storagePath.isEmpty else { return }
+        do {
+            let url = try await supabase.signedOutlineURL(path: outline.storagePath)
+            #if canImport(AppKit)
+            NSWorkspace.shared.open(url)
+            #endif
+        } catch {
+            errorMessage = describe(error)
+        }
+    }
+
+    /// True when the server refused an outline write because the student
+    /// began writing (their `students` row exists): PostgREST and storage
+    /// both surface that RLS refusal as a 403. Not every 403 on these paths
+    /// is the lock, though — a missing enrollment or a storage policy gap
+    /// answers 403 too — so the body must carry the RLS-refusal wording
+    /// before a row flips to the sticky locked note; anything else surfaces
+    /// through errorMessage, where it can be read and retried. (Refused
+    /// DELETEs never reach here at all: PostgREST hides locked rows and
+    /// reports zero deleted rows — see deleteOutline.)
+    private func isOutlineLock(_ error: Error) -> Bool {
+        guard case let SupabaseError.badResponse(status, body) = error, status == 403 else {
+            return false
+        }
+        let wording = body.lowercased()
+        return wording.contains("row-level security") || wording.contains("policy")
+            || wording.contains("violates") || wording.contains("42501")
+    }
+
+    /// The two formats students may upload; the picker already restricts to
+    /// .pdf/.docx, so the extension is authoritative here.
+    private func outlineMime(for url: URL) -> String {
+        url.pathExtension.lowercased() == "pdf"
+            ? "application/pdf"
+            : "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     }
 
     /// Refresh the per-class Active counts for the classes list. Classes are
@@ -571,7 +784,7 @@ final class AppState {
 
     // MARK: - Teacher: assignments
     func saveAssignment(title: String, prompt: String, wordLimit: Int?, timeLimitMinutes: Int?,
-                        spellcheckEnabled: Bool = true,
+                        spellcheckEnabled: Bool = true, outlineAllowed: Bool = false,
                         links: [(name: String, href: String)] = []) async {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -594,12 +807,12 @@ final class AppState {
                     versionGroupId: assignments[idx].versionGroupId,
                     versionNumber: assignments[idx].versionNumber,
                     questions: [q], timeLimitMinutes: timeLimitMinutes,
-                    spellcheckEnabled: spellcheckEnabled)
+                    spellcheckEnabled: spellcheckEnabled, outlineAllowed: outlineAllowed)
             } else {
                 assignments.append(Assignment(id: "local-\(UUID().uuidString.prefix(6))", title: t,
                     versionGroupId: "g-\(UUID().uuidString.prefix(6))", versionNumber: 1,
                     questions: [q], timeLimitMinutes: timeLimitMinutes,
-                    spellcheckEnabled: spellcheckEnabled))
+                    spellcheckEnabled: spellcheckEnabled, outlineAllowed: outlineAllowed))
             }
             teacherScreen = .home
             return
@@ -613,12 +826,14 @@ final class AppState {
             if let id = editingAssignment?.id {
                 try await supabase.updateTest(id: id, title: t, questions: [q],
                                              timeLimitMinutes: timeLimitMinutes,
-                                             spellcheckEnabled: spellcheckEnabled)
+                                             spellcheckEnabled: spellcheckEnabled,
+                                             outlineAllowed: outlineAllowed)
             } else {
                 _ = try await supabase.createTest(teacherUserId: userId, title: t,
                                                   questions: [q],
                                                   timeLimitMinutes: timeLimitMinutes,
-                                                  spellcheckEnabled: spellcheckEnabled)
+                                                  spellcheckEnabled: spellcheckEnabled,
+                                                  outlineAllowed: outlineAllowed)
             }
             await loadTeacherHome()
             teacherScreen = .home
@@ -796,6 +1011,7 @@ final class AppState {
         gradingSubmissions = []
         grades = [:]
         gradingRoster = []
+        gradingOutlines = []
         gradesFresh = false
         teacherScreen = .grading
         Task { await loadGrading() }
@@ -810,6 +1026,7 @@ final class AppState {
         if !signedIn {
             gradingSubmissions = []
             grades = [:]
+            gradingOutlines = []
             return
         }
         errorMessage = nil
@@ -817,11 +1034,16 @@ final class AppState {
             let subs = try await supabase.listSessionSubmissions(sessionId: sid)
             let ros  = try await supabase.listSessionStudents(sessionId: sid)
             let g    = try await supabase.listGrades(submissionIds: subs.map(\.id))
+            // Outlines are auxiliary grading context: best-effort, so a
+            // refused/failed fetch never makes the essays themselves
+            // unreachable (they're the point of this screen).
+            let outlines = (try? await supabase.listSessionOutlines(sessionId: sid)) ?? []
             // The teacher may have opened a DIFFERENT session while we loaded;
             // a stale payload must never overwrite it or set gradesFresh.
             guard gradingSession?.id == sid else { return }
             gradingSubmissions = subs
             gradingRoster = ros
+            gradingOutlines = outlines
             grades = Dictionary(uniqueKeysWithValues: g.map { ($0.submissionId, $0) })
             gradesFresh = true   // grades cache now reflects the DB for THIS session
         } catch {
@@ -968,6 +1190,10 @@ final class AppState {
                 errorMessage = "Could not register for this exam."
                 return false
             }
+            // The students row now exists, so the server's RLS refuses outline
+            // changes for this session from here on — reflect that immediately
+            // (even if the late-success guard below bails out of entering).
+            outlineLockedSessionIds.insert(session.id)
             // The registration round-trip is long enough for the student to
             // have left checks (deep link, sign-out, back). A late success
             // must not shove them into the kiosk — or worse, cross-wire a

@@ -415,6 +415,23 @@ final class SupabaseManager: @unchecked Sendable {
         _ = try await perform(req)
     }
 
+    /// DELETE rows matched by `query`, returning the rows actually deleted
+    /// (Prefer: return=representation). The point: an RLS USING policy that
+    /// hides a row from DELETE yields a 2xx with ZERO rows — never a 403 — so
+    /// a plain delete cannot tell "deleted" from "refused". The representation
+    /// can: an empty array means the row survived.
+    func deleteReturning<T: Decodable>(_ table: String, query: [URLQueryItem]) async throws -> [T] {
+        var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("rest/v1/\(table)"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.queryItems = query
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "DELETE"
+        for (k, v) in await headers(contentJSON: false) { req.setValue(v, forHTTPHeaderField: k) }
+        req.setValue("return=representation", forHTTPHeaderField: "Prefer")
+        let data = try await perform(req)
+        return try decode([T].self, from: data)
+    }
+
     // MARK: - Teacher reads
 
     func listTeacherClasses() async throws -> [ClassRoom] {
@@ -500,16 +517,18 @@ final class SupabaseManager: @unchecked Sendable {
 
     @discardableResult
     func createTest(teacherUserId: String, title: String, questions: [Question],
-                    timeLimitMinutes: Int?, spellcheckEnabled: Bool = true) async throws -> Assignment? {
+                    timeLimitMinutes: Int?, spellcheckEnabled: Bool = true,
+                    outlineAllowed: Bool = false) async throws -> Assignment? {
         struct Payload: Encodable {
             let teacher_user_id: String; let title: String
             let questions: [Question]; let time_limit_minutes: Int?
-            let spellcheck_enabled: Bool
+            let spellcheck_enabled: Bool; let outline_allowed: Bool
         }
         let result: [Assignment] = try await insert("tests",
             values: Payload(teacher_user_id: teacherUserId, title: title,
                             questions: questions, time_limit_minutes: timeLimitMinutes,
-                            spellcheck_enabled: spellcheckEnabled))
+                            spellcheck_enabled: spellcheckEnabled,
+                            outline_allowed: outlineAllowed))
         return result.first
     }
 
@@ -523,7 +542,7 @@ final class SupabaseManager: @unchecked Sendable {
             let teacher_user_id: String; let title: String
             let questions: [Question]; let time_limit_minutes: Int?
             let version_group_id: String; let version_number: Int
-            let spellcheck_enabled: Bool
+            let spellcheck_enabled: Bool; let outline_allowed: Bool
         }
         // A pre-versioning source row carries NULL version_group_id in the DB
         // (the model coalesces it to the test's own id). Backfill it before
@@ -548,21 +567,23 @@ final class SupabaseManager: @unchecked Sendable {
             teacher_user_id: teacherUserId, title: source.title, questions: questions,
             time_limit_minutes: source.timeLimitMinutes,
             version_group_id: source.versionGroupId, version_number: nextVersion,
-            spellcheck_enabled: source.spellcheckEnabled))
+            spellcheck_enabled: source.spellcheckEnabled,
+            outline_allowed: source.outlineAllowed))
         return rows.first
     }
 
     func updateTest(id: String, title: String, questions: [Question], timeLimitMinutes: Int?,
-                    spellcheckEnabled: Bool = true) async throws {
+                    spellcheckEnabled: Bool = true, outlineAllowed: Bool = false) async throws {
         struct Payload: Encodable {
             let title: String; let questions: [Question]
             let time_limit_minutes: Int?; let updated_at: String
-            let spellcheck_enabled: Bool
+            let spellcheck_enabled: Bool; let outline_allowed: Bool
         }
         let _: [Assignment] = try await update("tests",
             values: Payload(title: title, questions: questions,
                             time_limit_minutes: timeLimitMinutes, updated_at: Self.nowISO(),
-                            spellcheck_enabled: spellcheckEnabled),
+                            spellcheck_enabled: spellcheckEnabled,
+                            outline_allowed: outlineAllowed),
             query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
     }
 
@@ -701,6 +722,134 @@ final class SupabaseManager: @unchecked Sendable {
         } catch {
             print("students.status update failed: \(error)")
         }
+    }
+
+    // MARK: - Student outlines (outline_uploads + the private `outlines` bucket)
+
+    /// The caller's own outline row for a session, or nil if none was uploaded.
+    /// The explicit user_id filter is NOT redundant with RLS: session owners
+    /// can SELECT every outline in their sessions (listSessionOutlines), and a
+    /// teacher may enter the student view (enterStudent) — without the filter
+    /// they would get an arbitrary student's outline back as "mine". The
+    /// caller filter keeps "at most one row" true by construction, the same
+    /// defense-in-depth as myClasses / listClassSessions.
+    func getMyOutline(sessionId: String, userId: String) async throws -> OutlineUpload? {
+        let rows: [OutlineUpload] = try await rows("outline_uploads", query: [
+            URLQueryItem(name: "select", value: "*"),
+            URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+            URLQueryItem(name: "user_id", value: "eq.\(userId)"),
+        ])
+        return rows.first
+    }
+
+    /// Insert-or-replace the caller's outline row for a session (one outline
+    /// per student per session: onConflict session_id,user_id, mirroring
+    /// registerStudent). user_id is deliberately NOT sent: the column defaults
+    /// to auth.uid() server-side, which keeps the row caller-owned for RLS by
+    /// construction. The server refuses this write once the student's
+    /// `students` row exists (they began writing) — surface that to the UI.
+    /// updated_at is client-stamped: the table has no server now() trigger
+    /// (same as upsertEssaySubmission).
+    @discardableResult
+    func upsertOutline(sessionId: String, displayName: String, originalName: String,
+                       mimeType: String, sizeBytes: Int,
+                       storagePath: String) async throws -> OutlineUpload? {
+        struct Payload: Encodable {
+            let session_id: String; let display_name: String
+            let original_name: String; let mime_type: String
+            let size_bytes: Int; let storage_path: String
+            let updated_at: String
+        }
+        let rows: [OutlineUpload] = try await upsert("outline_uploads",
+            values: Payload(session_id: sessionId, display_name: displayName,
+                            original_name: originalName, mime_type: mimeType,
+                            size_bytes: sizeBytes, storage_path: storagePath,
+                            updated_at: Self.nowISO()),
+            onConflict: "session_id,user_id")
+        return rows.first
+    }
+
+    /// Remove the caller's outline for a session: the row FIRST (that's where
+    /// the RLS lock lives — if the student already began writing the delete is
+    /// refused and the stored bytes must survive for the teacher), THEN the
+    /// storage object, best-effort (an orphan in the private bucket is
+    /// unreadable and harmless; a failed object delete must not resurrect the
+    /// outline). No row = nothing to do.
+    ///
+    /// The row delete is VERIFIED, not trusted: PostgREST surfaces an
+    /// RLS-refused DELETE as a 2xx with zero rows, never a 403, so the lock
+    /// (begun writing on another device) would otherwise look like success —
+    /// the cache would clear, the teacher's bytes would be deleted, and the
+    /// row would resurrect on the next refresh. Returns false when the row
+    /// survived (the lock); the storage object is touched only after the row
+    /// is confirmed gone.
+    func deleteOutline(sessionId: String, userId: String) async throws -> Bool {
+        guard let existing = try await getMyOutline(sessionId: sessionId, userId: userId) else {
+            return true // nothing to do; not a lock
+        }
+        let deleted: [OutlineUpload] = try await deleteReturning("outline_uploads", query: [
+            URLQueryItem(name: "id", value: "eq.\(existing.id)"),
+        ])
+        guard !deleted.isEmpty else { return false } // row survived: the begin-writing lock
+        do { try await deleteStorageObject(bucket: "outlines", path: existing.storagePath) }
+        catch { print("outline storage delete failed: \(error)") }
+        return true
+    }
+
+    /// Best-effort removal of one outline object — replace-under-a-new-filename
+    /// cleanup. Failures are logged and swallowed: cleanup must never fail a
+    /// replace that already succeeded, and an orphan in the private bucket is
+    /// unreadable and harmless.
+    func removeOutlineObject(path: String) async {
+        do { try await deleteStorageObject(bucket: "outlines", path: path) }
+        catch { print("outline replace cleanup failed: \(error)") }
+    }
+
+    /// Upload (or replace, via x-upsert) the raw outline bytes into the private
+    /// `outlines` bucket at `path` (`<user_id>/<session_id>/<filename>`).
+    /// Storage REST: POST /storage/v1/object/outlines/<path> with the usual
+    /// apikey + Bearer headers so the bucket's RLS sees the owner.
+    func uploadOutlineFile(data: Data, path: String, contentType: String) async throws {
+        let endpoint = SupabaseConfig.url
+            .appendingPathComponent("storage/v1/object/outlines")
+            .appendingPathComponent(path)
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = "POST"
+        for (k, v) in await headers(contentJSON: false) { req.setValue(v, forHTTPHeaderField: k) }
+        req.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        req.setValue("true", forHTTPHeaderField: "x-upsert")
+        req.httpBody = data
+        _ = try await perform(req)
+    }
+
+    /// Every outline uploaded for a session, for the teacher's grading view
+    /// (RLS grants session owners SELECT). Oldest first, like the live roster.
+    func listSessionOutlines(sessionId: String) async throws -> [OutlineUpload] {
+        try await rows("outline_uploads", query: [
+            URLQueryItem(name: "select", value: "*"),
+            URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+            URLQueryItem(name: "order", value: "created_at.asc"),
+        ])
+    }
+
+    /// Time-limited signed URL for an outline object — the bucket is private,
+    /// so every read goes through /object/sign (the essay-files PDF pattern).
+    @MainActor
+    func signedOutlineURL(path: String) async throws -> URL {
+        try await signedURL(bucket: "outlines", path: path)
+    }
+
+    /// DELETE one object from a storage bucket
+    /// (REST: DELETE /storage/v1/object/<bucket>/<path>).
+    private func deleteStorageObject(bucket: String, path: String) async throws {
+        let endpoint = SupabaseConfig.url
+            .appendingPathComponent("storage/v1/object")
+            .appendingPathComponent(bucket)
+            .appendingPathComponent(path)
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = "DELETE"
+        for (k, v) in await headers(contentJSON: false) { req.setValue(v, forHTTPHeaderField: k) }
+        _ = try await perform(req)
     }
 
     // MARK: - Code + time helpers

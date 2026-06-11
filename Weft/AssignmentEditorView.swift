@@ -206,6 +206,10 @@ struct AssignmentEditorView: View {
     /// on unless the teacher explicitly disables it. Primed from the existing
     /// assignment in prime() so editing round-trips the value faithfully.
     @State private var spellcheckEnabled: Bool = true
+    /// Teacher-controlled per assignment; default false — outlines are opt-in.
+    /// Primed from the existing assignment in prime() so editing round-trips
+    /// the value faithfully.
+    @State private var outlineAllowed: Bool = false
     @State private var files: [EditorFile] = []
     @State private var links: [EditorLink] = []
 
@@ -238,6 +242,7 @@ struct AssignmentEditorView: View {
                         wordLimitField
                         timeLimitField
                         spellcheckToggle
+                        outlineToggle
                         filesSection
                         websitesSection
                     }
@@ -359,6 +364,20 @@ struct AssignmentEditorView: View {
                 .toggleStyle(.switch)
                 .help("When off, students see no spelling squiggles during this assignment")
             Text("Spell check is on by default. Turn it off for assignments where you want students to rely on their own spelling.")
+                .font(Theme.sans(11))
+                .foregroundStyle(Theme.muted2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var outlineToggle: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Allow outline", isOn: $outlineAllowed)
+                .font(Theme.sans(14))
+                .foregroundStyle(Theme.inkSoft)
+                .toggleStyle(.switch)
+                .help("When on, students can attach an outline from the class home before they start")
+            Text("Students may upload a PDF or Word outline until they begin writing.")
                 .font(Theme.sans(11))
                 .foregroundStyle(Theme.muted2)
                 .fixedSize(horizontal: false, vertical: true)
@@ -699,9 +718,11 @@ struct AssignmentEditorView: View {
             prompt = existing.questions.first?.prompt ?? ""
             if let wl = existing.questions.first?.wordLimit { wordLimit = String(wl) }
             if let tl = existing.timeLimitMinutes { timeLimit = String(tl) }
-            // Prime the spell-check toggle from the saved assignment so editing
-            // round-trips the value and a teacher can change it on a re-edit.
+            // Prime the spell-check + outline toggles from the saved assignment
+            // so editing round-trips the values and a teacher can change them
+            // on a re-edit.
             spellcheckEnabled = existing.spellcheckEnabled
+            outlineAllowed = existing.outlineAllowed
             // Load the assignment's saved approved links so editing preserves them.
             Task {
                 let saved = await app.editorLinks(for: existing)
@@ -760,6 +781,7 @@ struct AssignmentEditorView: View {
                 wordLimit: positiveInt(wordLimit),
                 timeLimitMinutes: positiveInt(timeLimit),
                 spellcheckEnabled: spellcheckEnabled,
+                outlineAllowed: outlineAllowed,
                 links: links.map { (name: $0.name, href: $0.href) }
             )
         }

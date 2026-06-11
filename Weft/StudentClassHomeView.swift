@@ -6,9 +6,23 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct StudentClassHomeView: View {
     @Environment(AppState.self) private var app
+
+    /// The Active row an outline is being picked for; consumed on completion.
+    @State private var outlineImportTarget: ClassWorkItem?
+    @State private var outlineImporterShown = false
+
+    /// The only formats students may upload as an outline: PDF and Word .docx.
+    private static let outlineTypes: [UTType] = {
+        var types: [UTType] = [.pdf]
+        if let docx = UTType("org.openxmlformats.wordprocessingml.document") {
+            types.append(docx)
+        }
+        return types
+    }()
 
     private var active: [ClassWorkItem] { app.classWork.filter { $0.section == .active } }
     private var graded: [ClassWorkItem] { app.classWork.filter { $0.section == .graded } }
@@ -46,6 +60,14 @@ struct StudentClassHomeView: View {
         }
         .background(AmbientBackground())
         .task { await app.loadStudentHome() }
+        .fileImporter(isPresented: $outlineImporterShown,
+                      allowedContentTypes: Self.outlineTypes) { result in
+            guard let item = outlineImportTarget else { return }
+            outlineImportTarget = nil
+            if case let .success(url) = result {
+                Task { await app.uploadOutline(for: item, fileURL: url) }
+            }
+        }
     }
 
     // MARK: Classes level
@@ -199,6 +221,14 @@ struct StudentClassHomeView: View {
 
     @ViewBuilder
     private func row(_ item: ClassWorkItem) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            rowMain(item)
+            outlineLine(item)
+        }
+    }
+
+    @ViewBuilder
+    private func rowMain(_ item: ClassWorkItem) -> some View {
         HStack(spacing: Theme.Space.lg) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
@@ -263,6 +293,73 @@ struct StudentClassHomeView: View {
                 EmptyView()
             }
         }
+    }
+
+    // MARK: Outline (Active rows, when the assignment allows one)
+
+    /// The quiet per-row outline affordance: "Add outline" until one exists,
+    /// then filename + Replace/Remove — and once the student begins writing
+    /// (the server locks the row via RLS) a locked note if an outline exists,
+    /// nothing otherwise. Hidden entirely while outline_allowed is unresolved:
+    /// an affordance the server would refuse must not be offered.
+    @ViewBuilder
+    private func outlineLine(_ item: ClassWorkItem) -> some View {
+        if item.section == .active, let sid = item.activeSessionId,
+           app.outlineAllowedBySession[sid] == true {
+            let locked = app.outlineLockedSessionIds.contains(sid)
+            if let outline = app.myOutlines[sid] {
+                HStack(spacing: Theme.Space.sm) {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.muted2)
+                    Text(outline.originalName)
+                        .font(Theme.sans(12.5))
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(1)
+                    if locked {
+                        Text("Locked — outlines can't change once you begin writing")
+                            .font(Theme.sans(12.5))
+                            .foregroundStyle(Theme.muted2)
+                    } else {
+                        outlineAction("Replace") { beginOutlineImport(item) }
+                            .help("Choose a different PDF or Word outline")
+                        outlineAction("Remove") { Task { await app.removeOutline(for: item) } }
+                            .help("Remove your outline from this assignment")
+                    }
+                }
+            } else if !locked {
+                Button {
+                    beginOutlineImport(item)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "paperclip")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Add outline")
+                    }
+                }
+                .buttonStyle(.plain)
+                .font(Theme.sans(12.5, .semibold))
+                .foregroundStyle(Theme.accent)
+                .linkPointer()
+                .disabled(app.outlineBusy)
+                .help("Attach a PDF or Word outline (up to 10 MB). You can replace it until you begin writing.")
+            }
+        }
+    }
+
+    /// Inline text action (Replace / Remove), in the quiet link idiom.
+    private func outlineAction(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .buttonStyle(.plain)
+            .font(Theme.sans(12.5, .semibold))
+            .foregroundStyle(Theme.accent)
+            .linkPointer()
+            .disabled(app.outlineBusy)
+    }
+
+    private func beginOutlineImport(_ item: ClassWorkItem) {
+        outlineImportTarget = item
+        outlineImporterShown = true
     }
 
     // MARK: Join another
