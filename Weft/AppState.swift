@@ -286,9 +286,18 @@ final class AppState {
                 // Replay any deep link that arrived on the sign-in screen.
                 resolvePendingDeepLink()
             }
+        } catch is CancellationError {
+            // The user backed out (Cancel, or a superseding attempt) — the
+            // sign-in screen just returns to rest, no error banner.
         } catch {
             errorMessage = describe(error)
         }
+    }
+
+    /// Abandon a sign-in attempt that is waiting on the browser redirect (the
+    /// user may have closed the tab, after which no callback will ever arrive).
+    func cancelSignIn() {
+        supabase.cancelPendingSignIn()
     }
 
     /// Teacher if the email is on the school's Teachers sheet; otherwise student.
@@ -1117,13 +1126,16 @@ final class AppState {
 
     /// Handle an incoming custom-scheme URL. Exam/join links route a student to
     /// the right place; work/home links jump within the student flow. The OAuth
-    /// callback (weft://auth-callback) is consumed by the sign-in web session, so
-    /// it is ignored here. A link that arrives before sign-in is stashed and
-    /// replayed once a session exists.
+    /// callback (weft://auth-callback) is handed to the sign-in attempt waiting
+    /// on it. A link that arrives before sign-in is stashed and replayed once a
+    /// session exists.
     func handleDeepLink(_ url: URL) {
         guard url.scheme?.lowercased() == "weft" else { return }
         let host = (url.host ?? "").lowercased()
-        if host == "auth-callback" { return }   // handled by ASWebAuthenticationSession
+        // The browser redirect arrives pre-signedIn by definition, so it must be
+        // routed BEFORE the stash-and-replay guard below — stashing it would
+        // deadlock sign-in (replay only happens after a session exists).
+        if host == "auth-callback" { supabase.resumeAuthCallback(url); return }
         guard signedIn else { pendingDeepLink = url; return }
         // NEVER reroute during a locked exam: a pre-scheduled `open weft://...`
         // would otherwise unmount ExamView, exit the kiosk, and skip the final

@@ -4,8 +4,9 @@
 //
 //  It mirrors the renderer's calling patterns (supabase-config.js + student.js +
 //  teacher.js): a PostgREST layer (.from(...).select/insert/update) plus an RPC
-//  layer (/rest/v1/rpc/<name>) and a GoTrue auth scaffold (PKCE OAuth via
-//  ASWebAuthenticationSession). The shared anon key goes on every request as the
+//  layer (/rest/v1/rpc/<name>) and GoTrue auth (PKCE OAuth in the user's
+//  default browser, returning via weft://auth-callback). The shared anon key
+//  goes on every request as the
 //  `apikey` header; once a user signs in, the access token rides along as a
 //  Bearer `Authorization` header so row-level security sees the real user.
 //
@@ -23,7 +24,6 @@ import CryptoKit
 #if canImport(AppKit)
 import AppKit
 #endif
-import AuthenticationServices
 
 // MARK: - Configuration (mirrors renderer/supabase-config.js)
 
@@ -741,18 +741,23 @@ final class SupabaseManager: @unchecked Sendable {
         return nil
     }
 
-    // MARK: - Auth (GoTrue) — OAuth PKCE scaffold
+    // MARK: - Auth (GoTrue) — OAuth PKCE via the default browser
 
-    /// Kick off Google sign-in: open GoTrue's `/authorize` in a system web
-    /// session, wait for the `weft://auth-callback?code=...` redirect, then
-    /// exchange the code for a session. This is the desktop equivalent of the
-    /// renderer's `supabase.auth.signInWithOAuth({ provider: 'google' })`.
-    ///
-    /// TODO(entitlements): ASWebAuthenticationSession needs a presentation anchor
-    /// and the app must register the `weft` URL scheme in Info.plist
-    /// (CFBundleURLTypes) plus the Sign in with Apple / network entitlements as
-    /// appropriate. Wire `presentationContextProvider` to the key window once the
-    /// AppKit window is available.
+    /// The sign-in attempt currently waiting for its `weft://auth-callback` deep
+    /// link to come back from the browser. One attempt at a time: starting a new
+    /// one supersedes (cancels) the previous, and `cancelPendingSignIn()` lets
+    /// the UI bail out — the user may simply close the browser tab, in which
+    /// case no callback will ever arrive.
+    @MainActor private var pendingAuthContinuation: CheckedContinuation<URL, Error>?
+
+    /// Kick off Google sign-in in the user's DEFAULT BROWSER: open GoTrue's
+    /// `/authorize` there, wait for the app to be re-activated by the
+    /// `weft://auth-callback?code=...` redirect, then exchange the code for a
+    /// session. The browser route (over ASWebAuthenticationSession) is a product
+    /// call: the system web-auth window pops over the app as a detached
+    /// private-browsing pane with no cookies, so users retyped their Google
+    /// password every sign-in. The default browser already holds the school
+    /// Google session — sign-in is usually one click on an account chip.
     @MainActor
     func signInWithGoogle() async throws {
         let verifier = PKCE.makeVerifier()
@@ -768,10 +773,15 @@ final class SupabaseManager: @unchecked Sendable {
         ]
         let authorizeURL = comps.url!
 
-        let callbackURL = try await Self.runWebAuth(
-            url: authorizeURL,
-            callbackScheme: SupabaseConfig.redirectScheme
-        )
+        // Only one attempt can wait on the callback; a second click supersedes
+        // the first (its continuation is resumed as cancelled, never leaked).
+        cancelPendingSignIn()
+        #if canImport(AppKit)
+        NSWorkspace.shared.open(authorizeURL)
+        #endif
+        let callbackURL: URL = try await withCheckedThrowingContinuation { continuation in
+            pendingAuthContinuation = continuation
+        }
 
         // The redirect lands as weft://auth-callback?code=<authCode>. Pull it out.
         let items = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
@@ -783,6 +793,24 @@ final class SupabaseManager: @unchecked Sendable {
         }
 
         try await exchangeCode(code, verifier: verifier)
+    }
+
+    /// Hand the `weft://auth-callback` deep link to the waiting sign-in attempt.
+    /// Routed here by `AppState.handleDeepLink`; a callback with no attempt
+    /// waiting (a stale or replayed browser tab) is dropped harmlessly.
+    @MainActor
+    func resumeAuthCallback(_ url: URL) {
+        pendingAuthContinuation?.resume(returning: url)
+        pendingAuthContinuation = nil
+    }
+
+    /// Abandon the in-flight sign-in attempt (Cancel pressed, or a new attempt
+    /// starting). Throws `CancellationError` into `signInWithGoogle`, which
+    /// callers treat as "nothing to report" — not an error banner.
+    @MainActor
+    func cancelPendingSignIn() {
+        pendingAuthContinuation?.resume(throwing: CancellationError())
+        pendingAuthContinuation = nil
     }
 
     /// Exchange a PKCE auth code for a session, POSTing to
@@ -815,47 +843,6 @@ final class SupabaseManager: @unchecked Sendable {
         clearSession()
     }
 
-    // MARK: - Web auth (ASWebAuthenticationSession bridge)
-
-    /// Run a one-shot ASWebAuthenticationSession and return the callback URL.
-    ///
-    /// TODO(entitlements): in a sandboxed build this needs the
-    /// `com.apple.security.network.client` entitlement, and the session needs a
-    /// non-nil `presentationContextProvider`. We supply a default anchor below;
-    /// swap in the real key window when one is guaranteed to exist.
-    @MainActor
-    private static func runWebAuth(url: URL, callbackScheme: String) async throws -> URL {
-        let anchorProvider = WebAuthPresentationAnchor()
-        return try await withCheckedThrowingContinuation { continuation in
-            let webAuth = ASWebAuthenticationSession(
-                url: url,
-                callbackURLScheme: callbackScheme
-            ) { callbackURL, error in
-                if let error {
-                    continuation.resume(throwing: SupabaseError.auth(error.localizedDescription))
-                    return
-                }
-                guard let callbackURL else {
-                    continuation.resume(throwing: SupabaseError.auth("No callback URL."))
-                    return
-                }
-                continuation.resume(returning: callbackURL)
-            }
-            webAuth.presentationContextProvider = anchorProvider
-            // Ephemeral = macOS presents the compact auth window ANCHORED TO
-            // OUR WINDOW. Non-ephemeral hands the whole flow to the user's
-            // default browser (Safari jumps to the front — the reported bug)
-            // so it can reuse its cookies. The trade-off we accept: no cookie
-            // reuse, so Google asks for credentials on each sign-in.
-            webAuth.prefersEphemeralWebBrowserSession = true
-            // Keep the anchor alive for the lifetime of the session.
-            objc_setAssociatedObject(webAuth, &WebAuthPresentationAnchor.key,
-                                     anchorProvider, .OBJC_ASSOCIATION_RETAIN)
-            if !webAuth.start() {
-                continuation.resume(throwing: SupabaseError.auth("Could not start the sign-in session."))
-            }
-        }
-    }
 }
 
 // MARK: - Returned-work DTO (the get_my_returned_work RPC row)
@@ -1004,27 +991,6 @@ enum PKCE {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
-    }
-}
-
-// MARK: - Presentation anchor for ASWebAuthenticationSession
-
-/// Supplies a window for the system auth sheet to attach to. On macOS this is an
-/// NSWindow; we fall back to a throwaway window if no key window exists yet.
-final class WebAuthPresentationAnchor: NSObject, ASWebAuthenticationPresentationContextProviding {
-    nonisolated(unsafe) static var key: UInt8 = 0
-
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        #if canImport(AppKit)
-        if let window = NSApp?.keyWindow ?? NSApp?.windows.first {
-            return window
-        }
-        // TODO(entitlements): no window available — create a transient one so the
-        // sheet has an anchor. Replace with the real app window when wiring up.
-        return NSWindow()
-        #else
-        return ASPresentationAnchor()
-        #endif
     }
 }
 

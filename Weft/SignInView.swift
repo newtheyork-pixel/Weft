@@ -82,7 +82,7 @@ struct SignInView: View {
                     } else {
                         GoogleG()
                     }
-                    Text(busy ? "Opening Google…" : "Sign in with Google")
+                    Text(busy ? "Finish signing in with your browser…" : "Sign in with Google")
                         .font(Theme.sans(15, .semibold))
                 }
                 .frame(maxWidth: .infinity)
@@ -122,6 +122,15 @@ struct SignInView: View {
                 .font(Theme.sans(12.5))
                 .foregroundStyle(Theme.bad)
                 .transition(.opacity)
+            } else if busy {
+                // The flow now lives in the user's browser; if they closed that
+                // tab, no callback ever arrives — give them a way back.
+                Button("Cancel") { app.cancelSignIn() }
+                    .buttonStyle(.plain)
+                    .font(Theme.sans(12.5, .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .pointerStyle(.link)
+                    .transition(.opacity)
             } else {
                 Text("Use your gcschool.org Google account")
                     .font(Theme.sans(12.5))
