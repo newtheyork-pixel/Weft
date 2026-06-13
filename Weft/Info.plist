@@ -21,5 +21,17 @@
 			</array>
 		</dict>
 	</array>
+	<!-- Sparkle auto-update. The feed is published to the weft-releases default
+	     branch by scripts/release.sh (generate_appcast). SUPublicEDKey is the
+	     EdDSA public key; its private half lives in the build machine's keychain
+	     and signs each update. -->
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/newtheyork-pixel/weft-releases/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>fiG4V8WKwWAm8avUBbxMvLEwN3/vPQcx5NI3h1oD4fs=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>

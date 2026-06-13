@@ -21,6 +21,9 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# Sparkle's CLI tools (generate_appcast/sign_update) live here, so the appcast
+# step finds them without a system-wide install.
+export PATH="$HOME/.local/bin:$PATH"
 
 fail() { printf '\n\033[31m✗ %s\033[0m\n' "$1" >&2; [ -n "${2:-}" ] && printf '  %s\n' "$2" >&2; exit 1; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$1"; }
