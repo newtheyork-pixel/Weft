@@ -26,7 +26,12 @@ struct WeftApp: App {
     enum LaunchMode { case normal, gallery, screen(DevScreen) }
 
     var body: some Scene {
-        WindowGroup {
+        // A single `Window`, NOT `WindowGroup`: Weft is a one-window exam app, and
+        // WindowGroup spawns a SECOND window when the running app receives a
+        // custom-scheme URL (the weftnative:// auth callback) — which showed up as
+        // a duplicate signed-in window. `Window` is a singleton, so the callback
+        // is delivered to the existing window instead of opening a new one.
+        Window("Weft", id: "main") {
             Group {
                 switch launchOverride {
                 case .normal:        RootView()
@@ -38,8 +43,8 @@ struct WeftApp: App {
             .preferredColorScheme(.light)   // Weft's identity is light
             .frame(minWidth: 900, minHeight: 640)
             .onOpenURL { url in
-                // weft://exam|join|work|home links (from the /open redirector or
-                // an email). The OAuth callback is filtered out inside the handler.
+                // weftnative://auth-callback (sign-in) + weft://exam|join|work|home
+                // links (from the /open redirector or an email).
                 NSApp.activate(ignoringOtherApps: true)
                 app.handleDeepLink(url)
             }
