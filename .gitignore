@@ -1,2 +1,5 @@
 .build/
 build*/
+
+# Release signing secrets — never commit.
+scripts/.env.signing

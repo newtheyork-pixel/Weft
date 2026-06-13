@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Developer ID = distribute outside the Mac App Store (notarized DMG).
+       This is the only valid method for Weft: the app runs with the App
+       Sandbox OFF (proctoring enumerates processes/displays), which the App
+       Store / TestFlight forbid. -->
+  <key>method</key>
+  <string>developer-id</string>
+  <key>teamID</key>
+  <string>PW2VT56789</string>
+  <!-- Manual + explicit Developer ID cert: deterministic, no Developer-portal
+       round-trip (which can stall a scripted export). Hardened Runtime comes
+       from the project (ENABLE_HARDENED_RUNTIME = YES) and is preserved. -->
+  <key>signingStyle</key>
+  <string>manual</string>
+  <key>signingCertificate</key>
+  <string>Developer ID Application</string>
+  <key>destination</key>
+  <string>export</string>
+</dict>
+</plist>
