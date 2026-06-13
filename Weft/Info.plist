@@ -11,6 +11,12 @@
 			<string>com.tessera.Weft.oauth</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
+				<!-- weftnative:// is unique to this native app, so the OAuth
+				     callback never collides with the Electron app, which also
+				     registers weft://. weft:// is kept so the native app can
+				     reclaim it (and serve emailed weft:// links) once Electron
+				     is retired. -->
+				<string>weftnative</string>
 				<string>weft</string>
 			</array>
 		</dict>

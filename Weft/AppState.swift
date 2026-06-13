@@ -1418,11 +1418,14 @@ final class AppState {
 
     /// Handle an incoming custom-scheme URL. Exam/join links route a student to
     /// the right place; work/home links jump within the student flow. The OAuth
-    /// callback (weft://auth-callback) is handed to the sign-in attempt waiting
-    /// on it. A link that arrives before sign-in is stashed and replayed once a
-    /// session exists.
+    /// callback (weftnative://auth-callback) is handed to the sign-in attempt
+    /// waiting on it. A link that arrives before sign-in is stashed and replayed
+    /// once a session exists.
+    /// Accepts both `weftnative` (this app's own, collision-free) and `weft`
+    /// (kept for emailed links once the Electron app is retired).
     func handleDeepLink(_ url: URL) {
-        guard url.scheme?.lowercased() == "weft" else { return }
+        let scheme = url.scheme?.lowercased()
+        guard scheme == "weftnative" || scheme == "weft" else { return }
         let host = (url.host ?? "").lowercased()
         // The browser redirect arrives pre-signedIn by definition, so it must be
         // routed BEFORE the stash-and-replay guard below — stashing it would

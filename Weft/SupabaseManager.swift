@@ -31,14 +31,16 @@ enum SupabaseConfig {
     static let url = URL(string: "https://elrrvicxsguqstqciodn.supabase.co")!
     static let anonKey = "sb_publishable_pTH5Q3s2o2CbCdDb7aXuvw_HsGZedAs"
 
-    /// Custom URL scheme the deep link arrives on. Must be registered in
-    /// the app's Info.plist (CFBundleURLTypes) for the link to land.
-    static let redirectScheme = "weft"
-    static let redirectURL = "weft://auth-callback"
-    /// Where GoTrue sends the browser after Google. An HTTPS page (not the
-    /// weft:// scheme directly) because Safari refuses to follow a server
-    /// redirect chain into a custom scheme without a user gesture; the page
-    /// performs the final weft://auth-callback hop itself and closes the tab.
+    /// Custom URL scheme the auth callback arrives on. Deliberately NOT `weft`:
+    /// the Electron app also registers `weft://`, so a shared scheme lets macOS
+    /// route the OAuth callback to the wrong app. `weftnative://` is unique to
+    /// this native build. Registered in Info.plist (CFBundleURLTypes).
+    static let redirectScheme = "weftnative"
+    static let redirectURL = "weftnative://auth-callback"
+    /// Where GoTrue sends the browser after Google. An HTTPS page (not a custom
+    /// scheme directly) because Safari refuses to follow a server redirect chain
+    /// into a custom scheme without a user gesture; the page performs the final
+    /// weftnative://auth-callback hop itself and closes the tab.
     /// Must be on the Supabase Auth redirect allow-list.
     static let browserRedirectURL = "https://weft.optimizegrade.com/auth-finish"
 }
