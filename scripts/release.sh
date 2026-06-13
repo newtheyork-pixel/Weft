@@ -123,7 +123,7 @@ fi
 
 # 8. Publish the binaries to the GitHub release (pre-release = clearly a beta).
 ASSETS=("$DMG"); [ "$HAVE_APPCAST" = 1 ] && ASSETS+=("$ZIP")
-info "Publishing $TAG to $RELEASES_REPO…"
+info "Publishing $TAG to ${RELEASES_REPO}..."
 if gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
   gh release upload "$TAG" "${ASSETS[@]}" --repo "$RELEASES_REPO" --clobber
 else
