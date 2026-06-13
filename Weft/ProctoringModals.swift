@@ -18,11 +18,16 @@ struct StudentBlockedView: View {
     var detail: String? = "zoom.us"
     var footnote: String = "Close it and your writing will resume automatically. Your teacher has been notified."
     var submitTitle: String? = "Can't close it? Submit and exit"
+    /// Fully hide the exam content behind the wash. The screen-sharing flavor
+    /// MUST be opaque: its entire purpose is to keep the live question out of a
+    /// detected screen capture, and a translucent fill leaks the prompt + essay
+    /// into every captured frame. The focus-loss flavor can stay translucent.
+    var opaque: Bool = false
     var onSubmit: () -> Void = {}
 
     var body: some View {
         ZStack {
-            Color(red: 0.08, green: 0.09, blue: 0.13).opacity(0.97).ignoresSafeArea()
+            Color(red: 0.08, green: 0.09, blue: 0.13).opacity(opaque ? 1.0 : 0.97).ignoresSafeArea()
             VStack(spacing: Theme.Space.lg) {
                 Image(systemName: "pause.circle.fill")
                     .font(.system(size: 44))

@@ -81,13 +81,15 @@ private func returnedDateLabel(_ d: Date?) -> String {
 struct ReturnedWorkView: View {
     @Environment(AppState.self) private var app
 
-    @State private var selectedId: String = ReturnedWorkView.sampleEssays.first?.id ?? ""
+    @State private var selectedId: String = ""
     @State private var activeCommentId: String?
 
     /// Mapped essays, cached so the HTML parse runs only when the source changes
-    /// (not on every render). Seeded with the sample for the gallery; replaced by
-    /// `recomputeEssays()` once a real load resolves.
-    @State private var essays: [ReturnedEssay] = ReturnedWorkView.sampleEssays
+    /// (not on every render). Seeded EMPTY so a signed-in student never flashes
+    /// fabricated returned work on the first frame; `recomputeEssays()` (run at
+    /// the top of `.task`, before any await) fills in the rich sample only on
+    /// the not-signed-in (gallery / unsigned) path.
+    @State private var essays: [ReturnedEssay] = []
 
     private var selected: ReturnedEssay {
         essays.first(where: { $0.id == selectedId }) ?? essays.first

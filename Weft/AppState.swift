@@ -182,6 +182,11 @@ final class AppState {
     // MARK: Async UI state
     var isLoading = false
     var errorMessage: String?
+    /// True only while a sign-in attempt is waiting on the browser redirect.
+    /// Cancel is meaningful only in this window; once the `weft://auth-callback`
+    /// deep link arrives the parked continuation is resumed and Cancel can no
+    /// longer abort the token-exchange tail, so the affordance is hidden.
+    var awaitingBrowserCallback = false
 
     private var supabase: SupabaseManager { .shared }
 
@@ -224,6 +229,7 @@ final class AppState {
         useMockData = true
         userId = ""; email = ""; displayName = ""
         errorMessage = nil
+        awaitingBrowserCallback = false
         // Restore the not-signed-in (mock) state so no account's data leaks into
         // the next sign-in, and the dev/sign-in screens demo with samples again.
         selectedClassId = nil
@@ -236,10 +242,14 @@ final class AppState {
         classWork = ClassWorkItem.sampleList
         classOpenCounts = [ClassRoom.sample.id: 1, ClassRoom.sample2.id: 0]
         returnedWork = []
+        submittedEssay = nil; submittedEssayError = nil; submittedVersionGroupId = nil
         outlineAllowedBySession = [OutlineUpload.sample.sessionId: true]
         myOutlines = [OutlineUpload.sample.sessionId: .sample]
         outlineLockedSessionIds = []
         outlineBusy = false
+        // Exam reference materials back to the preview samples.
+        examFiles = ExamFile.sample
+        examLinks = ExamLink.sample
         // Teacher state back to defaults.
         teacherScreen = .home
         editingAssignment = nil
@@ -268,9 +278,14 @@ final class AppState {
         classWork = []
         classOpenCounts = [:]
         returnedWork = []
+        submittedEssay = nil; submittedEssayError = nil; submittedVersionGroupId = nil
         outlineAllowedBySession = [:]
         myOutlines = [:]
         outlineLockedSessionIds = []
+        // No fake reference files/links for a signed-in exam (they would also
+        // leak their hosts into the locked browser's approved-host whitelist).
+        examFiles = []
+        examLinks = []
         selectedClassId = nil
         activeAssignment = nil
         roster = []
@@ -294,7 +309,8 @@ final class AppState {
     func signInWithGoogle() async {
         errorMessage = nil
         isLoading = true
-        defer { isLoading = false }
+        awaitingBrowserCallback = true
+        defer { isLoading = false; awaitingBrowserCallback = false }
         do {
             try await supabase.signInWithGoogle()
             let user = try await supabase.fetchUser()
@@ -335,6 +351,7 @@ final class AppState {
     /// Abandon a sign-in attempt that is waiting on the browser redirect (the
     /// user may have closed the tab, after which no callback will ever arrive).
     func cancelSignIn() {
+        awaitingBrowserCallback = false
         supabase.cancelPendingSignIn()
     }
 
@@ -387,7 +404,11 @@ final class AppState {
     func loadClassWork() async {
         guard signedIn, let cid = selectedClassId else { return }
         do {
-            classWork = try await supabase.listClassWork(classId: cid)
+            let work = try await supabase.listClassWork(classId: cid)
+            // Signed out (or switched class) while suspended: don't write a real
+            // account's rows over restored mock state / the new class.
+            guard signedIn, selectedClassId == cid else { return }
+            classWork = work
             await loadOutlineState()
         } catch {
             errorMessage = describe(error)
@@ -415,6 +436,10 @@ final class AppState {
                 let session = try? await supabase.lookupSession(code: code)
                 if let testId = session?.testId,
                    let test = try? await supabase.getTest(id: testId) {
+                    // Signed out while suspended: signOut() restored the mock
+                    // state, so never write a real account's flag over it
+                    // (the loadTeacherHome pattern).
+                    guard signedIn else { return }
                     outlineAllowedBySession[sid] = test.outlineAllowed
                 }
             }
@@ -422,7 +447,9 @@ final class AppState {
             do {
                 // A confirmed "no row" (nil) clears the cache — the student may
                 // have removed the outline on another device.
-                myOutlines[sid] = try await supabase.getMyOutline(sessionId: sid, userId: userId)
+                let mine = try await supabase.getMyOutline(sessionId: sid, userId: userId)
+                guard signedIn else { return }
+                myOutlines[sid] = mine
             } catch {
                 // Failed fetch: keep whatever is cached rather than flickering
                 // a real outline away.
@@ -470,9 +497,24 @@ final class AppState {
             let row = try await supabase.upsertOutline(
                 sessionId: sid, displayName: displayName, originalName: name,
                 mimeType: mime, sizeBytes: data.count, storagePath: path)
-            // Both writes succeeded: clear the renamed-away object, best-effort
-            // (mirrors deleteOutline's cleanup; a failure merely orphans an
-            // unreadable object).
+            // The row's UPDATE-half is RLS-refused once the student has begun
+            // writing, and PostgREST surfaces that as a 2xx with zero rows — so
+            // upsertOutline returns nil WITHOUT throwing (the same gotcha
+            // deleteOutline guards against). A non-throwing upsert therefore
+            // does NOT prove the row now points at the new bytes. Confirm the
+            // returned row actually moved to `path` before doing anything
+            // destructive; otherwise treat it as the begin-writing lock, keep
+            // the old row/bytes, and skip the old-object cleanup.
+            guard let row, row.storagePath == path else {
+                guard signedIn else { return }
+                outlineLockedSessionIds.insert(sid)
+                // Keep whatever is cached (the old, still-valid outline); never
+                // remove the old object or overwrite the row with a stale fetch.
+                return
+            }
+            // The replace is confirmed: clear the renamed-away object,
+            // best-effort (mirrors deleteOutline's cleanup; a failure merely
+            // orphans an unreadable object).
             if let old = previousPath, !old.isEmpty, old != path {
                 await supabase.removeOutlineObject(path: old)
             }
@@ -480,13 +522,7 @@ final class AppState {
             // the mock state, so never write a real account's row over it
             // (the loadTeacherHome pattern).
             guard signedIn else { return }
-            if let row {
-                myOutlines[sid] = row
-            } else if let fetched = try? await supabase.getMyOutline(sessionId: sid, userId: userId) {
-                // The upsert returned no representation; refresh best-effort.
-                guard signedIn else { return }
-                myOutlines[sid] = fetched
-            }
+            myOutlines[sid] = row
         } catch {
             // A post-signOut failure must not banner the sign-in screen.
             guard signedIn else { return }
@@ -589,12 +625,17 @@ final class AppState {
 
     /// Back from a class detail to the classes list.
     func leaveClass() {
+        // Clear any stale error from the class we're leaving so it can't linger
+        // over the classes list (mirrors leaveTeacherClass).
+        errorMessage = nil
         selectedClassId = nil
         if signedIn { classWork = [] }
         Task { await loadOpenCounts() }
     }
 
     func selectClass(_ id: String) {
+        // A stale error from a prior class must not show under the new header.
+        errorMessage = nil
         selectedClassId = id
         // Previous class's rows must never render under the new header.
         if signedIn { classWork = []; Task { await loadClassWork() } }
@@ -874,7 +915,9 @@ final class AppState {
                                    versionGroupId: source.versionGroupId,
                                    versionNumber: next,
                                    questions: source.questions,
-                                   timeLimitMinutes: source.timeLimitMinutes)
+                                   timeLimitMinutes: source.timeLimitMinutes,
+                                   spellcheckEnabled: source.spellcheckEnabled,
+                                   outlineAllowed: source.outlineAllowed)
             assignments.append(clone)
             pickedAssignmentId = clone.id
             openEditAssignment(clone)
@@ -1063,10 +1106,27 @@ final class AppState {
             return
         }
         errorMessage = nil
-        let existing = grades[submission.id]?.releasedAt
+        let cached = grades[submission.id]?.releasedAt
         // Trust the "first release" decision only if the grades cache we're
-        // reading `existing` from was loaded successfully (not stale/failed).
+        // reading from was loaded successfully (not stale/failed).
         let wasFresh = gradesFresh
+        // upsertGrade writes released_at verbatim (no DB-side COALESCE), so the
+        // value we send IS the new server state. The in-memory cache can be
+        // stale (e.g. the grade was released on another device/session since we
+        // loaded), and clearing released_at would silently retract a grade the
+        // student already sees. Make the non-share path server-authoritative:
+        // re-fetch this submission's current released_at right before the write
+        // so a save-without-sharing can never un-share. Fall back to the cache
+        // only if the fetch fails (then we keep whatever we last knew, never a
+        // worse-than-cache nil).
+        let existing: Date?
+        if share {
+            existing = cached
+        } else if let fetched = try? await supabase.listGrades(submissionIds: [submission.id]).first {
+            existing = fetched.releasedAt
+        } else {
+            existing = cached
+        }
         let releasedAt: String?
         if share {
             releasedAt = SupabaseDate.fractional.string(from: existing ?? Date())
@@ -1107,10 +1167,13 @@ final class AppState {
                                      ?? "Respond to the prompt your teacher set.",
                                  wordLimit: 600)],
             timeLimitMinutes: 45)
-        // Reset to samples, then (when signed in) pull the real reference
-        // materials for the active session in the background.
-        examFiles = ExamFile.sample
-        examLinks = ExamLink.sample
+        // Seed empty when signed in (loadExamMaterials fills in the teacher's
+        // real files/links); the bundled samples are for the not-signed-in
+        // preview only. Seeding samples for a signed-in student would leak fake
+        // reference tabs AND inject their hosts into the locked browser's
+        // approved-host whitelist when the teacher whitelisted nothing.
+        examFiles = signedIn ? [] : ExamFile.sample
+        examLinks = signedIn ? [] : ExamLink.sample
         activeExamSession = nil
         activeStudentId = nil
         activeSubmissionId = nil
@@ -1134,10 +1197,13 @@ final class AppState {
             let q = test.questions.first
             let files = try await supabase.listTestFiles(ids: q?.fileIds ?? [])
             let links = try await supabase.listTestURLs(ids: q?.urlIds ?? [])
-            if !files.isEmpty { examFiles = files }
-            if !links.isEmpty { examLinks = links }
+            // The real fetch is authoritative for a signed-in exam: assign it
+            // verbatim (the lists started empty for signed-in students), so a
+            // test with no files/links shows none rather than retaining samples.
+            examFiles = files
+            examLinks = links
         } catch {
-            // keep samples; this is a non-blocking enhancement
+            // keep whatever was seeded; this is a non-blocking enhancement
         }
     }
 
@@ -1361,7 +1427,12 @@ final class AppState {
         // The browser redirect arrives pre-signedIn by definition, so it must be
         // routed BEFORE the stash-and-replay guard below — stashing it would
         // deadlock sign-in (replay only happens after a session exists).
-        if host == "auth-callback" { supabase.resumeAuthCallback(url); return }
+        if host == "auth-callback" {
+            // The callback resumes the parked continuation; from here the flow is
+            // an uncancellable token-exchange tail, so retire the Cancel control.
+            awaitingBrowserCallback = false
+            supabase.resumeAuthCallback(url); return
+        }
         guard signedIn else { pendingDeepLink = url; return }
         // NEVER reroute during a locked exam: a pre-scheduled `open weft://...`
         // would otherwise unmount ExamView, exit the kiosk, and skip the final

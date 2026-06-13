@@ -223,6 +223,11 @@ struct ReviewGradingView: View {
         let grade = app.grades[sub.id]
         let words = sub.wordCount ?? 0
         let name = liveName(for: sub)
+        // Autosave writes essay_submissions rows the whole time a student is
+        // writing; submitted_at is stamped only by the explicit submit. Treat a
+        // row with no submitted_at as still in progress so it is never graded,
+        // shared, or counted as submitted.
+        let isSubmitted = sub.submittedAt != nil
         let scoreString: String = {
             guard let p = grade?.points else { return "" }
             return p == p.rounded() ? String(Int(p)) : String(p)
@@ -230,9 +235,9 @@ struct ReviewGradingView: View {
         return ReviewEntry(
             id: sub.id,
             name: name,
-            status: .submitted,
+            status: isSubmitted ? .submitted : .writing,
             wordCount: words,
-            submitted: true,
+            submitted: isSubmitted,
             returned: grade?.isReleased ?? false,
             lastEdited: liveEdited(for: sub),
             score: scoreString,
@@ -249,11 +254,14 @@ struct ReviewGradingView: View {
     }
 
     private func liveEdited(for sub: TeacherSubmission) -> String {
+        // "Submitted" only once submitted_at is stamped; an autosaved-but-
+        // unsubmitted row is still in progress, so label it as last edited.
         guard let when = sub.submittedAt ?? sub.updatedAt else { return "" }
         let f = DateFormatter()
         f.dateStyle = .medium
         f.timeStyle = .short
-        return "Submitted " + f.string(from: when)
+        let prefix = sub.submittedAt != nil ? "Submitted " : "Edited "
+        return prefix + f.string(from: when)
     }
 
     /// Seed the local Score / Final comment buffers from the selected grade.
@@ -314,6 +322,10 @@ struct ReviewGradingView: View {
                 .fixedSize()
 
             Button {
+                // Persist any pending score/comment before unmounting, matching
+                // the Back/Next/roster-tap handlers — closing is the natural
+                // "finished this student" gesture and must not drop the edit.
+                flushIfDirty()
                 app.teacherGoHome()
             } label: {
                 Image(systemName: "xmark")

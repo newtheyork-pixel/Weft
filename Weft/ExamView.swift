@@ -75,6 +75,13 @@ struct ExamView: View {
     /// count drops back to or below the limit. The 0:00 force-submit bypasses
     /// this — the deadline always wins.
     @State private var overLimitMessage: String?
+    /// True while a submit is in flight. Several independent triggers (footer
+    /// Submit, ⌘Return, the confirm dialog, "Submit and exit", and the 0:00
+    /// auto-submit) can otherwise fire submit() concurrently; the second call
+    /// would re-enter submitExam() after the first nilled the session, see a
+    /// false failure, flip to "Save failed", and schedule a non-terminating
+    /// retry loop. This guard makes submit() single-flight.
+    @State private var submitting = false
     @AppStorage(Prefs.confirmBeforeSubmit) private var confirmBeforeSubmit = true
 
     private var assignment: Assignment { app.activeAssignment ?? .sample }
@@ -226,9 +233,17 @@ struct ExamView: View {
     /// failed flush keeps the student in the exam with the failed-save label;
     /// their work is intact and Submit can be pressed again.
     private func submit() {
+        // Single-flight: only one submit may be in flight. A concurrent second
+        // call (double-tap, ⌘Return + auto-submit at 0:00, etc.) would re-enter
+        // submitExam() after the first nilled the session, manufacture a false
+        // failure, and leak a retry loop. Stays true on the success path (the
+        // view tears down); reset to false on every failure return.
+        guard !submitting else { return }
+        submitting = true
         Task {
             guard await app.submitExam(html: controller.htmlSnapshot(),
                                        wordCount: controller.wordCount) else {
+                submitting = false
                 runtime.saveState = .failed
                 // Past the hard deadline nothing else would ever fire (the
                 // expiry task has completed): keep force-submitting so the
@@ -274,6 +289,7 @@ struct ExamView: View {
                 detail: name,
                 footnote: "Close it and your writing will resume automatically. Your teacher has been notified.",
                 submitTitle: "Can't close it? Submit and exit",
+                opaque: true,
                 onSubmit: submit
             )
             .transition(.opacity)
@@ -405,12 +421,14 @@ struct ExamView: View {
                     if lockdown { requestSubmit() } else { leave() }
                 }
                 .buttonStyle(.glass)
+                .disabled(lockdown && submitting)
                 Spacer()
                 saveStateView
                 Spacer()
                 Button("Submit") { requestSubmit() }
                     .buttonStyle(.glassProminent).tint(Theme.accent)
                     .keyboardShortcut("\r", modifiers: [.command])
+                    .disabled(submitting)
             }
             .padding(Theme.Space.xl)
         }

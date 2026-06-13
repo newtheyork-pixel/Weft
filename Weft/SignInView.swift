@@ -122,9 +122,11 @@ struct SignInView: View {
                 .font(Theme.sans(12.5))
                 .foregroundStyle(Theme.bad)
                 .transition(.opacity)
-            } else if busy {
+            } else if busy && app.awaitingBrowserCallback {
                 // The flow now lives in the user's browser; if they closed that
-                // tab, no callback ever arrives — give them a way back.
+                // tab, no callback ever arrives — give them a way back. Once the
+                // callback returns, the token-exchange tail can't be aborted, so
+                // Cancel is hidden rather than left inert.
                 Button("Cancel") { app.cancelSignIn() }
                     .buttonStyle(.plain)
                     .font(Theme.sans(12.5, .semibold))

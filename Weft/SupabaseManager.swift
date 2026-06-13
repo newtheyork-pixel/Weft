@@ -31,10 +31,16 @@ enum SupabaseConfig {
     static let url = URL(string: "https://elrrvicxsguqstqciodn.supabase.co")!
     static let anonKey = "sb_publishable_pTH5Q3s2o2CbCdDb7aXuvw_HsGZedAs"
 
-    /// Custom URL scheme the OAuth flow redirects back to. Must be registered in
-    /// the app's Info.plist (CFBundleURLTypes) for the deep link to land.
+    /// Custom URL scheme the deep link arrives on. Must be registered in
+    /// the app's Info.plist (CFBundleURLTypes) for the link to land.
     static let redirectScheme = "weft"
     static let redirectURL = "weft://auth-callback"
+    /// Where GoTrue sends the browser after Google. An HTTPS page (not the
+    /// weft:// scheme directly) because Safari refuses to follow a server
+    /// redirect chain into a custom scheme without a user gesture; the page
+    /// performs the final weft://auth-callback hop itself and closes the tab.
+    /// Must be on the Supabase Auth redirect allow-list.
+    static let browserRedirectURL = "https://weft.optimizegrade.com/auth-finish"
 }
 
 // MARK: - Errors
@@ -916,7 +922,7 @@ final class SupabaseManager: @unchecked Sendable {
                                   resolvingAgainstBaseURL: false)!
         comps.queryItems = [
             URLQueryItem(name: "provider", value: "google"),
-            URLQueryItem(name: "redirect_to", value: SupabaseConfig.redirectURL),
+            URLQueryItem(name: "redirect_to", value: SupabaseConfig.browserRedirectURL),
             URLQueryItem(name: "code_challenge", value: challenge),
             URLQueryItem(name: "code_challenge_method", value: "S256")
         ]

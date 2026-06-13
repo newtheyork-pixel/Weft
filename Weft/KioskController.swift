@@ -117,6 +117,11 @@ final class KioskController {
         // restore it first (level/sharing/full-screen) so we never strand it
         // pinned-above-everything with content protection on; otherwise just
         // drop the stale observers.
+        // A same-window re-entry must NOT re-capture savedLevel/savedSharingType
+        // below — by now they already hold the kiosk values (.screenSaver/.none),
+        // so re-saving them would make exitKiosk "restore" the window to the
+        // kiosk state instead of its real pre-kiosk one.
+        let freshLock = lockedWindow !== window
         if let previous = lockedWindow, previous !== window {
             teardownObservers()
             previous.level = savedLevel
@@ -150,7 +155,7 @@ final class KioskController {
         // Electron's setAlwaysOnTop(true, 'screen-saver'). Save the old level
         // so exit can restore it. We use a high named level rather than a raw
         // CGWindowLevel constant so the value stays valid across SDK changes.
-        savedLevel = window.level
+        if freshLock { savedLevel = window.level }
         window.level = .screenSaver
 
         // Content protection: hide the window's contents from screen-capture
@@ -166,7 +171,7 @@ final class KioskController {
         // had so an admin can still screenshot the app to file a bug. For now we
         // save + set it unconditionally; wire the allowCapture flag in when the
         // checks view passes one through.
-        savedSharingType = window.sharingType
+        if freshLock { savedSharingType = window.sharingType }
         window.sharingType = .none
 
         // Take the window full-screen. toggleFullScreen drives the native
@@ -342,16 +347,19 @@ final class KioskController {
     private func handleLeftFullScreen(window: NSWindow) {
         guard inTest, lockedWindow === window else { return }
 
+        // Past settle, leaving the full-screen space is a real escape that
+        // exposes the live question (the window is briefly windowed on the
+        // desktop). Raise the blackout FIRST — exactly as handleFocusLost does —
+        // since a deliberate space-exit can fire didExitFullScreen WITHOUT a
+        // paired resign-key/resign-active, so the focus-loss path doesn't cover
+        // it. (TODO(proctor): also raise a richer violation to the exam layer.)
+        if !settling { onBlackout?() }
+
         // Re-enter full-screen if we are out of it. Guard on the style mask so
         // we do not toggle ourselves back OUT of a space we are still in.
         if !window.styleMask.contains(.fullScreen) {
             window.toggleFullScreen(nil)
         }
-
-        if settling { return }
-
-        // TODO(proctor): past settle, leaving full-screen is a real violation —
-        // raise it to the exam layer (Electron's 'proctor:focus-lost').
     }
 
     // MARK: Cleanup
