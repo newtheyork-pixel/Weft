@@ -127,9 +127,12 @@ info "Publishing $TAG to $RELEASES_REPO…"
 if gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
   gh release upload "$TAG" "${ASSETS[@]}" --repo "$RELEASES_REPO" --clobber
 else
+  # Full (Latest) release, not a pre-release: the website's /api/download serves
+  # the newest NON-prerelease, and the product call is "replace the download"
+  # with the native build. "(beta)" in the title conveys beta status.
   gh release create "$TAG" "${ASSETS[@]}" --repo "$RELEASES_REPO" \
-    --title "Weft $VERSION (beta)" --prerelease \
-    --notes "Native macOS beta. Requires macOS 26.1 or later. Apple silicon + Intel."
+    --title "Weft $VERSION (beta)" \
+    --notes "Native macOS beta. Requires macOS 26.1 or later. Universal (Apple silicon + Intel)."
 fi
 
 # 9. Publish the appcast to a STABLE url (the repo's default branch), which is
