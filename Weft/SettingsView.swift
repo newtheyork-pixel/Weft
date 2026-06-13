@@ -40,13 +40,16 @@ private struct GeneralSettings: View {
                     }
                     if app.canChooseView {
                         Button("Switch view") { app.switchView() }
+                            .linkPointer()
                     }
                     Button("Sign Out", role: .destructive) { app.signOut() }
+                        .linkPointer()
                 }
             } else if app.role != nil {
                 Section("Preview") {
                     LabeledContent("Mode", value: "Previewing as \(app.role?.rawValue.capitalized ?? "")")
                     Button("Exit preview") { app.signOut() }
+                        .linkPointer()
                 }
             }
 

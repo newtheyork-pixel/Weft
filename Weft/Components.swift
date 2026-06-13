@@ -150,5 +150,6 @@ struct WeftTopBar: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        .linkPointer()
     }
 }

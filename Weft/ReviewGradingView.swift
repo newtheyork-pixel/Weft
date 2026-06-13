@@ -337,6 +337,7 @@ struct ReviewGradingView: View {
             .clipShape(Circle())
             .help("Close grading and return to the teacher view")
             .accessibilityLabel("Close")
+            .linkPointer()
         }
         .padding(.horizontal, Theme.Space.lg)
         .padding(.vertical, Theme.Space.md)
@@ -356,6 +357,7 @@ struct ReviewGradingView: View {
         }
         .buttonStyle(.glass)
         .disabled(disabled)
+        .linkPointer()
     }
 
     // MARK: Left — roster rail
@@ -381,6 +383,7 @@ struct ReviewGradingView: View {
                             .contentShape(Rectangle())
                             .rowHover(corner: Theme.Radius.sm, strength: i == index ? 0 : 0.05)
                             .onTapGesture { flushIfDirty(); withAnimation(.easeOut(duration: 0.18)) { index = i } }
+                            .linkPointer()
                     }
                 }
                 .padding(.horizontal, Theme.Space.sm)
@@ -758,6 +761,7 @@ struct ReviewGradingView: View {
                 .buttonStyle(.glass)
                 .disabled(app.isLoading)
                 .help("Save the score and comment privately. The student does not see it yet.")
+                .linkPointer()
             }
 
             Button {
@@ -779,6 +783,7 @@ struct ReviewGradingView: View {
             .tint(Theme.accent)
             .disabled(app.isLoading)
             .help(current.returned ? "Update and re-share with this student" : "Send the score and your comment to the student")
+            .linkPointer()
 
             if let error = app.errorMessage {
                 Text(error)

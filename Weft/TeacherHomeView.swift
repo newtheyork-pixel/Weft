@@ -183,7 +183,8 @@ struct TeacherHomeView: View {
                         }
                         .buttonStyle(.glass)
                         .help("New draft (v\(a.versionNumber + 1)): copy this assignment, tweak, launch")
-                        Button("Edit") { app.openEditAssignment(a) }.buttonStyle(.glass)
+                        .linkPointer()
+                        Button("Edit") { app.openEditAssignment(a) }.buttonStyle(.glass).linkPointer()
                     }
                     .padding(.vertical, Theme.Space.sm)
                     .padding(.horizontal, Theme.Space.sm)
@@ -220,7 +221,7 @@ struct TeacherHomeView: View {
                     .font(Theme.serif(24, .semibold))
                     .foregroundStyle(Theme.inkSoft)
                 Spacer()
-                Button("Roster") { app.openRoster(c) }.buttonStyle(.glass)
+                Button("Roster") { app.openRoster(c) }.buttonStyle(.glass).linkPointer()
             }
             Text("Class code \(c.joinCode)")
                 .font(Theme.sans(12.5))
@@ -264,6 +265,7 @@ struct TeacherHomeView: View {
                     }
                     .buttonStyle(.glass)
                     .help("Close this session for all students")
+                    .linkPointer()
                 }
             }
         }
@@ -365,6 +367,7 @@ struct TeacherHomeView: View {
                     .tint(Theme.accent)
                     .controlSize(.large)
                     .disabled(app.isLoading)   // a launch is in flight: no double-launch
+                    .linkPointer()
                     .padding(.top, Theme.Space.xs)
                 }
             }
@@ -418,6 +421,7 @@ struct TeacherHomeView: View {
                 app.openGrading(session: s, title: app.sessionTitle(s))
             }
             .buttonStyle(.glass)
+            .linkPointer()
         }
     }
 
@@ -495,6 +499,7 @@ struct TeacherHomeView: View {
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
+            .linkPointer()
         }
     }
 }

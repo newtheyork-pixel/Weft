@@ -55,6 +55,7 @@ struct StudentBlockedView: View {
                         .buttonStyle(.bordered)
                         .tint(.red)
                         .padding(.top, Theme.Space.sm)
+                        .linkPointer()
                 }
             }
             .padding(Theme.Space.xxxl)
@@ -92,8 +93,10 @@ struct RecoveryPromptView: View {
                     HStack(spacing: Theme.Space.md) {
                         Button("Restore my work") {}
                             .buttonStyle(.glassProminent).tint(Theme.accent).controlSize(.large)
+                            .linkPointer()
                         Button("Start fresh from the saved version") {}
                             .buttonStyle(.glass).controlSize(.large)
+                            .linkPointer()
                     }
                 }
             }

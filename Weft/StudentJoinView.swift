@@ -149,6 +149,7 @@ struct StudentJoinView: View {
         .buttonStyle(.glassProminent)
         .tint(Theme.accent)
         .disabled(!canJoin)
+        .linkPointer()
         .help("Join the class with this code")
     }
 

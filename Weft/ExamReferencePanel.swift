@@ -80,12 +80,14 @@ struct ExamReferencePanel: View {
                 .buttonStyle(.borderless)
                 .help(store.splitActive ? "Back to one pane"
                                         : "Split: pin this on top, browse another below")
+                .linkPointer()
             }
             Button(action: onHide) {
                 Image(systemName: "sidebar.right")
             }
             .buttonStyle(.borderless)
             .help("Hide references, write only (⌘⇧R)")
+            .linkPointer()
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)
@@ -212,6 +214,7 @@ struct ExamReferencePanel: View {
                     .multilineTextAlignment(.center)
                 Button("Try again") { store.retry(file: file) }
                     .buttonStyle(.glass)
+                    .linkPointer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(white: 0.95))

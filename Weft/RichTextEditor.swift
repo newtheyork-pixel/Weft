@@ -882,6 +882,7 @@ struct RichTextToolbar: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Font")
+            .linkPointer()
 
             // Font size menu: textformat.size icon.
             Menu {
@@ -896,6 +897,7 @@ struct RichTextToolbar: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Size")
+            .linkPointer()
 
             // Color menu: text colors + highlight colors in two sections.
             Menu {
@@ -917,6 +919,7 @@ struct RichTextToolbar: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Color")
+            .linkPointer()
 
             // Line spacing menu.
             Menu {
@@ -931,6 +934,7 @@ struct RichTextToolbar: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Line Spacing")
+            .linkPointer()
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)
@@ -957,6 +961,7 @@ struct RichTextToolbar: View {
         .buttonStyle(.plain)
         .contentShape(Rectangle())
         .help(label)
+        .linkPointer()
     }
 
     /// A text-label button (H1 / H2 / Body).
@@ -973,6 +978,7 @@ struct RichTextToolbar: View {
         .buttonStyle(.plain)
         .contentShape(Rectangle())
         .help(label)
+        .linkPointer()
     }
 }
 

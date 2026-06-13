@@ -276,6 +276,7 @@ struct StudentChecksView: View {
                 .foregroundStyle(Theme.accent)
                 .font(Theme.sans(13))
                 .padding(.top, Theme.Space.xs)
+                .linkPointer()
         }
         .padding(.top, Theme.Space.xs)
     }

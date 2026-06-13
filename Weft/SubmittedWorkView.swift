@@ -39,6 +39,7 @@ struct SubmittedWorkView: View {
         .buttonStyle(.glass)
         .tint(Theme.accent)
         .help("Return to your assignments")
+        .linkPointer()
     }
 
     // MARK: Main content (loading / error / essay)
@@ -98,6 +99,7 @@ struct SubmittedWorkView: View {
                 .buttonStyle(.glassProminent)
                 .tint(Theme.accent)
                 .font(Theme.sans(13, .semibold))
+                .linkPointer()
             }
             .padding(Theme.Space.lg)
             .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.md))

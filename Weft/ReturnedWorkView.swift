@@ -142,6 +142,7 @@ struct ReturnedWorkView: View {
         .buttonStyle(.glass)
         .tint(Theme.accent)
         .help("Return to your assignments")
+        .linkPointer()
     }
 
     private var topBar: some View {
@@ -249,6 +250,7 @@ struct ReturnedWorkView: View {
         .buttonStyle(.plain)
         .rowHover()
         .help(essay.title)
+        .linkPointer()
     }
 
     // MARK: Centre — read-only essay "paper" (clean WHITE opaque card)
@@ -458,6 +460,7 @@ struct ReturnedWorkView: View {
         .buttonStyle(.plain)
         .rowHover()
         .help(active ? "Hide this comment's highlight" : "Show this comment's highlight in the essay")
+        .linkPointer()
     }
 
     // MARK: Empty state
@@ -477,6 +480,7 @@ struct ReturnedWorkView: View {
                 .buttonStyle(.glassProminent)
                 .tint(Theme.accent)
                 .padding(.top, Theme.Space.xs)
+                .linkPointer()
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

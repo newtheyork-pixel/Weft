@@ -254,6 +254,7 @@ struct StudentClassHomeView: View {
                 Button("Start writing") { app.startWriting(item) }
                     .buttonStyle(.glassProminent)
                     .tint(Theme.accent)
+                    .linkPointer()
             case .graded:
                 HStack(spacing: 14) {
                     Text("\(fmt(item.myPoints)) / \(fmt(item.myPointsPossible))")

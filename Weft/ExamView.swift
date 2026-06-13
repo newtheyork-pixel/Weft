@@ -373,6 +373,7 @@ struct ExamView: View {
             .buttonStyle(.borderless)
             .keyboardShortcut("r", modifiers: [.command, .shift])
             .help(referencesVisible ? "Hide references, write only (⌘⇧R)" : "Show references (⌘⇧R)")
+            .linkPointer()
         }
         .padding(.horizontal, Theme.Space.xl)
         .padding(.vertical, Theme.Space.sm)
@@ -422,6 +423,7 @@ struct ExamView: View {
                 }
                 .buttonStyle(.glass)
                 .disabled(lockdown && submitting)
+                .linkPointer()
                 Spacer()
                 saveStateView
                 Spacer()
@@ -429,6 +431,7 @@ struct ExamView: View {
                     .buttonStyle(.glassProminent).tint(Theme.accent)
                     .keyboardShortcut("\r", modifiers: [.command])
                     .disabled(submitting)
+                    .linkPointer()
             }
             .padding(Theme.Space.xl)
         }

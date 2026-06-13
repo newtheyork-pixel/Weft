@@ -98,8 +98,10 @@ struct TemplatePickerView: View {
                     Button("Continue") { onContinue(selected) }
                         .buttonStyle(.glassProminent)
                         .tint(Theme.accent)
+                        .linkPointer()
                     Button("Cancel") { onCancel() }
                         .buttonStyle(.glass)
+                        .linkPointer()
                 }
                 .padding(.top, Theme.Space.lg)
             }
@@ -163,6 +165,7 @@ struct TemplatePickerView: View {
         }
         .buttonStyle(.plain)
         .rowHover(corner: Theme.Radius.md)
+        .linkPointer()
         .accessibilityAddTraits(isOn ? [.isSelected] : [])
     }
 
@@ -520,6 +523,7 @@ struct AssignmentEditorView: View {
                     Button("Add") { addLink() }
                         .buttonStyle(.glass)
                         .help("Add this website to the allow list")
+                        .linkPointer()
                 }
             }
 
@@ -577,6 +581,7 @@ struct AssignmentEditorView: View {
             .pickerStyle(.menu)
             .frame(width: 140)
             .help("Choose whether students can open the whole site or only this page")
+            .linkPointer()
             Button("Remove") {
                 withAnimation(.easeOut(duration: 0.18)) {
                     links.removeAll { $0.id == link.wrappedValue.id }
@@ -606,8 +611,10 @@ struct AssignmentEditorView: View {
             .buttonStyle(.glassProminent)
             .tint(Theme.accent)
             .disabled(app.isLoading)
+            .linkPointer()
             Button("Cancel") { cancel() }
                 .buttonStyle(.glass)
+                .linkPointer()
             Spacer()
             if app.isLoading {
                 HStack(spacing: 6) {

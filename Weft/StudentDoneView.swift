@@ -97,6 +97,7 @@ struct StudentDoneView: View {
                 .buttonStyle(.glassProminent)
                 .tint(Theme.accent)
                 .padding(.top, Theme.Space.xs)
+                .linkPointer()
         }
     }
 
