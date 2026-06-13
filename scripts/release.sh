@@ -84,12 +84,31 @@ APP="$EXPORT_DIR/Weft.app"
 [ -d "$APP" ] || fail "Export produced no Weft.app"
 ok "Built + signed $APP"
 
-# 5. Package a DMG (app + Applications symlink).
+# 5. Package a STYLED DMG (positioned icons + a real Applications drop target).
+#    dmgbuild writes the window layout headlessly — no flaky Finder/AppleScript
+#    automation (which is why create-dmg was a non-starter here). Falls back to a
+#    plain hdiutil DMG (blank Applications icon) only if dmgbuild isn't installed:
+#    /usr/bin/python3 -m pip install --user dmgbuild
 info "Building DMG…"
-STAGE="$BUILD_DIR/dmg"; mkdir -p "$STAGE"
-cp -R "$APP" "$STAGE/"; ln -s /Applications "$STAGE/Applications"
-hdiutil create -volname "Weft" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
-ok "DMG: $DMG"
+if /usr/bin/python3 -c "import dmgbuild" 2>/dev/null; then
+  cat > "$BUILD_DIR/dmgbuild_settings.py" <<PY
+files = ['$APP']
+symlinks = {'Applications': '/Applications'}
+icon_locations = {'Weft.app': (165, 205), 'Applications': (435, 205)}
+window_rect = ((200, 120), (600, 400))
+icon_size = 120
+text_size = 13
+format = 'UDZO'
+PY
+  /usr/bin/python3 -c "import dmgbuild; dmgbuild.build_dmg('$DMG','Weft',settings_file='$BUILD_DIR/dmgbuild_settings.py')" >/dev/null
+  ok "Styled DMG: $DMG"
+else
+  STAGE="$BUILD_DIR/dmg"; mkdir -p "$STAGE"
+  cp -R "$APP" "$STAGE/"; ln -s /Applications "$STAGE/Applications"
+  hdiutil create -volname "Weft" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+  info "dmgbuild not installed — plain DMG (blank Applications icon). Install it for a styled one."
+  ok "DMG: $DMG"
+fi
 
 # 6. Notarize, then staple BOTH the DMG and the .app (so the Sparkle zip's app
 #    carries its own ticket and launches offline without a Gatekeeper stall).
