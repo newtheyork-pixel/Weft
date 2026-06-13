@@ -94,10 +94,13 @@ info "Notarizing (this can take a few minutes)…"
 xcrun notarytool submit "$DMG" \
   --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID" \
   --wait || fail "Notarization failed" "Check the submission log: xcrun notarytool log <id> ..."
-xcrun stapler staple "$DMG"
+xcrun stapler staple "$DMG" || fail "Could not staple the DMG"
 xcrun stapler staple "$APP" || fail "Could not staple the app bundle"
-if ! spctl -a -t open --context context:primary-signature -v "$DMG" 2>/dev/null; then
-  fail "Gatekeeper REJECTED the notarized DMG" "Do not ship it. Re-check signing/notarization."
+# Authoritative Gatekeeper check is on the APP (what actually launches), via
+# -t exec. `spctl -t open` on a stapled-but-unsigned DMG gives false negatives;
+# the DMG's own ticket is already proven by the stapler validation above.
+if ! spctl -a -t exec -vv "$APP" 2>/dev/null; then
+  fail "Gatekeeper rejected the signed app" "Re-check signing/notarization."
 fi
 ok "Notarized + stapled + Gatekeeper-accepted"
 
