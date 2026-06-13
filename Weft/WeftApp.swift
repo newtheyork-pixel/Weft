@@ -9,6 +9,9 @@ import AppKit
 @main
 struct WeftApp: App {
     @State private var app = AppState()
+    /// Owns the Sparkle updater for the app's lifetime; starting it enables the
+    /// scheduled background update check (gated off during a locked exam).
+    @StateObject private var updater = UpdaterViewModel()
 
     /// Launch overrides for QA, via environment variables:
     ///   WEFT_SCREEN=<key>   show one screen full-window (see `DevScreen`)
@@ -55,6 +58,9 @@ struct WeftApp: App {
             // Trim Mac menus that don't apply to a single-window exam app, and
             // add an account command.
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { updater.checkForUpdates() }
+            }
             CommandGroup(after: .appSettings) {
                 if app.signedIn {
                     Divider()

@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		FF11678F2FDD0EBD001CA58B /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = FF11678E2FDD0EBD001CA58B /* Sparkle */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		FF438F422FD7BBB000A3E614 /* Weft.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Weft.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -36,6 +40,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FF11678F2FDD0EBD001CA58B /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,6 +83,7 @@
 			);
 			name = Weft;
 			packageProductDependencies = (
+				FF11678E2FDD0EBD001CA58B /* Sparkle */,
 			);
 			productName = Weft;
 			productReference = FF438F422FD7BBB000A3E614 /* Weft.app */;
@@ -107,6 +113,9 @@
 			);
 			mainGroup = FF438F392FD7BBB000A3E614;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				FF11678D2FDD0EBD001CA58B /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = FF438F432FD7BBB000A3E614 /* Products */;
 			projectDirPath = "";
@@ -285,7 +294,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.3.1;
+				MARKETING_VERSION = 0.3.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tessera.Weft;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -331,7 +340,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.3.1;
+				MARKETING_VERSION = 0.3.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.tessera.Weft;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -372,6 +381,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		FF11678D2FDD0EBD001CA58B /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.9.3;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		FF11678E2FDD0EBD001CA58B /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = FF11678D2FDD0EBD001CA58B /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = FF438F3A2FD7BBB000A3E614 /* Project object */;
 }

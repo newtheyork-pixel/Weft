@@ -1363,9 +1363,13 @@ final class AppState {
 
     func goToJoin()  { studentScreen = .join }
     func goToHome()  { studentScreen = .home }
-    func enterExam() { studentScreen = .exam }
+    func enterExam() {
+        ExamGate.inProgress = true   // block Sparkle update checks during the test
+        studentScreen = .exam
+    }
 
     func finishExam() {
+        ExamGate.inProgress = false
         // Move the just-submitted assignment out of "Active": clear its live
         // session and stamp a submission time so it drops into the submitted/past
         // bucket. (In the real flow the backend reload also reflects this; this
