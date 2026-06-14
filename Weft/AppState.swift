@@ -122,6 +122,25 @@ final class AppState {
     var examFiles: [ExamFile] = ExamFile.sample
     var examLinks: [ExamLink] = ExamLink.sample
 
+    /// Materials shown in the exam reference panel: the student's own outline
+    /// first (only when the assignment allowed one AND it's a PDF — the locked
+    /// panel renders PDFs only, and a Word doc can't be opened externally
+    /// mid-exam), then the teacher's files. Falls back to just the teacher files.
+    var examReferenceFiles: [ExamFile] {
+        guard let sid = activeExamSession?.id,
+              outlineAllowedBySession[sid] == true,
+              let outline = myOutlines[sid], outline.isPDF
+        else { return examFiles }
+        let outlineFile = ExamFile(
+            id: "outline-\(outline.id)",
+            originalName: outline.originalName,
+            mimeType: outline.mimeType,
+            storagePath: outline.storagePath,
+            bucket: "outlines",
+            isOutline: true)
+        return [outlineFile] + examFiles
+    }
+
     // MARK: Teacher in-role navigation + state
     enum TeacherScreen: Equatable { case home, editor, grading, roster }
     var teacherScreen: TeacherScreen = .home
@@ -1227,6 +1246,14 @@ final class AppState {
             }
             activeAssignment = test
             activeExamSession = session
+            // Make the student's own outline available to the exam reference
+            // panel even on the deep-link path (where the class-home load that
+            // normally fills these didn't run). Best-effort, never blocks.
+            outlineAllowedBySession[session.id] = test.outlineAllowed
+            if test.outlineAllowed, myOutlines[session.id] == nil,
+               let mine = try? await supabase.getMyOutline(sessionId: session.id, userId: userId) {
+                myOutlines[session.id] = mine
+            }
         } catch {
             errorMessage = describe(error)
         }
