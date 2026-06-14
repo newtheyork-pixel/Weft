@@ -23,14 +23,14 @@ enum ReferenceMaterial: Identifiable, Hashable {
 
     var title: String {
         switch self {
-        case .pdf(let f): return f.originalName
+        case .pdf(let f): return f.isOutline ? "Your outline" : f.originalName
         case .web(let l): return l.displayName
         }
     }
 
     var icon: String {
         switch self {
-        case .pdf: return "doc.text.fill"
+        case .pdf(let f): return f.isOutline ? "pencil.and.outline" : "doc.text.fill"
         case .web: return "globe"
         }
     }
@@ -144,7 +144,7 @@ final class ReferenceTabStore {
         prefetchTasks[file.id] = Task {
             var doc: PDFDocument?
             do {
-                let url = try await SupabaseManager.shared.signedURL(bucket: "essay-files",
+                let url = try await SupabaseManager.shared.signedURL(bucket: file.bucket,
                                                                      path: file.storagePath)
                 doc = await PDFLoader.load(from: url)
             } catch { doc = nil }

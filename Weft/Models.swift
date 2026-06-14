@@ -283,6 +283,13 @@ struct ExamFile: Identifiable, Codable, Hashable, Sendable {
     var originalName: String
     var mimeType: String
     var storagePath: String
+    /// Which storage bucket holds the file. Teacher reference files live in
+    /// "essay-files"; the student's own outline lives in "outlines". Set in
+    /// code (not from the DB row), so it stays out of CodingKeys.
+    var bucket: String = "essay-files"
+    /// True for the student's own uploaded outline — drives a distinct tab
+    /// label/icon in the exam reference panel.
+    var isOutline: Bool = false
 
     var isPDF: Bool { mimeType.contains("pdf") || originalName.lowercased().hasSuffix(".pdf") }
 

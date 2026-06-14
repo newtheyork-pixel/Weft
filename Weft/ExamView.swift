@@ -96,7 +96,7 @@ struct ExamView: View {
                 .frame(minWidth: 380)
             if referencesVisible {
                 ExamReferencePanel(
-                    files: app.examFiles,
+                    files: app.examReferenceFiles,
                     links: app.examLinks,
                     signedIn: app.signedIn,
                     store: refStore,
