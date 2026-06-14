@@ -288,7 +288,6 @@
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Weft/Info.plist;
-				INFOPLIST_KEY_NSCameraUsageDescription = "Weft takes occasional still photos during an exam so your teacher can confirm it's \n  you. It never records video or audio.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -334,7 +333,6 @@
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Weft/Info.plist;
-				INFOPLIST_KEY_NSCameraUsageDescription = "Weft takes occasional still photos during an exam so your teacher can confirm it's \n  you. It never records video or audio.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

@@ -479,25 +479,19 @@ final class ProctoringEngine {
         return s.contains(".") || s.contains(":")
     }
 
-    // MARK: - TODO: features that need extra entitlements / frameworks
+    // MARK: - Product notes: capture features
     //
-    // The following are intentionally NOT implemented in this detection engine
-    // because they require entitlements and/or ScreenCaptureKit that the plain
-    // app target does not yet carry:
+    //   • Camera / webcam capture: NOT part of the product (dropped 2026-06-14).
+    //     The app declares no com.apple.security.device.camera entitlement and no
+    //     NSCameraUsageDescription, and never opens an AVCaptureSession.
     //
-    //   1. Camera / webcam capture (the optional require_webcam path). Needs the
-    //      com.apple.security.device.camera entitlement and an AVCaptureSession,
-    //      plus a usage-description in Info.plist. detectScreenRecordingPermission()
-    //      above is the screen analogue; the camera grant would be checked with
-    //      AVCaptureDevice.authorizationStatus(for: .video) once wired up.
+    //   • Periodic screenshots during the exam are DEPRIORITIZED. The bar: capture
+    //     must run fully off the writing path and be imperceptible to a student who
+    //     is typing — if it can't be made to cost zero typing performance, we don't
+    //     do it. CGPreflightScreenCaptureAccess() above already reports the
+    //     permission; the actual frame grab (ScreenCaptureKit / SCScreenshotManager
+    //     on macOS 14+, off the main actor, on a slow timer) stays unbuilt until
+    //     that bar is met. See ROADMAP.md.
     //
-    //   2. Periodic screenshots during the exam (the capture-screen IPC). On
-    //      macOS 14+ this should use ScreenCaptureKit (SCScreenshotManager /
-    //      SCStream) gated behind CGRequestScreenCaptureAccess() — the legacy
-    //      CGWindowListCreateImage path is deprecated. CGPreflightScreenCaptureAccess()
-    //      above already reports whether that permission is in place; the actual
-    //      frame grab is deferred to the capture wave.
-    //
-    // Both are read-for-the-teacher features layered on top of this engine; the
-    // detection report is complete and useful without them.
+    // The detection report is complete and useful without either feature.
 }
