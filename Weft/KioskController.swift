@@ -71,6 +71,11 @@ final class KioskController {
     /// protection TODO below).
     private var savedSharingType: NSWindow.SharingType = .readOnly
 
+    /// Raw-key suppression (CapsLock / F13-F19) for the exam. Fail-open: a no-op
+    /// unless the app is trusted for Accessibility, so the lock degrades
+    /// gracefully when the grant is missing.
+    private let keyGuard = ExamKeyGuard()
+
     /// True between `enterKiosk` and `exitKiosk`. Gates the fight-back so we
     /// never fight focus changes outside the exam. Mirrors `_studentInTest`.
     private var inTest = false
@@ -174,6 +179,10 @@ final class KioskController {
         if freshLock { savedSharingType = window.sharingType }
         window.sharingType = .none
 
+        // Swallow raw keys (CapsLock / F13-F19) that presentationOptions can't.
+        // Fail-open: does nothing unless trusted for Accessibility.
+        keyGuard.start()
+
         // Take the window full-screen. toggleFullScreen drives the native
         // full-screen SPACE (its own Space), which is what we want for kiosk:
         // it removes the title bar and prevents the window from being dragged
@@ -216,6 +225,7 @@ final class KioskController {
         // assuming defaults so a reused window comes back exactly as it was.
         window.level = savedLevel
         window.sharingType = savedSharingType
+        keyGuard.stop()
 
         lockedWindow = nil
 
@@ -385,12 +395,12 @@ final class KioskController {
 
 // MARK: - TODO (future hardening, needs entitlements / signing)
 //
-//  - Raw key suppression: presentationOptions does not swallow CapsLock,
-//    F13-F19, or third-party launcher rebinds (the Electron before-input-event
-//    + globalShortcut list). The native route is a CGEventTap at
-//    .cgSessionEventTap, which requires the Accessibility entitlement and the
-//    user's approval in System Settings > Privacy. Add as a separate component
-//    so the kiosk lock degrades gracefully when the tap is denied.
+//  - Raw key suppression: DONE — ExamKeyGuard (a CGEventTap at .cgSessionEventTap)
+//    swallows CapsLock / F13-F19 during the exam, started/stopped with the lock.
+//    It fails open (a no-op) until the app is trusted for Accessibility (System
+//    Settings > Privacy & Security > Accessibility), so the lock degrades
+//    gracefully when the grant is denied. Launcher-rebind keys beyond F13-F19 can
+//    be added to ExamKeyGuard.blockedKeyCodes if a school needs them.
 //
 //  - Content protection durability: window.sharingType = .none only reliably
 //    excludes the window from capture under a hardened-runtime signed build
