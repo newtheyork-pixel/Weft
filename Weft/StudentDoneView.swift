@@ -13,11 +13,11 @@ struct StudentDoneView: View {
     @Environment(AppState.self) private var app
 
     /// Whether screen pictures were captured this session (governs the
-    /// "Screen pictures" row). In Electron this row is always pushed; webcam
-    /// stills are conditional on requireWebcam().
-    var screenCaptureOn: Bool = true
-    /// Whether the camera was on this session (governs the "Camera stills" row).
-    var webcamOn: Bool = false
+    /// "Screen pictures" row). Defaults OFF: the native app does not capture
+    /// screenshots — that's deprioritized and must never cost typing
+    /// performance, so it stays unbuilt until it can be done imperceptibly.
+    /// Webcam was dropped, so there is no camera row at all.
+    var screenCaptureOn: Bool = false
 
     /// One captured-data row: a plain label and a plain detail line.
     private struct LedgerRow: Identifiable {
@@ -38,10 +38,6 @@ struct StudentDoneView: View {
         if screenCaptureOn {
             r.append(LedgerRow(what: "Screen pictures",
                                detail: "Periodic still images of your screen (only if you allowed screen recording)."))
-        }
-        if webcamOn {
-            r.append(LedgerRow(what: "Camera stills",
-                               detail: "Occasional still photos from your camera."))
         }
         r.append(LedgerRow(what: "Grade and comments",
                            detail: "Your teacher's score and feedback, once they return it."))
@@ -155,7 +151,7 @@ struct StudentDoneView: View {
 }
 
 #Preview {
-    StudentDoneView(screenCaptureOn: true, webcamOn: true)
+    StudentDoneView()
         .environment(AppState())
         .preferredColorScheme(.light)
         .frame(width: 520, height: 720)

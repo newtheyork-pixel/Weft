@@ -23,6 +23,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
     case templates
     case editor
     case grading
+    case keyGuard
 
     var id: String { rawValue }
 
@@ -42,6 +43,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .templates:   return "Teacher · Templates"
         case .editor:      return "Teacher · Assignment editor"
         case .grading:     return "Teacher · Grading"
+        case .keyGuard:    return "Dev · Key guard tester"
         }
     }
 
@@ -62,6 +64,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .templates:   return ["templates", "template"]
         case .editor:      return ["editor", "assignment"]
         case .grading:     return ["grading", "grade", "review"]
+        case .keyGuard:    return ["keyguard", "keys"]
         }
     }
 
@@ -80,6 +83,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .templates:   TemplatePickerView()
         case .editor:      AssignmentEditorView()
         case .grading:     ReviewGradingView()
+        case .keyGuard:    KeyGuardTesterView()
         }
     }
 
@@ -107,6 +111,65 @@ struct DevGalleryView: View {
             (screen ?? .signIn).view
                 .id(screen)
         }
+    }
+}
+
+/// Dev-only harness to verify `ExamKeyGuard` in isolation — no exam, no kiosk.
+/// Start the guard, then confirm: CapsLock + F13–F19 are inert while normal
+/// typing is completely unaffected. Needs the Accessibility grant.
+struct KeyGuardTesterView: View {
+    @State private var keyGuard = ExamKeyGuard()
+    @State private var running = false
+    @State private var trusted = ExamKeyGuard.isTrusted
+    @State private var typed = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("ExamKeyGuard tester").font(.title2.bold())
+            Text("Raw-key suppression in isolation (no exam needed).")
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                Circle().fill(trusted ? .green : .orange).frame(width: 10, height: 10)
+                Text(trusted ? "Accessibility: granted" : "Accessibility: not granted")
+                Button("Recheck") { trusted = ExamKeyGuard.isTrusted }
+                if !trusted { Button("Request…") { ExamKeyGuard.requestTrust() } }
+            }
+            .font(.callout)
+
+            HStack(spacing: 12) {
+                Button(running ? "Stop guard" : "Start guard") {
+                    if running { keyGuard.stop() } else { keyGuard.start() }
+                    running = keyGuard.active
+                    trusted = ExamKeyGuard.isTrusted
+                }
+                .buttonStyle(.borderedProminent)
+                Text(running ? "ACTIVE — ⌘Space / screenshots / Mission Control should be inert"
+                             : "Stopped")
+                    .foregroundStyle(running ? .green : .secondary)
+            }
+
+            Divider()
+            Text("Type here — should be completely normal while the guard runs:")
+            TextField("Type a sentence, toggle CapsLock, hit F13–F19…",
+                      text: $typed, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(3, reservesSpace: true)
+
+            Text("""
+            With the guard ACTIVE, each of these should do NOTHING:
+            • ⌘Space / ⌥Space — Spotlight / Raycast / ChatGPT don't open.
+            • ⌘⇧4 / ⌘⇧5 — no screenshot crosshair or toolbar.
+            • ⌃↑ / ⌃→ — Mission Control / space-switch don't fire.
+            And typing stays normal: letters, numbers, the plain spacebar,
+            arrows, ⌫, ⏎ all work in the box above. Stop guard → all restored.
+            """)
+            .font(.callout).foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onDisappear { keyGuard.stop() }   // never leave a tap installed
     }
 }
 

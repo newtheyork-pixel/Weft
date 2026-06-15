@@ -26,7 +26,7 @@
 //  set, AppKit itself swallows Cmd+Tab, Cmd+Q, the Apple menu, Force-Quit, and
 //  the Dock — the things the Electron globalShortcut list was reaching for. We
 //  do not need a separate accelerator table for those; we DO still want an
-//  event tap later for raw CapsLock / F13-F19 / launcher rebinds (see TODO).
+//  event tap for the launcher / screenshot / Mission-Control hotkeys (ExamKeyGuard).
 //
 //  NOTE — the macOS settle / focus quirk the Electron build fought for two
 //  releases (0.2.10 / 0.2.11, the "caret death" saga):
@@ -70,6 +70,12 @@ final class KioskController {
     /// The window's pre-kiosk sharing type, restored on exit (see content
     /// protection TODO below).
     private var savedSharingType: NSWindow.SharingType = .readOnly
+
+    /// Raw-key suppression for the exam — blocks ⌘Space launchers (Spotlight /
+    /// Raycast / ChatGPT), screenshots, and Mission Control. Fail-open: a no-op
+    /// unless the app is trusted for Accessibility, so the lock degrades
+    /// gracefully when the grant is missing.
+    private let keyGuard = ExamKeyGuard()
 
     /// True between `enterKiosk` and `exitKiosk`. Gates the fight-back so we
     /// never fight focus changes outside the exam. Mirrors `_studentInTest`.
@@ -174,6 +180,10 @@ final class KioskController {
         if freshLock { savedSharingType = window.sharingType }
         window.sharingType = .none
 
+        // Swallow the launcher / screenshot / Mission-Control hotkeys that
+        // presentationOptions can't. Fail-open: no-op unless trusted for Accessibility.
+        keyGuard.start()
+
         // Take the window full-screen. toggleFullScreen drives the native
         // full-screen SPACE (its own Space), which is what we want for kiosk:
         // it removes the title bar and prevents the window from being dragged
@@ -216,6 +226,7 @@ final class KioskController {
         // assuming defaults so a reused window comes back exactly as it was.
         window.level = savedLevel
         window.sharingType = savedSharingType
+        keyGuard.stop()
 
         lockedWindow = nil
 
@@ -385,12 +396,13 @@ final class KioskController {
 
 // MARK: - TODO (future hardening, needs entitlements / signing)
 //
-//  - Raw key suppression: presentationOptions does not swallow CapsLock,
-//    F13-F19, or third-party launcher rebinds (the Electron before-input-event
-//    + globalShortcut list). The native route is a CGEventTap at
-//    .cgSessionEventTap, which requires the Accessibility entitlement and the
-//    user's approval in System Settings > Privacy. Add as a separate component
-//    so the kiosk lock degrades gracefully when the tap is denied.
+//  - Raw key suppression: DONE — ExamKeyGuard (a CGEventTap at .cgSessionEventTap)
+//    swallows the escape / launcher / capture hotkeys presentationOptions can't:
+//    ⌘Space / ⌥Space launchers (Spotlight, Raycast, Alfred, ChatGPT, Siri),
+//    ⌘⇧3/4/5/6 screenshots, ⌃-arrow Mission Control / Spaces, ⌘Tab, and F13-F19.
+//    Started/stopped with the lock; fails open until the app is trusted for
+//    Accessibility (System Settings > Privacy & Security > Accessibility). Extend
+//    the rules in ExamKeyGuard.shouldSuppress(keyCode:flags:) if needed.
 //
 //  - Content protection durability: window.sharingType = .none only reliably
 //    excludes the window from capture under a hardened-runtime signed build

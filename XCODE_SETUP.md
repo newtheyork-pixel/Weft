@@ -39,17 +39,11 @@ The OAuth flow redirects to `weft://auth-callback` (see `SupabaseConfig.redirect
 
 ---
 
-## 2. Camera usage description (for the future webcam-proctoring path)
+## 2. Camera / webcam — not used
 
-`ProctoringEngine` leaves webcam capture as a TODO, but add the usage string now so the
-capability is ready and the app never crashes on a camera access:
-
-**Target → Info tab → add key:**
-- **Privacy - Camera Usage Description** (`NSCameraUsageDescription`)
-- Value: `Weft takes occasional still photos during an exam so your teacher can confirm it's you. It never records video or audio.`
-
-If/when webcam capture is wired, also add the **Camera** entitlement
-(`com.apple.security.device.camera`) — only needed if App Sandbox is ever enabled (see §5).
+Webcam proctoring was **dropped** (2026-06-14). The app declares no
+`NSCameraUsageDescription`, carries no camera entitlement, and never opens an
+`AVCaptureSession`. Nothing to configure here.
 
 ---
 
@@ -98,13 +92,18 @@ Sandbox would you need `com.apple.security.network.client`.)
 
 ---
 
-## 6. (Later wave) Accessibility — raw key suppression
+## 6. Accessibility — raw key suppression
 
-`KioskController`'s TODO for swallowing CapsLock / F13–F19 / launcher rebinds needs a
-`CGEventTap` at `.cgSessionEventTap`, which requires the **Accessibility** TCC grant
-(System Settings → Privacy & Security → Accessibility). Like Screen Recording, this is a
-runtime grant keyed to the signature, so it also depends on §5. Nothing to add in Xcode
-beyond signing; the tap itself isn't implemented yet.
+`ExamKeyGuard` (wired into `KioskController`) swallows the escape / launcher / capture
+hotkeys during the exam — ⌘Space / ⌥Space launchers (Spotlight, Raycast, Alfred, ChatGPT,
+Siri), ⌘⇧3/4/5/6 screenshots, ⌃-arrow Mission Control / Spaces, ⌘Tab, and F13–F19 — via a
+`CGEventTap` at `.cgSessionEventTap`. That tap requires the **Accessibility** TCC
+grant (System Settings → Privacy & Security → Accessibility) — a runtime grant keyed to the
+signature, so it depends on §5. Nothing to add in Xcode beyond signing.
+
+Until the grant is given the guard **fails open**: the kiosk lock still runs, raw keys just
+aren't suppressed. To enable it: grant Accessibility, then confirm during an exam that
+⌘Space / screenshots / Mission Control are inert and that normal typing (incl. the plain spacebar) + submit are completely unaffected.
 
 ---
 
@@ -114,7 +113,8 @@ beyond signing; the tap itself isn't implemented yet.
 - [ ] `weft://auth-callback` in Supabase Redirect URLs (§1)
 - [ ] Google provider enabled in Supabase (§1)
 - [ ] `get_my_role()` RPC deployed, or confirm role-routing source (§1)
-- [ ] `NSCameraUsageDescription` set (§2)
+- [x] Camera/webcam: not used — dropped, no permission needed (§2)
 - [x] Hardened Runtime capability added (§5) — already on
 - [x] Developer ID signing / team `PW2VT56789` (§5) — already set
 - [ ] App Sandbox turned OFF (§5) — currently ON, must remove
+- [ ] Accessibility granted (§6) — enables raw-key suppression (fails open without it)
