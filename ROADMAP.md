@@ -20,7 +20,8 @@ this file makes it real. The phases:
 | Webcam / camera capture | ❌ **Dropped** (2026-06-14) | No `NSCameraUsageDescription`, no camera entitlement, no `AVCaptureSession`. Permission + "Camera stills" copy removed. |
 | Periodic screenshots | ⏸️ **Deprioritized** | Only if it can be made to cost **zero typing performance** (see below). Unbuilt until then. |
 | Content protection (capture exclusion) | ✅ **Done** | `window.sharingType = .none` in `KioskController` (saved/restored around the lock). |
-| Raw-key suppression (CapsLock / F13–F19 / launcher) | 🔨 **In progress** | `ExamKeyGuard` (CGEventTap). Needs the Accessibility TCC grant; degrades gracefully if denied. |
+| Raw-key suppression (launchers / screenshots / Spaces) | ✅ **Done** (device-tested) | `ExamKeyGuard` (CGEventTap) blocks ⌘Space / ⌥Space launchers, ⌘⇧ screenshots, ⌃-arrow Mission Control, ⌘Tab, F13–F19. Needs the Accessibility grant; fails open if denied. |
+| Request Accessibility on the checks screen | ⬜ **Next** | Without the grant `ExamKeyGuard` is a no-op. The pre-exam checks should prompt/verify it (required vs best-effort — TBD). |
 | `allowCapture` admin escape hatch | ⬜ Backlog | Let an admin test-driving the app bypass content-protection to screenshot for a bug report. Minor. |
 | Locked-browser chrome (back/forward/reload) | ⬜ Backlog | UX polish. |
 | Editor list renumbering on edit | ⬜ Backlog | Editor polish (`RichTextEditor`). |
@@ -51,24 +52,30 @@ it isn't doing. Flip it true only when screenshots actually run.
 
 ---
 
-## Raw-key suppression (the main remaining hardening)
+## Raw-key suppression — done
 
 `NSApp.presentationOptions` already disables Cmd-Tab / Cmd-Q / Force-Quit / the
-Apple menu, but it does **not** swallow CapsLock, F13–F19, or third-party launcher
-rebinds. The native route is a `CGEventTap` at `.cgSessionEventTap`.
+Apple menu, but not the escape / launcher / capture hotkeys a student could cheat
+with. `ExamKeyGuard` (a `CGEventTap` at `.cgSessionEventTap`, wired into the kiosk
+lock) closes that gap — each rule gated on a modifier so plain typing is never
+touched:
 
-Shipped as `ExamKeyGuard` (see PR), designed to be safe by construction:
-- **Allowlist only.** It suppresses a fixed set of non-character keys
-  (CapsLock + F13–F19). It never touches normal typing — a bug can't eat letters.
-- **Fail-open.** If the process isn't trusted for Accessibility (`AXIsProcessTrusted()`
-  is false) or `CGEvent.tapCreate` returns nil, the guard installs nothing and the
-  kiosk lock degrades gracefully (exactly as the `KioskController` TODO asks).
-- **Scoped to the exam.** Started in `enterKiosk`, torn down in `exitKiosk`.
-- **Self-healing.** Re-enables itself if the system disables the tap (timeout).
+- **⌘Space / ⌥Space** — Spotlight, Raycast, Alfred, the ChatGPT app, Siri
+- **⌘⇧3/4/5/6** — screenshots / screen recording
+- **⌃↑ ↓ ← →** — Mission Control / Spaces / App Exposé
+- **⌘Tab** and **F13–F19** (launcher rebinds)
 
-**Before merge it needs on-device testing:** grant Accessibility in System
-Settings → Privacy & Security → Accessibility, then confirm CapsLock/F-keys are
-inert during an exam and that normal typing + submit are completely unaffected.
+(CapsLock is intentionally *not* handled — macOS toggles it below the session tap,
+so it can't be suppressed this way, and it isn't a cheat vector.)
+
+Safe by construction: every rule in `shouldSuppress(keyCode:flags:)` needs a
+modifier, so plain space / arrows / digits always pass; it **fails open** if the
+app isn't trusted for Accessibility; and it's exam-scoped + self-healing.
+Device-tested via the dev harness (`WEFT_SCREEN=keyguard`).
+
+**Remaining to make it live:** the guard is a no-op without the Accessibility TCC
+grant, and the real exam flow doesn't request it yet. Wire a check/prompt into the
+pre-exam `StudentChecksView` (required vs best-effort is a product call).
 
 ---
 
