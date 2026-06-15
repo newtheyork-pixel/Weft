@@ -92,13 +92,18 @@ Sandbox would you need `com.apple.security.network.client`.)
 
 ---
 
-## 6. (Later wave) Accessibility — raw key suppression
+## 6. Accessibility — raw key suppression
 
-`KioskController`'s TODO for swallowing CapsLock / F13–F19 / launcher rebinds needs a
-`CGEventTap` at `.cgSessionEventTap`, which requires the **Accessibility** TCC grant
-(System Settings → Privacy & Security → Accessibility). Like Screen Recording, this is a
-runtime grant keyed to the signature, so it also depends on §5. Nothing to add in Xcode
-beyond signing; the tap itself isn't implemented yet.
+`ExamKeyGuard` (wired into `KioskController`) swallows the escape / launcher / capture
+hotkeys during the exam — ⌘Space / ⌥Space launchers (Spotlight, Raycast, Alfred, ChatGPT,
+Siri), ⌘⇧3/4/5/6 screenshots, ⌃-arrow Mission Control / Spaces, ⌘Tab, and F13–F19 — via a
+`CGEventTap` at `.cgSessionEventTap`. That tap requires the **Accessibility** TCC
+grant (System Settings → Privacy & Security → Accessibility) — a runtime grant keyed to the
+signature, so it depends on §5. Nothing to add in Xcode beyond signing.
+
+Until the grant is given the guard **fails open**: the kiosk lock still runs, raw keys just
+aren't suppressed. To enable it: grant Accessibility, then confirm during an exam that
+⌘Space / screenshots / Mission Control are inert and that normal typing (incl. the plain spacebar) + submit are completely unaffected.
 
 ---
 
@@ -112,3 +117,4 @@ beyond signing; the tap itself isn't implemented yet.
 - [x] Hardened Runtime capability added (§5) — already on
 - [x] Developer ID signing / team `PW2VT56789` (§5) — already set
 - [ ] App Sandbox turned OFF (§5) — currently ON, must remove
+- [ ] Accessibility granted (§6) — enables raw-key suppression (fails open without it)
