@@ -926,7 +926,13 @@ final class SupabaseManager: @unchecked Sendable {
             URLQueryItem(name: "provider", value: "google"),
             URLQueryItem(name: "redirect_to", value: SupabaseConfig.browserRedirectURL),
             URLQueryItem(name: "code_challenge", value: challenge),
-            URLQueryItem(name: "code_challenge_method", value: "S256")
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            // Force Google's account chooser. Without this, Google silently reuses
+            // the browser's existing session, so a wrong / shared account can never
+            // be switched — you click "Sign in" and it just logs in the last one.
+            // GoTrue forwards `prompt` to Google; select_account shows the picker
+            // (and "Use another account") while still allowing one-click SSO.
+            URLQueryItem(name: "prompt", value: "select_account")
         ]
         let authorizeURL = comps.url!
 
