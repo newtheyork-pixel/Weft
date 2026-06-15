@@ -100,14 +100,16 @@ Sandbox would you need `com.apple.security.network.client`.)
 
 ## 6. Accessibility — raw key suppression
 
-`ExamKeyGuard` (wired into `KioskController`) swallows CapsLock / F13–F19 during the exam
-via a `CGEventTap` at `.cgSessionEventTap`. That tap requires the **Accessibility** TCC
+`ExamKeyGuard` (wired into `KioskController`) swallows the escape / launcher / capture
+hotkeys during the exam — ⌘Space / ⌥Space launchers (Spotlight, Raycast, Alfred, ChatGPT,
+Siri), ⌘⇧3/4/5/6 screenshots, ⌃-arrow Mission Control / Spaces, ⌘Tab, and F13–F19 — via a
+`CGEventTap` at `.cgSessionEventTap`. That tap requires the **Accessibility** TCC
 grant (System Settings → Privacy & Security → Accessibility) — a runtime grant keyed to the
 signature, so it depends on §5. Nothing to add in Xcode beyond signing.
 
 Until the grant is given the guard **fails open**: the kiosk lock still runs, raw keys just
 aren't suppressed. To enable it: grant Accessibility, then confirm during an exam that
-CapsLock / F-keys are inert and that normal typing + submit are completely unaffected.
+⌘Space / screenshots / Mission Control are inert and that normal typing (incl. the plain spacebar) + submit are completely unaffected.
 
 ---
 

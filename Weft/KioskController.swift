@@ -26,7 +26,7 @@
 //  set, AppKit itself swallows Cmd+Tab, Cmd+Q, the Apple menu, Force-Quit, and
 //  the Dock — the things the Electron globalShortcut list was reaching for. We
 //  do not need a separate accelerator table for those; we DO still want an
-//  event tap later for raw CapsLock / F13-F19 / launcher rebinds (see TODO).
+//  event tap for the launcher / screenshot / Mission-Control hotkeys (ExamKeyGuard).
 //
 //  NOTE — the macOS settle / focus quirk the Electron build fought for two
 //  releases (0.2.10 / 0.2.11, the "caret death" saga):
@@ -71,7 +71,8 @@ final class KioskController {
     /// protection TODO below).
     private var savedSharingType: NSWindow.SharingType = .readOnly
 
-    /// Raw-key suppression (CapsLock / F13-F19) for the exam. Fail-open: a no-op
+    /// Raw-key suppression for the exam — blocks ⌘Space launchers (Spotlight /
+    /// Raycast / ChatGPT), screenshots, and Mission Control. Fail-open: a no-op
     /// unless the app is trusted for Accessibility, so the lock degrades
     /// gracefully when the grant is missing.
     private let keyGuard = ExamKeyGuard()
@@ -179,8 +180,8 @@ final class KioskController {
         if freshLock { savedSharingType = window.sharingType }
         window.sharingType = .none
 
-        // Swallow raw keys (CapsLock / F13-F19) that presentationOptions can't.
-        // Fail-open: does nothing unless trusted for Accessibility.
+        // Swallow the launcher / screenshot / Mission-Control hotkeys that
+        // presentationOptions can't. Fail-open: no-op unless trusted for Accessibility.
         keyGuard.start()
 
         // Take the window full-screen. toggleFullScreen drives the native
@@ -396,11 +397,12 @@ final class KioskController {
 // MARK: - TODO (future hardening, needs entitlements / signing)
 //
 //  - Raw key suppression: DONE — ExamKeyGuard (a CGEventTap at .cgSessionEventTap)
-//    swallows CapsLock / F13-F19 during the exam, started/stopped with the lock.
-//    It fails open (a no-op) until the app is trusted for Accessibility (System
-//    Settings > Privacy & Security > Accessibility), so the lock degrades
-//    gracefully when the grant is denied. Launcher-rebind keys beyond F13-F19 can
-//    be added to ExamKeyGuard.blockedKeyCodes if a school needs them.
+//    swallows the escape / launcher / capture hotkeys presentationOptions can't:
+//    ⌘Space / ⌥Space launchers (Spotlight, Raycast, Alfred, ChatGPT, Siri),
+//    ⌘⇧3/4/5/6 screenshots, ⌃-arrow Mission Control / Spaces, ⌘Tab, and F13-F19.
+//    Started/stopped with the lock; fails open until the app is trusted for
+//    Accessibility (System Settings > Privacy & Security > Accessibility). Extend
+//    the rules in ExamKeyGuard.shouldSuppress(keyCode:flags:) if needed.
 //
 //  - Content protection durability: window.sharingType = .none only reliably
 //    excludes the window from capture under a hardened-runtime signed build

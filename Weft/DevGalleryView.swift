@@ -144,7 +144,7 @@ struct KeyGuardTesterView: View {
                     trusted = ExamKeyGuard.isTrusted
                 }
                 .buttonStyle(.borderedProminent)
-                Text(running ? "ACTIVE — CapsLock / F13–F19 should be inert"
+                Text(running ? "ACTIVE — ⌘Space / screenshots / Mission Control should be inert"
                              : "Stopped")
                     .foregroundStyle(running ? .green : .secondary)
             }
@@ -157,11 +157,12 @@ struct KeyGuardTesterView: View {
                 .lineLimit(3, reservesSpace: true)
 
             Text("""
-            With the guard ACTIVE, check:
-            • CapsLock does NOT toggle (LED off, no uppercase lock).
-            • F13–F19 do nothing.
-            • Letters / numbers / punctuation / arrows / ⌫ / ⏎ all type normally.
-            • Stop the guard → CapsLock works again.
+            With the guard ACTIVE, each of these should do NOTHING:
+            • ⌘Space / ⌥Space — Spotlight / Raycast / ChatGPT don't open.
+            • ⌘⇧4 / ⌘⇧5 — no screenshot crosshair or toolbar.
+            • ⌃↑ / ⌃→ — Mission Control / space-switch don't fire.
+            And typing stays normal: letters, numbers, the plain spacebar,
+            arrows, ⌫, ⏎ all work in the box above. Stop guard → all restored.
             """)
             .font(.callout).foregroundStyle(.secondary)
             Spacer()

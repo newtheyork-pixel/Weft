@@ -3,16 +3,21 @@
 //  Weft — raw-key suppression for the locked exam.
 //
 //  NSApp.presentationOptions (set in KioskController) already disables Cmd-Tab,
-//  Cmd-Q, Force-Quit, and the Apple menu, but it does NOT swallow CapsLock, the
-//  F13-F19 keys, or third-party launcher rebinds. The native route is a
-//  CGEventTap at the session level. This is the "separate component that degrades
-//  gracefully" the KioskController TODO asks for.
+//  Cmd-Q, Force-Quit, and the Apple menu, but it does NOT stop the escape /
+//  launcher / capture hotkeys a student could cheat with: Spotlight & launchers
+//  (⌘Space / ⌥Space → Spotlight, Raycast, Alfred, the ChatGPT app, Siri),
+//  screenshots (⌘⇧3/4/5/6), and Mission Control / Spaces (⌃↑↓←→). The native
+//  route is a CGEventTap at the session level — the "separate component that
+//  degrades gracefully" the KioskController TODO asks for.
+//
+//  (CapsLock is intentionally NOT handled: macOS toggles it below the session
+//  tap, so a tap can't suppress it — and it isn't a cheating vector anyway.)
 //
 //  Safe by construction — three guarantees that matter for a live exam app:
-//    1. ALLOWLIST ONLY. It drops a FIXED set of non-character keycodes
-//       (CapsLock + F13-F19) and passes every other event through untouched. A
-//       bug cannot eat a student's typing, because letters/digits/punctuation
-//       are never in the set.
+//    1. NEVER EATS TYPING. Every rule in shouldSuppress(keyCode:flags:) requires
+//       a modifier (or is a bare F13-F19 key never used for writing), so plain
+//       space, arrows, digits, and punctuation always pass through. A bug cannot
+//       swallow a student's essay.
 //    2. FAIL-OPEN. If the app isn't trusted for Accessibility, or tapCreate
 //       returns nil, nothing is installed and the kiosk lock simply runs without
 //       raw-key suppression. No grant → no behavior change.
@@ -28,10 +33,30 @@ import ApplicationServices
 
 @MainActor
 final class ExamKeyGuard {
-    /// Virtual keycodes dropped while an exam is locked: CapsLock + F13-F19.
-    /// Deliberately NOT any character or navigation key, so typing is untouched.
-    /// (kVK_CapsLock = 57; kVK_F13…F19 = 105,107,113,106,64,79,80.)
-    nonisolated static let blockedKeyCodes: Set<Int64> = [57, 105, 107, 113, 106, 64, 79, 80]
+    /// Whether to drop this key event during a locked exam. Every rule requires a
+    /// MODIFIER (or is a bare function key never used for writing), so plain text —
+    /// space, arrows, digits, punctuation — always passes through untouched.
+    /// kVK codes: Space 49, Tab 48, ←123 →124 ↓125 ↑126, 3=20 4=21 6=22 5=23,
+    /// F13–F19 = 105,107,113,106,64,79,80.
+    nonisolated static func shouldSuppress(keyCode: Int64, flags: CGEventFlags) -> Bool {
+        let cmd = flags.contains(.maskCommand)
+        let opt = flags.contains(.maskAlternate)
+        let ctrl = flags.contains(.maskControl)
+        let shift = flags.contains(.maskShift)
+        switch keyCode {
+        // Spotlight / Raycast / Alfred / ChatGPT (⌥Space) / Siri — Space + any modifier.
+        case 49:                              return cmd || opt || ctrl
+        // Screenshots & screen recording — ⌘⇧3 / ⌘⇧4 / ⌘⇧5 / ⌘⇧6.
+        case 20, 21, 22, 23:                  return cmd && shift
+        // Mission Control / Spaces / App Exposé via keyboard — ⌃↑ ⌃↓ ⌃← ⌃→.
+        case 123, 124, 125, 126:              return ctrl
+        // App switcher — ⌘Tab (also covered by presentationOptions; belt + braces).
+        case 48:                              return cmd
+        // Third-party launcher rebinds on F13–F19 (bare keys, never used to type).
+        case 105, 107, 113, 106, 64, 79, 80:  return true
+        default:                              return false
+        }
+    }
 
     /// The single active tap. The C callback (which can't capture context) reaches
     /// it through this static to re-enable on a system-disable. Only ever touched
@@ -74,8 +99,8 @@ final class ExamKeyGuard {
                 return Unmanaged.passUnretained(event)
             }
             let code = event.getIntegerValueField(.keyboardEventKeycode)
-            if ExamKeyGuard.blockedKeyCodes.contains(code) {
-                return nil   // drop CapsLock / F13-F19
+            if ExamKeyGuard.shouldSuppress(keyCode: code, flags: event.flags) {
+                return nil   // drop the escape / launcher / capture hotkey
             }
             return Unmanaged.passUnretained(event)
         }
