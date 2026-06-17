@@ -30,9 +30,12 @@ the security-load-bearing work lives in this native code path — it is mandator
   `weft-pubkey-v1`); `WrappedPrivateKey.swift` (PBKDF2-600k passphrase wrap/open); `PinStore.swift`
   (TOFU protocol + in-memory impl). The JS twin `packages/weft-crypto-js/` is complete (28/28 green)
   and interop is verified both directions — envelope, wrapped-privkey, AND roster signature — via
-  `spikes/e2ee-interop/run.sh` plus the package interop tests. **Still missing for Stage 1+ (see
-  §8):** a Keychain-backed `PinStore`, the compiled-in `WeftEscrowAllowlist`, framed AEAD for large
-  blobs, and the per-(device,session) nonce counter.
+  `spikes/e2ee-interop/run.sh` plus the package interop tests. Stage-1 trust anchors are also done:
+  `KeychainPinStore.swift` (`KeychainTofuPinStore`, fail-closed), `EscrowAllowlist.swift`
+  (`WeftEscrowAllowlist`, empty in v1), and `SecureEnclaveStore.swift` (`WeftDeviceKeyStore` —
+  Secure Enclave + biometric daily-unlock cache; the Apple-style mirror §1 calls for). **Still
+  missing for Stage 1+ (see §8):** framed AEAD for large blobs and the per-(device,session) nonce
+  counter.
 - The migration is **reviewable, not applied**, and depends on a provisioned `escrow_custodian_uid()`
   and an HSM-published escrow key (substrate doc "pre-apply checklist"). The native bootstrap below
   is one of the three pre-apply gates.
@@ -293,9 +296,13 @@ indicative; lift bodies from `spikes/e2ee-interop/envelope.swift`):
   PBKDF2(600000)→AES-GCM(`userKeyAAD`); emits/consumes the `{v,kdf,iters,salt,nonce,ct}` JSON.
 - `WeftRoster.sign(...) / verify(...)` — the canonical-payload ECDSA over SHA-256 (signing self,
   identity by signing).
-- `WeftPinStore` (Keychain-backed) — `pin(owner:signingKid:) / verify(owner:presentedKid:) throws pinMismatch`.
-- `WeftEscrowAllowlist.contains(kid:) -> Bool` — compiled-in.
-- Framed AEAD for large blobs (outline/proctoring) and the per-(device,session) nonce counter helper.
+- ✅ `KeychainTofuPinStore` / `InMemoryTofuPinStore` — `verifyThrowing(ownerUserId:presentedSigningKid:)` (TOFU; fail-closed Keychain conformance).
+- ✅ `WeftEscrowAllowlist.contains(_:) -> Bool` — compiled-in (empty in v1).
+- ✅ `WeftDeviceKeyStore` — Secure Enclave + biometric (`.biometryCurrentSet`) device-key cache:
+  `enroll(_:)` (after passphrase unlock), `unlock()` (Touch ID, no passphrase), `reset() throws`.
+  ECIES-wraps the identity to a non-extractable SE key; AAD binds the account. Passphrase stays the
+  cross-device recovery anchor.
+- ⬜ Framed AEAD for large blobs (outline/proctoring) and the per-(device,session) nonce counter helper.
 
 Each must be byte-identical to `weft-crypto-js` (extend `spikes/e2ee-interop/run.sh` to cover every
 item type + the privkey-bundle round-trip), since native and portal both read every blob.
