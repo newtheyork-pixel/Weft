@@ -4,7 +4,8 @@
 // Keyed owner_user_id -> first-seen signing kid. verify(pin) hard-fails on a change (Signal-style
 // "safety number changed" alert), so a swapped roster row is caught client-side.
 //
-// This file defines the PROTOCOL + an in-memory test impl. A real Keychain-backed impl is a TODO.
+// This file defines the PROTOCOL + an in-memory test impl. The production
+// Keychain-backed impl lives in KeychainPinStore.swift (KeychainTofuPinStore).
 import Foundation
 
 /// A first-seen signing-key pin for an owner.
@@ -56,7 +57,7 @@ extension TofuPinStore {
 }
 
 /// In-memory pin store for tests. Thread-safe via a serial queue.
-/// TODO: ship a KeychainTofuPinStore (kSecClassGenericPassword, per-owner item) for production.
+/// Production uses KeychainTofuPinStore (KeychainPinStore.swift).
 public final class InMemoryTofuPinStore: TofuPinStore {
     private var pins: [String: String] = [:]
     private let queue = DispatchQueue(label: "weft.tofu.pinstore")
