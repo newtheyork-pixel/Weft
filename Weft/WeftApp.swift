@@ -95,6 +95,7 @@ struct RootView: View {
             }
         }
         .animation(.smooth(duration: 0.28), value: app.route)
+        .e2eePassphraseSheet(app)
     }
 }
 

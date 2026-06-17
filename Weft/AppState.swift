@@ -11,6 +11,9 @@ import Observation
 #if canImport(AppKit)
 import AppKit
 #endif
+#if canImport(WeftCrypto)
+import WeftCrypto
+#endif
 
 @MainActor
 @Observable
@@ -33,6 +36,16 @@ final class AppState {
     var userId: String = ""
     var isAdmin: Bool = false
     var signedIn: Bool = false
+
+    #if canImport(WeftCrypto)
+    // MARK: E2EE (Stage 1 — key bootstrap; dormant while E2EEMode.current == .off)
+    /// The user's unwrapped identity, loaded once at sign-in. In memory only.
+    var e2eeIdentity: UserIdentity?
+    /// A pending passphrase prompt the root view presents as a sheet.
+    var e2eePassphraseRequest: E2EEPassphraseRequest?
+    /// Non-blocking: set if key bootstrap failed (sign-in still proceeds in Stage 1).
+    var e2eeBootstrapError: String?
+    #endif
 
     /// Render the bundled mock samples until a real session loads. Flipped false
     /// after a successful sign-in + first load so the screens show live data.
@@ -339,6 +352,12 @@ final class AppState {
             signedIn = true
             useMockData = false
             dropMockData()
+
+            #if canImport(WeftCrypto)
+            // E2EE Stage 1: bootstrap the user's keys (no-op while
+            // E2EEMode.current == .off, so shipped sign-in is unaffected).
+            await ensureKeysBootstrapped(userId: userId)
+            #endif
 
             // Route by the school's Teachers sheet: on the list => teacher,
             // everyone else => student (automatically).
