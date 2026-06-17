@@ -1,0 +1,4 @@
+# test artifacts — do NOT commit (these include a throwaway private key)
+recipient.priv.jwk
+recipient.pub.jwk
+env_*.json

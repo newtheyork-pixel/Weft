@@ -1,5 +1,9 @@
 .build/
 build*/
 
+# Xcode per-user state — never commit.
+xcuserdata/
+*.xcuserstate
+
 # Release signing secrets — never commit.
 scripts/.env.signing

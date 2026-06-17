@@ -1,0 +1,24 @@
+{
+  "name": "weft-crypto-js",
+  "version": "0.1.0",
+  "description": "Weft E2EE crypto core (P256-HKDF-SHA256-AES256GCM). Zero-dep ESM, Web Crypto only. Mirrors the Swift WeftCrypto core so blobs/keys round-trip cross-platform.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./src/index.mjs",
+    "./envelope": "./src/envelope.mjs",
+    "./keys": "./src/keys.mjs",
+    "./wrappedKey": "./src/wrappedKey.mjs",
+    "./roster": "./src/roster.mjs",
+    "./pinstore": "./src/pinstore.mjs",
+    "./util": "./src/util.mjs"
+  },
+  "scripts": {
+    "test": "node --test 'test/*.test.mjs'",
+    "test:interop": "node --test test/interop.test.mjs"
+  }
+}
