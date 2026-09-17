@@ -1,26 +1,66 @@
 //
 //  PDFKitView.swift
-//  Weft — a real PDF viewer for the exam reference panel (PDFKit). The Electron
-//  build only ever showed file *names*; this renders the actual document.
+//  Weft — the render surfaces for the exam reference panel: a real PDF viewer
+//  (PDFKit), a read-only text viewer for Word / RTF / plain-text references
+//  (AppKit's document importers), and the loader that turns a stored file into
+//  one of them. The Electron build only ever showed file *names*; this renders
+//  the actual document.
 //
-//  Two sources: a remote URL (the private `essay-files` bucket, reached with a
-//  signed URL + the student's token — see SupabaseManager.signedURL) or an
-//  in-memory PDFDocument (the code-generated sample used by the dev gallery so
-//  the viewer is visible without a live session).
+//  Every surface is created ONCE per file and retained by ReferenceTabStore,
+//  then hosted through `RetainedViewHost`. That is what makes page, scroll and
+//  zoom survive hiding and re-showing the panel (⌘⇧R) without reloading.
+//
+//  Bytes come from the private `essay-files` / `outlines` buckets, reached with
+//  a signed URL (see SupabaseManager.signedURL), or from the code-generated
+//  sample document used by the dev gallery so the viewer is visible without a
+//  live session.
 //
 
 import SwiftUI
 import PDFKit
 import AppKit
 
-/// SwiftUI wrapper around PDFKit's `PDFView`. Native scrolling, selection,
-/// search, and page shadows — the genuine macOS PDF experience.
-struct PDFKitView: NSViewRepresentable {
-    let document: PDFDocument?
-    /// 0-based page to scroll to (e.g. a search hit). nil leaves the position.
-    var scrollToPage: Int? = nil
+// MARK: - Hosting a long-lived AppKit view
 
-    func makeNSView(context: Context) -> PDFView {
+/// Hosts an AppKit view that something else owns (the reference store), rather
+/// than creating one per mount. SwiftUI may build and tear down the host many
+/// times; the document, its page and its scroll position live in the retained
+/// view, so nothing is lost or re-fetched.
+struct RetainedViewHost: NSViewRepresentable {
+    let view: NSView
+
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        install(in: container)
+        return container
+    }
+
+    func updateNSView(_ container: NSView, context: Context) {
+        // Re-parent only when this container isn't already the view's home
+        // (e.g. the panel was hidden and shown again, or the same material
+        // moved between the split's two panes).
+        if view.superview !== container { install(in: container) }
+    }
+
+    private func install(in container: NSView) {
+        view.removeFromSuperview()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            view.topAnchor.constraint(equalTo: container.topAnchor),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+    }
+}
+
+// MARK: - The render surfaces
+
+enum ReferenceViews {
+
+    /// PDFKit viewer: native scrolling, selection, search and page shadows.
+    static func makePDFView(_ document: PDFDocument) -> PDFView {
         let view = PDFView()
         view.autoScales = true
         view.displayMode = .singlePageContinuous
@@ -31,35 +71,120 @@ struct PDFKitView: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ view: PDFView, context: Context) {
-        if view.document !== document {
-            view.document = document
-            view.autoScales = true
-        }
-        if let i = scrollToPage, let page = document?.page(at: i) {
-            view.go(to: page)
-        }
+    /// Read-only scrollable text for a Word / RTF / plain-text reference.
+    static func makeTextView(_ attributed: NSAttributedString) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = true
+        scroll.backgroundColor = NSColor(white: 0.93, alpha: 1)
+
+        let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 420, height: 10))
+        text.isEditable = false
+        text.isSelectable = true
+        text.drawsBackground = true
+        text.backgroundColor = .white
+        text.textContainerInset = NSSize(width: 24, height: 24)
+        text.isVerticallyResizable = true
+        text.isHorizontallyResizable = false
+        text.minSize = NSSize(width: 0, height: 0)
+        text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                              height: CGFloat.greatestFiniteMagnitude)
+        text.autoresizingMask = [.width]
+        text.textContainer?.widthTracksTextView = true
+        text.textStorage?.setAttributedString(attributed)
+        scroll.documentView = text
+        return scroll
     }
 }
 
 // MARK: - Loading
 
-enum PDFLoader {
-    /// Download a PDF over HTTP(S) (optionally with a Bearer token for a signed
-    /// Supabase URL) and build a PDFDocument off the main thread.
-    static func load(from url: URL, bearer: String? = nil) async -> PDFDocument? {
+enum ReferenceDocumentLoader {
+
+    /// Download a reference file and turn it into something the panel can
+    /// render. Never throws, and deliberately separates "this file type cannot
+    /// be shown" (no retry offered, because none could ever succeed) from
+    /// "failed" (a network problem, where Try again is worth having).
+    ///
+    /// On cancellation the download throws and this returns `.failed`; the
+    /// caller checks `Task.isCancelled` and discards the result.
+    @MainActor
+    static func load(file: ExamFile, from url: URL) async -> ReferenceDocument {
+        guard file.renderable != .unsupported else { return .unsupported }
+
         var req = URLRequest(url: url)
-        req.timeoutInterval = 20
-        if let bearer { req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
+        req.timeoutInterval = 30
+        let data: Data
         do {
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (body, response) = try await URLSession.shared.data(for: req)
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                return nil
+                return .failed
             }
-            return PDFDocument(data: data)
+            data = body
         } catch {
-            return nil
+            return .failed
         }
+
+        switch file.renderable {
+        case .pdf:
+            if let doc = PDFDocument(data: data) { return .pdf(doc) }
+            // Bytes that aren't a PDF at all were mislabelled by whoever
+            // uploaded them: a retry downloads the same thing. A truncated
+            // download of a real PDF is worth retrying.
+            return data.starts(with: Array("%PDF".utf8)) ? .failed : .unsupported
+        case .word, .rtf, .plainText:
+            return textDocument(from: data, file: file)
+        case .unsupported:
+            return .unsupported
+        }
+    }
+
+    @MainActor
+    private static func textDocument(from data: Data, file: ExamFile) -> ReferenceDocument {
+        if file.renderable == .plainText {
+            guard let text = String(data: data, encoding: .utf8)
+                    ?? String(data: data, encoding: .isoLatin1)
+            else { return .unsupported }
+            return .text(styled(text))
+        }
+
+        // AppKit's importers read from a file URL, so the bytes go to a temp
+        // file carrying the extension the importer expects, and are removed
+        // again as soon as it has parsed them.
+        let ext: String
+        let type: NSAttributedString.DocumentType
+        switch file.renderable {
+        case .word where file.isOfficeOpenXML: ext = "docx"; type = .officeOpenXML
+        case .word: ext = "doc"; type = .docFormat
+        default: ext = "rtf"; type = .rtf
+        }
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("weft-reference-\(UUID().uuidString).\(ext)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        do {
+            try data.write(to: tmp, options: .atomic)
+            let attributed = try NSAttributedString(url: tmp,
+                                                    options: [.documentType: type],
+                                                    documentAttributes: nil)
+            guard attributed.length > 0 else { return .unsupported }
+            return .text(attributed)
+        } catch {
+            // The importer refused the file: a retry would fail identically,
+            // so this is "cannot be shown", not "couldn't load".
+            return .unsupported
+        }
+    }
+
+    private static func styled(_ text: String) -> NSAttributedString {
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 3
+        return NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.textColor,
+            .paragraphStyle: para,
+        ])
     }
 }
 
