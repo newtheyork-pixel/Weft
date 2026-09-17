@@ -28,7 +28,7 @@
 	<key>SUFeedURL</key>
 	<string>https://raw.githubusercontent.com/newtheyork-pixel/weft-releases/main/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>fiG4V8WKwWAm8avUBbxMvLEwN3/vPQcx5NI3h1oD4fs=</string>
+	<string>zMQrtx7MW95DTrXZN8yaeQyRlBNjwbpfCpX+kyagen4=</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUScheduledCheckInterval</key>
