@@ -860,6 +860,190 @@ final class SupabaseManager: @unchecked Sendable {
         _ = try await perform(req)
     }
 
+    // MARK: - Teacher reference files + the approved-link pool (editor writes)
+
+    /// The real `test_files` rows behind a question's `fileIds`, in the order
+    /// the question stores them. A missing row is simply absent: a question can
+    /// outlive a file the teacher deleted.
+    func listTeacherFiles(ids: [String]) async throws -> [TeacherFile] {
+        guard !ids.isEmpty else { return [] }
+        let found: [TeacherFile] = try await rows("test_files", query: [
+            URLQueryItem(name: "select", value: "id,original_name,mime_type,size_bytes,storage_path"),
+            URLQueryItem(name: "id", value: "in.(\(ids.joined(separator: ",")))"),
+        ])
+        return ids.compactMap { id in found.first { $0.id == id } }
+    }
+
+    /// The `test_urls` rows behind a question's `urlIds`, in the question's own
+    /// order. Tolerant of a NULL display_name (Electron-era rows left it unset),
+    /// which `listTestURLs` / ExamLink would throw on mid-save.
+    func listTeacherLinks(ids: [String]) async throws -> [TeacherLink] {
+        guard !ids.isEmpty else { return [] }
+        let found: [TeacherLink] = try await rows("test_urls", query: [
+            URLQueryItem(name: "select", value: "id,display_name,url"),
+            URLQueryItem(name: "id", value: "in.(\(ids.joined(separator: ",")))"),
+        ])
+        return ids.compactMap { id in found.first { $0.id == id } }
+    }
+
+    /// A collision-free object name inside the teacher's own folder: a UUID
+    /// prefix plus the original name stripped to safe characters (mirrors
+    /// safeEssayFileName in the Electron editor).
+    static func safeReferenceFileName(_ originalName: String) -> String {
+        let base = originalName.split(whereSeparator: { $0 == "/" || $0 == "\\" })
+            .last.map(String.init) ?? "file"
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-")
+        let cleaned = String(base.map { allowed.contains($0) ? $0 : "_" }.prefix(120))
+        return "\(UUID().uuidString.lowercased())-\(cleaned.isEmpty ? "file" : cleaned)"
+    }
+
+    /// Upload reference bytes into the PRIVATE `essay-files` bucket at
+    /// `<teacher user id>/<uuid>-<safe name>`, the shape the bucket's INSERT
+    /// policy requires (foldername[1] = auth.uid()). No `x-upsert`: the UUID
+    /// makes every path new, so an upsert could only overwrite another file.
+    func uploadEssayFile(data: Data, path: String, contentType: String) async throws {
+        let endpoint = SupabaseConfig.url
+            .appendingPathComponent("storage/v1/object/essay-files")
+            .appendingPathComponent(path)
+        var req = URLRequest(url: endpoint)
+        req.httpMethod = "POST"
+        for (k, v) in await headers(contentJSON: false) { req.setValue(v, forHTTPHeaderField: k) }
+        req.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        req.httpBody = data
+        _ = try await perform(req)
+    }
+
+    /// Record an uploaded reference file in `test_files` (the per-teacher pool a
+    /// question's `fileIds` points into). teacher_user_id is sent explicitly:
+    /// the column has no auth.uid() default and the INSERT policy checks it.
+    func createTestFile(userId: String, originalName: String, mimeType: String,
+                        sizeBytes: Int, storagePath: String) async throws -> TeacherFile? {
+        struct Row: Encodable {
+            let teacher_user_id: String; let original_name: String
+            let mime_type: String; let size_bytes: Int; let storage_path: String
+        }
+        let created: [TeacherFile] = try await insert("test_files", values: [
+            Row(teacher_user_id: userId, original_name: originalName, mime_type: mimeType,
+                size_bytes: sizeBytes, storage_path: storagePath)
+        ], returning: true)
+        return created.first
+    }
+
+    /// Delete one `test_files` row, VERIFIED: an RLS-refused DELETE arrives as a
+    /// 2xx with zero rows, never a 403 (the deleteOutline gotcha), so a plain
+    /// delete cannot tell "deleted" from "refused". False = the row survived,
+    /// and its bytes must be left alone.
+    func deleteTestFile(id: String) async throws -> Bool {
+        let deleted: [TeacherFile] = try await deleteReturning("test_files", query: [
+            URLQueryItem(name: "id", value: "eq.\(id)"),
+        ])
+        return !deleted.isEmpty
+    }
+
+    /// Best-effort removal of one reference object from `essay-files`. Failures
+    /// are logged and swallowed: an orphan in a private bucket is unreadable and
+    /// harmless, and cleanup must never fail the edit that caused it.
+    func removeEssayFileObject(path: String) async {
+        do { try await deleteStorageObject(bucket: "essay-files", path: path) }
+        catch { print("essay-files cleanup failed: \(error)") }
+    }
+
+    /// What a re-save should do with a question's approved links: the row ids the
+    /// question should now carry, plus the rows it used to carry and no longer
+    /// does. Saving used to insert a fresh row per link every time, so every
+    /// re-save duplicated the pool and orphaned the previous rows.
+    struct TestURLPlan: Sendable {
+        /// Ids for the links passed in, in the same order (an unchanged URL
+        /// keeps its existing row).
+        var ids: [String] = []
+        /// Rows this question referenced before and no longer does. Safe to
+        /// delete ONLY after the question itself has been written, and only once
+        /// no other version still references them.
+        var orphanIds: [String] = []
+    }
+
+    /// Reconcile a question's approved links against the rows it already owns:
+    /// reuse the row whose URL is unchanged (renaming it in place when the
+    /// display name moved), insert only genuinely new links, and report the
+    /// leftovers. Duplicate URLs in `links` collapse onto a single row.
+    func planTestURLs(userId: String, existingIds: [String],
+                      links: [(name: String, href: String)]) async throws -> TestURLPlan {
+        func key(_ url: String) -> String {
+            url.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        let existing = try await listTeacherLinks(ids: existingIds)
+        var byURL: [String: TeacherLink] = [:]
+        for row in existing where byURL[key(row.url)] == nil { byURL[key(row.url)] = row }
+
+        var plan = TestURLPlan()
+        var reused: Set<String> = []
+        var pending: [(slot: Int, name: String, href: String)] = []
+        var seen: Set<String> = []
+        for link in links {
+            let k = key(link.href)
+            guard !k.isEmpty, !seen.contains(k) else { continue }
+            seen.insert(k)
+            if let row = byURL[k] {
+                reused.insert(row.id)
+                plan.ids.append(row.id)
+                // Keep the name the teacher now sees. A failed rename leaves the
+                // link working under its old name, so it never fails the save.
+                if row.displayName != link.name {
+                    _ = try? await renameTestURL(id: row.id, displayName: link.name)
+                }
+            } else {
+                pending.append((slot: plan.ids.count, name: link.name, href: link.href))
+                plan.ids.append("")   // filled in from the insert below
+            }
+        }
+        if !pending.isEmpty {
+            struct Row: Encodable {
+                let teacher_user_id: String; let display_name: String
+                let url: String; let source: String
+            }
+            let payload = pending.map {
+                Row(teacher_user_id: userId, display_name: $0.name, url: $0.href, source: "custom")
+            }
+            let created: [TeacherLink] = try await insert("test_urls", values: payload, returning: true)
+            // Match the new rows back by URL rather than trusting the response
+            // order, and refuse to write a blank id into a question's urlIds.
+            var newIDs: [String: String] = [:]
+            for row in created where newIDs[key(row.url)] == nil { newIDs[key(row.url)] = row.id }
+            for item in pending {
+                guard let id = newIDs[key(item.href)] else {
+                    throw SupabaseError.decoding("test_urls insert returned no row for \(item.href)")
+                }
+                plan.ids[item.slot] = id
+            }
+        }
+        plan.orphanIds = existing.map(\.id).filter { !reused.contains($0) }
+        return plan
+    }
+
+    /// Rename one `test_urls` row in place, so editing a display name does not
+    /// orphan the row and mint a duplicate.
+    @discardableResult
+    func renameTestURL(id: String, displayName: String) async throws -> Bool {
+        struct Patch: Encodable { let display_name: String }
+        let rows: [TeacherLink] = try await update("test_urls",
+            values: Patch(display_name: displayName),
+            query: [URLQueryItem(name: "id", value: "eq.\(id)")])
+        return !rows.isEmpty
+    }
+
+    /// Best-effort deletion of pool rows no question references any more.
+    /// Called only AFTER the owning question has been written, so a failure
+    /// leaves an unreferenced row behind (harmless) instead of stranding a live
+    /// whitelist.
+    func deleteTestURLs(ids: [String]) async {
+        guard !ids.isEmpty else { return }
+        do {
+            try await delete("test_urls", query: [
+                URLQueryItem(name: "id", value: "in.(\(ids.joined(separator: ",")))"),
+            ])
+        } catch { print("test_urls cleanup failed: \(error)") }
+    }
+
     // MARK: - Code + time helpers
 
     /// 6-digit numeric session join code (mirrors teacher.js generateCode).
@@ -1064,6 +1248,71 @@ struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
         case body
         case visibility
         case createdAt = "created_at"
+    }
+}
+
+// MARK: - Teacher-side attachment DTOs (the assignment editor)
+
+/// One `test_files` row as the assignment editor needs it. Separate from
+/// ExamFile because the editor shows the file's size, which the exam's
+/// projection drops.
+struct TeacherFile: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    var originalName: String
+    var mimeType: String
+    var sizeBytes: Int
+    var storagePath: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case originalName = "original_name"
+        case mimeType = "mime_type"
+        case sizeBytes = "size_bytes"
+        case storagePath = "storage_path"
+    }
+
+    init(id: String, originalName: String, mimeType: String,
+         sizeBytes: Int, storagePath: String) {
+        self.id = id; self.originalName = originalName; self.mimeType = mimeType
+        self.sizeBytes = sizeBytes; self.storagePath = storagePath
+    }
+
+    /// Tolerant decode (house pattern): only the id is load-bearing, and a row
+    /// with an odd mime type or size must still list in the editor.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        originalName = (try? c.decode(String.self, forKey: .originalName)) ?? "Attached file"
+        mimeType = (try? c.decode(String.self, forKey: .mimeType)) ?? "application/octet-stream"
+        sizeBytes = (try? c.decode(Int.self, forKey: .sizeBytes)) ?? 0
+        storagePath = (try? c.decode(String.self, forKey: .storagePath)) ?? ""
+    }
+}
+
+/// One `test_urls` row for the teacher's write paths. Separate from ExamLink
+/// because display_name is NULLABLE in the live schema: ExamLink's strict
+/// decode throws on an Electron-era row that never set one, which would take
+/// the editor's load (and the save's reconcile) down with it.
+struct TeacherLink: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    var displayName: String
+    var url: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case displayName = "display_name"
+        case url
+    }
+
+    init(id: String, displayName: String, url: String) {
+        self.id = id; self.displayName = displayName; self.url = url
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        displayName = (try? c.decode(String.self, forKey: .displayName)) ?? ""
+        url = (try? c.decode(String.self, forKey: .url)) ?? ""
     }
 }
 

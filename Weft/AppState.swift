@@ -843,9 +843,15 @@ final class AppState {
     }
 
     // MARK: - Teacher: assignments
+    /// `fileIds` is the editor's attached-file list (nil = leave the question's
+    /// existing files alone, for callers that don't manage attachments).
+    /// `removedFiles` are files the teacher detached: destroyed only once the
+    /// saved question no longer references them.
     func saveAssignment(title: String, prompt: String, wordLimit: Int?, timeLimitMinutes: Int?,
                         spellcheckEnabled: Bool = true, outlineAllowed: Bool = false,
-                        links: [(name: String, href: String)] = []) async {
+                        links: [(name: String, href: String)] = [],
+                        fileIds: [String]? = nil,
+                        removedFiles: [TeacherFile] = []) async {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, !p.isEmpty else {
@@ -855,13 +861,14 @@ final class AppState {
         errorMessage = nil
         let qid = editingAssignment?.questions.first?.id ?? "q-\(UUID().uuidString.prefix(8))"
         let existingFileIds = editingAssignment?.questions.first?.fileIds ?? []
+        let savedFileIds = fileIds ?? existingFileIds
         if !signedIn {
             // Preview keeps the links on the question so the editor round-trips,
             // but no backend pool ids exist; store the hrefs as the "ids" stand-in.
             // spellcheckEnabled is stored on the local Assignment so ExamView can
             // read it back in preview (no backend session required).
             let q = Question(id: qid, kind: "essay", prompt: p, wordLimit: wordLimit,
-                             fileIds: existingFileIds, urlIds: links.map(\.href))
+                             fileIds: savedFileIds, urlIds: links.map(\.href))
             if let id = editingAssignment?.id, let idx = assignments.firstIndex(where: { $0.id == id }) {
                 assignments[idx] = Assignment(id: id, title: t,
                     versionGroupId: assignments[idx].versionGroupId,
@@ -874,15 +881,21 @@ final class AppState {
                     questions: [q], timeLimitMinutes: timeLimitMinutes,
                     spellcheckEnabled: spellcheckEnabled, outlineAllowed: outlineAllowed))
             }
+            previewRemoveFiles(removedFiles)
             teacherScreen = .home
             return
         }
         do {
-            // Persist the approved links into the test_urls pool, then reference
-            // their ids from the question (there is no test_id FK on test_urls).
-            let urlIds = try await supabase.createTestURLs(userId: userId, links: links)
+            // Reconcile the approved links against the rows this question
+            // already owns instead of inserting a fresh set on every save: that
+            // duplicated the test_urls pool each time and orphaned the rows the
+            // question stopped referencing.
+            let plan = try await supabase.planTestURLs(
+                userId: userId,
+                existingIds: editingAssignment?.questions.first?.urlIds ?? [],
+                links: links)
             let q = Question(id: qid, kind: "essay", prompt: p, wordLimit: wordLimit,
-                             fileIds: existingFileIds, urlIds: urlIds)
+                             fileIds: savedFileIds, urlIds: plan.ids)
             if let id = editingAssignment?.id {
                 try await supabase.updateTest(id: id, title: t, questions: [q],
                                              timeLimitMinutes: timeLimitMinutes,
@@ -895,11 +908,153 @@ final class AppState {
                                                   spellcheckEnabled: spellcheckEnabled,
                                                   outlineAllowed: outlineAllowed)
             }
+            // Refresh FIRST: the cleanup below reads the teacher's live set of
+            // questions to decide what nothing references any more.
             await loadTeacherHome()
+            await cleanUpUnreferencedAttachments(urlIds: plan.orphanIds, files: removedFiles)
             teacherScreen = .home
         } catch {
             errorMessage = describe(error)
         }
+    }
+
+    // MARK: - Teacher: assignment attachments (the editor's files + links)
+
+    /// 50 MB cap on one reference file, matching the Electron editor's
+    /// uploadEssayFile (teachers attach passages and scans, not media).
+    static let referenceFileMaxBytes = 50 * 1024 * 1024
+
+    /// Reference files picked in the signed-out preview, so the dev gallery's
+    /// editor round-trips a real pick without a backend.
+    var previewFiles: [String: TeacherFile] = [:]
+
+    /// An existing assignment's saved attachments, as the editor needs them.
+    /// nil means the load FAILED, as distinct from "this assignment has none":
+    /// the editor keeps Save disabled on nil rather than writing an empty allow
+    /// list over a whitelist it never managed to read.
+    func editorAttachments(for assignment: Assignment?) async -> EditorAttachments? {
+        guard let q = assignment?.questions.first else { return EditorAttachments() }
+        if !signedIn {
+            // Preview stores the hrefs themselves as the "ids" (see saveAssignment).
+            return EditorAttachments(links: q.urlIds.map { (name: $0, href: $0) },
+                                     files: q.fileIds.compactMap { previewFiles[$0] })
+        }
+        do {
+            let links = try await supabase.listTeacherLinks(ids: q.urlIds)
+            let files = try await supabase.listTeacherFiles(ids: q.fileIds)
+            return EditorAttachments(
+                links: links.map { (name: $0.displayName.isEmpty ? $0.url : $0.displayName,
+                                    href: $0.url) },
+                files: files)
+        } catch {
+            return nil
+        }
+    }
+
+    /// Upload one reference file into the private `essay-files` bucket and
+    /// record it in `test_files`, returning the new row for the editor to list.
+    /// The bytes go up FIRST: the row is what the exam reads, so it must never
+    /// exist before the bytes do (the uploadOutline ordering). A row insert that
+    /// fails takes the just-uploaded object back out. nil = nothing was
+    /// attached, with the reason in errorMessage.
+    func attachReferenceFile(fileURL: URL, contentType: String) async -> TeacherFile? {
+        errorMessage = nil
+        let name = fileURL.lastPathComponent
+        // The picker's URL is security-scoped; harmless when not sandboxed.
+        let scoped = fileURL.startAccessingSecurityScopedResource()
+        defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
+        let data: Data
+        do { data = try Data(contentsOf: fileURL) }
+        catch {
+            errorMessage = "Couldn't read \(name). \(describe(error))"
+            return nil
+        }
+        guard !data.isEmpty else {
+            errorMessage = "\(name) is empty, so there is nothing for students to read."
+            return nil
+        }
+        guard data.count <= Self.referenceFileMaxBytes else {
+            errorMessage = "Reference files can be up to 50 MB. \(name) is larger than that."
+            return nil
+        }
+        if !signedIn {
+            let local = TeacherFile(id: "local-\(UUID().uuidString.prefix(6))",
+                                    originalName: name, mimeType: contentType,
+                                    sizeBytes: data.count, storagePath: "")
+            previewFiles[local.id] = local
+            return local
+        }
+        let path = "\(userId)/\(SupabaseManager.safeReferenceFileName(name))"
+        do {
+            try await supabase.uploadEssayFile(data: data, path: path, contentType: contentType)
+        } catch {
+            errorMessage = "Couldn't upload \(name). \(describe(error))"
+            return nil
+        }
+        do {
+            guard let row = try await supabase.createTestFile(
+                userId: userId, originalName: name, mimeType: contentType,
+                sizeBytes: data.count, storagePath: path) else {
+                // Uploaded but unrecorded: nothing can ever reference those
+                // bytes, so take them back out (the Electron editor's cleanup).
+                await supabase.removeEssayFileObject(path: path)
+                errorMessage = "Couldn't record \(name). Try attaching it again."
+                return nil
+            }
+            return row
+        } catch {
+            await supabase.removeEssayFileObject(path: path)
+            errorMessage = "Couldn't record \(name). \(describe(error))"
+            return nil
+        }
+    }
+
+    /// Cancelling an editor sitting: destroy the reference files it uploaded
+    /// that no saved assignment references. Attaching uploads immediately (the
+    /// bytes must exist before the row), so without this a cancelled edit would
+    /// leave unreachable objects in the bucket forever.
+    func discardUnsavedAttachments(_ files: [TeacherFile]) async {
+        guard !files.isEmpty else { return }
+        await cleanUpUnreferencedAttachments(urlIds: [], files: files)
+    }
+
+    /// Delete pool rows nothing references any more. `assignments` must already
+    /// be current (loadTeacherHome) so the just-saved question counts. Anything
+    /// still referenced by ANY version survives: createDraftTest copies its
+    /// parent's fileIds and urlIds, so a blind cleanup here would strip the
+    /// other draft's reference files and website whitelist.
+    private func cleanUpUnreferencedAttachments(urlIds: [String], files: [TeacherFile]) async {
+        var referencedLinks: Set<String> = []
+        var referencedFiles: Set<String> = []
+        for a in assignments {
+            for q in a.questions {
+                referencedLinks.formUnion(q.urlIds)
+                referencedFiles.formUnion(q.fileIds)
+            }
+        }
+        let staleFiles = files.filter { !referencedFiles.contains($0.id) }
+        if signedIn {
+            await supabase.deleteTestURLs(ids: urlIds.filter { !referencedLinks.contains($0) })
+            for file in staleFiles where !file.id.hasPrefix("local-") {
+                do {
+                    // A refused row delete leaves the bytes alone: the row is
+                    // what a question resolves, so bytes must never outlive it
+                    // the other way round (the deleteOutline ordering).
+                    if try await supabase.deleteTestFile(id: file.id), !file.storagePath.isEmpty {
+                        await supabase.removeEssayFileObject(path: file.storagePath)
+                    }
+                } catch {
+                    print("reference file delete failed: \(error)")
+                }
+            }
+        } else {
+            previewRemoveFiles(staleFiles)
+        }
+    }
+
+    /// Preview-only: forget locally attached files (no backend rows exist).
+    private func previewRemoveFiles(_ files: [TeacherFile]) {
+        for f in files { previewFiles[f.id] = nil }
     }
 
     /// Load the saved approved links for an assignment being edited, so the
@@ -1531,4 +1686,15 @@ final class AppState {
     private func describe(_ error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
+}
+
+// MARK: - Editor attachment payload
+
+/// An existing assignment's saved attachments, loaded in one hop so the
+/// assignment editor never has to guess at a half-loaded state: an empty
+/// `EditorAttachments` means the assignment genuinely has none, while a nil
+/// load result means the fetch failed.
+struct EditorAttachments: Sendable {
+    var links: [(name: String, href: String)] = []
+    var files: [TeacherFile] = []
 }

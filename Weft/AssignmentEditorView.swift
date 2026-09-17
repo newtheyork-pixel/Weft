@@ -8,25 +8,23 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
-// MARK: - Mock data models for the editor
+// MARK: - Editor row models
 
-/// A reference file a teacher attaches to the prompt (students can open it).
-private struct EditorFile: Identifiable, Hashable {
-    let id = UUID()
-    var name: String
-    var size: String
-}
+/// One editing sitting, as a reference: a file whose upload lands after the
+/// teacher cancelled has to be taken back out, and a View struct copy captured
+/// by that upload's task cannot see the cancellation.
+@MainActor private final class EditorSitting { var cancelled = false }
 
-/// A website students are allowed to open during the essay.
+/// A website students are allowed to open during the essay. There is no
+/// per-link scope: `test_urls` has no scope column in the live schema and the
+/// locked browser matches on host alone, so every approved link means the whole
+/// site and the editor says so rather than offering a choice it cannot keep.
 private struct EditorLink: Identifiable, Hashable {
     let id = UUID()
     var name: String
     var href: String
-    var scope: Scope = .domain
-    enum Scope: String, CaseIterable { case domain, exact
-        var label: String { self == .domain ? "Entire site" : "This page only" }
-    }
 }
 
 /// The three light starting templates a new assignment can begin from.
@@ -213,8 +211,24 @@ struct AssignmentEditorView: View {
     /// Primed from the existing assignment in prime() so editing round-trips
     /// the value faithfully.
     @State private var outlineAllowed: Bool = false
-    @State private var files: [EditorFile] = []
+    /// The real `test_files` rows attached to this assignment's question.
+    @State private var files: [TeacherFile] = []
     @State private var links: [EditorLink] = []
+
+    // Attachment load + upload state. `attachmentsLoaded` gates Save: saving
+    // while the saved files/links are still in flight used to overwrite the
+    // question with an empty allow list (and drop its files).
+    @State private var attachmentsLoaded: Bool = false
+    @State private var attachmentsFailed: Bool = false
+    @State private var fileImporterShown: Bool = false
+    @State private var uploadingName: String?
+    /// Files detached in this sitting: destroyed only once a save lands, so
+    /// cancelling leaves every stored byte where it was.
+    @State private var removedFiles: [TeacherFile] = []
+    /// Files uploaded in this sitting, by id. Cancelling deletes the ones no
+    /// saved assignment references (the upload happens at pick time).
+    @State private var uploadedThisSitting: [String: TeacherFile] = [:]
+    @State private var sitting = EditorSitting()
 
     // New-link drafting
     @State private var newLinkName: String = ""
@@ -223,6 +237,15 @@ struct AssignmentEditorView: View {
 
     private var isNew: Bool { app.editingAssignment == nil }
     private var heading: String { isNew ? "New assignment" : "Edit assignment" }
+    /// Never save on top of attachments we haven't got: a load still in flight
+    /// (or one that failed) would be written out as "no files, no websites".
+    private var canSave: Bool { attachmentsLoaded && !attachmentsFailed && uploadingName == nil }
+
+    /// PDF only, because that is all the exam can show: the reference panel
+    /// renders every attached file through PDFKit (ReferenceTabs builds a
+    /// .pdf material per file), so a Word or image attachment would open as a
+    /// failed tab in the middle of an exam.
+    private static let referenceTypes: [UTType] = [.pdf]
 
     var body: some View {
         ZStack {
@@ -263,6 +286,14 @@ struct AssignmentEditorView: View {
         }
         .onAppear(perform: prime)
         .task { await app.loadApprovedSites() }
+        .fileImporter(isPresented: $fileImporterShown,
+                      allowedContentTypes: Self.referenceTypes) { result in
+            switch result {
+            case .success(let url): attach(url)
+            case .failure(let error):
+                app.errorMessage = "Couldn't open that file. \(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: Header
@@ -393,18 +424,35 @@ struct AssignmentEditorView: View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
             sectionHead(title: "Attached files") {
                 Button {
-                    addMockFile()
+                    fileImporterShown = true
                 } label: {
                     Label("Attach file", systemImage: "paperclip")
                         .font(Theme.sans(13, .semibold))
-                        .foregroundStyle(Theme.accent)
+                        .foregroundStyle(canSave ? Theme.accent : Theme.muted2)
                 }
                 .buttonStyle(.plain)
+                .disabled(!canSave)
                 .linkPointer()
-                .help("Attach a reference file students can open")
+                .help("Attach a PDF students can open during the essay (up to 50 MB)")
             }
 
-            if files.isEmpty {
+            if let uploadingName {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Uploading \(uploadingName)…")
+                        .font(Theme.sans(12, .semibold))
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(1)
+                }
+                .padding(.top, 2)
+            }
+
+            if !attachmentsLoaded {
+                Text("Loading this assignment's files…")
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.muted)
+                    .padding(.top, 2)
+            } else if files.isEmpty {
                 Text("No files attached. Students will see whatever you add here.")
                     .font(Theme.sans(12))
                     .italic()
@@ -417,24 +465,20 @@ struct AssignmentEditorView: View {
                             Image(systemName: "doc")
                                 .font(.system(size: 13))
                                 .foregroundStyle(Theme.muted)
-                            Text(file.name)
+                            Text(file.originalName)
                                 .font(Theme.sans(13))
                                 .foregroundStyle(Theme.inkSoft)
                                 .lineLimit(1)
                             Spacer(minLength: Theme.Space.sm)
-                            Text(file.size)
+                            Text(Self.sizeLabel(file.sizeBytes))
                                 .font(Theme.sans(12))
                                 .foregroundStyle(Theme.muted2)
-                            Button("Remove") {
-                                withAnimation(.easeOut(duration: 0.18)) {
-                                    files.removeAll { $0.id == file.id }
-                                }
-                            }
+                            Button("Remove") { remove(file) }
                             .buttonStyle(.plain)
                             .font(Theme.sans(12, .semibold))
                             .foregroundStyle(Theme.bad)
                             .linkPointer()
-                            .help("Remove this file")
+                            .help("Remove this file when you save")
                         }
                         .padding(.vertical, 8)
                         .padding(.horizontal, 12)
@@ -445,6 +489,11 @@ struct AssignmentEditorView: View {
                 .animation(.easeOut(duration: 0.18), value: files)
             }
         }
+    }
+
+    /// A human size for an attached file (the Electron editor's formatBytes).
+    private static func sizeLabel(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
     // MARK: Websites students may open
@@ -482,8 +531,7 @@ struct AssignmentEditorView: View {
     private func addApprovedSite(_ site: ApprovedSite) {
         guard !links.contains(where: { $0.href.caseInsensitiveCompare(site.url) == .orderedSame }) else { return }
         withAnimation(.easeOut(duration: 0.18)) {
-            links.append(EditorLink(name: site.name, href: site.url,
-                                    scope: site.scope == .exact ? .exact : .domain))
+            links.append(EditorLink(name: site.name, href: site.url))
         }
     }
 
@@ -491,8 +539,7 @@ struct AssignmentEditorView: View {
         withAnimation(.easeOut(duration: 0.18)) {
             for site in app.approvedSites where
                 !links.contains(where: { $0.href.caseInsensitiveCompare(site.url) == .orderedSame }) {
-                links.append(EditorLink(name: site.name, href: site.url,
-                                        scope: site.scope == .exact ? .exact : .domain))
+                links.append(EditorLink(name: site.name, href: site.url))
             }
         }
     }
@@ -538,7 +585,12 @@ struct AssignmentEditorView: View {
                 .transition(.opacity)
             }
 
-            if links.isEmpty {
+            if !attachmentsLoaded {
+                Text("Loading this assignment's websites…")
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.muted)
+                    .padding(.top, 2)
+            } else if links.isEmpty {
                 Text("No websites added. Students can only open links you list here (e.g. a dictionary or an article). Everything else is blocked during the essay.")
                     .font(Theme.sans(12))
                     .italic()
@@ -547,44 +599,44 @@ struct AssignmentEditorView: View {
                     .padding(.top, 2)
             } else {
                 VStack(spacing: Theme.Space.xs) {
-                    ForEach($links) { $link in
-                        linkRow($link)
+                    ForEach(links) { link in
+                        linkRow(link)
                     }
                 }
                 .animation(.easeOut(duration: 0.18), value: links)
             }
         }
+        // No editing until the saved list is on screen: an edit made during the
+        // load would be overwritten the moment it arrived.
+        .disabled(!attachmentsLoaded)
         .animation(.easeOut(duration: 0.16), value: linkError)
     }
 
-    private func linkRow(_ link: Binding<EditorLink>) -> some View {
+    private func linkRow(_ link: EditorLink) -> some View {
         HStack(alignment: .top, spacing: Theme.Space.md) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(link.wrappedValue.name)
+                Text(link.name)
                     .font(Theme.sans(13, .semibold))
                     .foregroundStyle(Theme.inkSoft)
                     .lineLimit(1)
-                if !link.wrappedValue.href.isEmpty {
-                    Text(link.wrappedValue.href)
+                if !link.href.isEmpty {
+                    Text(link.href)
                         .font(Theme.sans(11))
                         .foregroundStyle(Theme.muted)
                         .lineLimit(1)
                 }
             }
             Spacer(minLength: Theme.Space.sm)
-            Picker("", selection: link.scope) {
-                ForEach(EditorLink.Scope.allCases, id: \.self) { scope in
-                    Text(scope.label).tag(scope)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(width: 140)
-            .help("Choose whether students can open the whole site or only this page")
-            .linkPointer()
+            // Every approved link opens the whole site: the locked browser
+            // matches on host, and test_urls stores no per-page scope. Stating
+            // it beats a picker whose choice nothing can honour.
+            Text("Entire site")
+                .font(Theme.sans(12))
+                .foregroundStyle(Theme.muted2)
+                .help("Students can open any page on this site during the essay")
             Button("Remove") {
                 withAnimation(.easeOut(duration: 0.18)) {
-                    links.removeAll { $0.id == link.wrappedValue.id }
+                    links.removeAll { $0.id == link.id }
                 }
             }
             .buttonStyle(.plain)
@@ -610,8 +662,9 @@ struct AssignmentEditorView: View {
             }
             .buttonStyle(.glassProminent)
             .tint(Theme.accent)
-            .disabled(app.isLoading)
+            .disabled(app.isLoading || !canSave)
             .linkPointer()
+            .help(saveHelp)
             Button("Cancel") { cancel() }
                 .buttonStyle(.glass)
                 .linkPointer()
@@ -625,9 +678,23 @@ struct AssignmentEditorView: View {
                         .foregroundStyle(Theme.muted)
                 }
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
+            } else if attachmentsFailed {
+                Text("Reopen the editor to load the files and websites.")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.bad)
+            } else if !attachmentsLoaded {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading attachments…")
+                        .font(Theme.sans(13, .semibold))
+                        .foregroundStyle(Theme.muted)
+                }
+                .transition(.opacity)
             }
         }
         .animation(.easeOut(duration: 0.2), value: app.isLoading)
+        .animation(.easeOut(duration: 0.2), value: attachmentsLoaded)
     }
 
     private func errorBanner(_ message: String) -> some View {
@@ -717,42 +784,97 @@ struct AssignmentEditorView: View {
             )
     }
 
-    // MARK: Behaviour (mock)
+    // MARK: Behaviour
+
+    /// Why Save is unavailable, for the button's tooltip.
+    private var saveHelp: String {
+        if uploadingName != nil { return "Wait for the file to finish uploading" }
+        if attachmentsFailed { return "This assignment's files and websites couldn't be loaded, so saving now would remove them" }
+        if !attachmentsLoaded { return "Loading this assignment's files and websites" }
+        return "Save this assignment"
+    }
 
     private func prime() {
-        if let existing = app.editingAssignment {
-            title = existing.title
-            prompt = existing.questions.first?.prompt ?? ""
-            if let wl = existing.questions.first?.wordLimit { wordLimit = String(wl) }
-            if let tl = existing.timeLimitMinutes { timeLimit = String(tl) }
-            // Prime the spell-check + outline toggles from the saved assignment
-            // so editing round-trips the values and a teacher can change them
-            // on a re-edit.
-            spellcheckEnabled = existing.spellcheckEnabled
-            outlineAllowed = existing.outlineAllowed
-            // Load the assignment's saved approved links so editing preserves them.
-            Task {
-                let saved = await app.editorLinks(for: existing)
-                if !saved.isEmpty, links.isEmpty {
-                    links = saved.map { EditorLink(name: $0.name, href: $0.href) }
-                }
+        guard let existing = app.editingAssignment else {
+            // A brand-new assignment has nothing to load, so Save is live at once.
+            attachmentsLoaded = true
+            if let template {
+                prompt = template.starterPrompt
+                if let wl = template.defaultWordLimit { wordLimit = String(wl) }
             }
-        } else if let template {
-            prompt = template.starterPrompt
-            if let wl = template.defaultWordLimit { wordLimit = String(wl) }
+            return
+        }
+        title = existing.title
+        prompt = existing.questions.first?.prompt ?? ""
+        if let wl = existing.questions.first?.wordLimit { wordLimit = String(wl) }
+        if let tl = existing.timeLimitMinutes { timeLimit = String(tl) }
+        // Prime the spell-check + outline toggles from the saved assignment
+        // so editing round-trips the values and a teacher can change them
+        // on a re-edit.
+        spellcheckEnabled = existing.spellcheckEnabled
+        outlineAllowed = existing.outlineAllowed
+        // Load the saved files AND websites before either list is editable, and
+        // keep Save shut until they land: a save inside this window used to
+        // write an empty allow list over the whitelist the locked browser
+        // depends on, and to leave the attached files invisible.
+        Task {
+            guard let loaded = await app.editorAttachments(for: existing) else {
+                attachmentsFailed = true
+                return
+            }
+            links = loaded.links.map { EditorLink(name: $0.name, href: $0.href) }
+            files = loaded.files
+            attachmentsLoaded = true
         }
     }
 
     private func cancel() {
+        // Attaching uploads at pick time, so anything uploaded in this sitting
+        // and not saved has to go back out. Files that were already saved are
+        // left alone, removed or not: cancelling must not destroy them.
+        sitting.cancelled = true
+        let orphans = Array(uploadedThisSitting.values)
+        if !orphans.isEmpty {
+            Task { await app.discardUnsavedAttachments(orphans) }
+        }
         app.teacherGoHome()
         onCancel()
     }
 
-    private func addMockFile() {
-        let n = files.count + 1
-        withAnimation(.easeOut(duration: 0.18)) {
-            files.append(EditorFile(name: "reference-\(n).pdf", size: "248 KB"))
+    /// Upload the picked reference file, then list the real row it created.
+    private func attach(_ url: URL) {
+        guard uploadingName == nil else { return }
+        uploadingName = url.lastPathComponent
+        Task {
+            let file = await app.attachReferenceFile(fileURL: url, contentType: Self.mime(for: url))
+            uploadingName = nil
+            guard let file else { return }   // attachReferenceFile set errorMessage
+            guard !sitting.cancelled else {
+                // Cancelled while the bytes were going up: the file belongs to
+                // no assignment, so take it back out rather than leave it in
+                // the bucket forever.
+                await app.discardUnsavedAttachments([file])
+                return
+            }
+            uploadedThisSitting[file.id] = file
+            withAnimation(.easeOut(duration: 0.18)) { files.append(file) }
         }
+    }
+
+    /// Detach a file. The row and its bytes are destroyed by the save, once the
+    /// assignment no longer references them, so a cancel is still a full undo.
+    private func remove(_ file: TeacherFile) {
+        withAnimation(.easeOut(duration: 0.18)) {
+            files.removeAll { $0.id == file.id }
+        }
+        removedFiles.append(file)
+    }
+
+    /// Content type for the picked file. The picker allows PDF only, so the
+    /// extension is authoritative (the outlineMime pattern).
+    private static func mime(for url: URL) -> String {
+        UTType(filenameExtension: url.pathExtension.lowercased())?.preferredMIMEType
+            ?? "application/octet-stream"
     }
 
     private func addLink() {
@@ -767,6 +889,13 @@ struct AssignmentEditorView: View {
             linkError = "Use a full address starting with https://"
             return
         }
+        // One row per address: saving collapses duplicates onto a single
+        // test_urls row anyway, so accepting one here would only look like a
+        // second entry that vanishes on the next open.
+        guard !links.contains(where: { $0.href.caseInsensitiveCompare(href) == .orderedSame }) else {
+            linkError = "That website is already on the list."
+            return
+        }
         withAnimation(.easeOut(duration: 0.18)) {
             links.append(EditorLink(name: name.isEmpty ? href : name, href: href))
         }
@@ -777,10 +906,12 @@ struct AssignmentEditorView: View {
     private func save() {
         // Persist through AppState. Blank -> nil = "unlimited"; trim whitespace
         // and reject non-positive values so " 60" still counts and 0/-5 can't
-        // create an instantly-expired exam. The attached files + website
-        // allow-list stay local for now (persistence is a later wave) and do not
-        // block the save. On success AppState navigates home; on failure it sets
-        // app.errorMessage, surfaced inline above.
+        // create an instantly-expired exam. The attached files are already
+        // uploaded, so only their ids travel here; the website list is
+        // reconciled against the rows this question already owns. On success
+        // AppState navigates home; on failure it sets app.errorMessage,
+        // surfaced inline above.
+        guard canSave else { return }
         Task {
             await app.saveAssignment(
                 title: title,
@@ -789,8 +920,15 @@ struct AssignmentEditorView: View {
                 timeLimitMinutes: positiveInt(timeLimit),
                 spellcheckEnabled: spellcheckEnabled,
                 outlineAllowed: outlineAllowed,
-                links: links.map { (name: $0.name, href: $0.href) }
+                links: links.map { (name: $0.name, href: $0.href) },
+                fileIds: files.map(\.id),
+                removedFiles: removedFiles
             )
+            // A save that landed leaves nothing to clean up on cancel.
+            if app.errorMessage == nil {
+                removedFiles = []
+                uploadedThisSitting = [:]
+            }
         }
         onSave()
     }
