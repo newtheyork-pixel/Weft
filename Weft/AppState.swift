@@ -1176,12 +1176,19 @@ final class AppState {
     /// Save (and optionally share) a grade. essay_grades requires session_id +
     /// student_id, taken from the submission. Sharing keeps the original release
     /// timestamp if already shared; saving-without-sharing never un-shares.
+    ///
+    /// Returns whether the write was ACCEPTED. The grading screen holds the
+    /// teacher's typing (and its dirty flag) until it sees true, so a failed
+    /// save can never be mistaken for a saved one.
+    @discardableResult
     func saveGrade(submission: TeacherSubmission, points: Double?, pointsPossible: Double,
-                   feedback: String, share: Bool) async {
-        guard signedIn else { return }
+                   feedback: String, share: Bool) async -> Bool {
+        // Not signed in there is nothing to write, so report it as not saved
+        // rather than letting a caller clear its unsaved state on a no-op.
+        guard signedIn else { return false }
         guard let sid = submission.sessionId, let stid = submission.studentId else {
             errorMessage = "This submission is missing its session or student."
-            return
+            return false
         }
         errorMessage = nil
         let cached = grades[submission.id]?.releasedAt
@@ -1222,8 +1229,10 @@ final class AppState {
             if share, existing == nil, wasFresh {
                 Task { await supabase.notify("grades_published", body: ["submission_id": submission.id]) }
             }
+            return true
         } catch {
             errorMessage = describe(error)
+            return false
         }
     }
 
