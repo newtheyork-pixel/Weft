@@ -26,6 +26,7 @@ struct TeacherHomeView: View {
                     if let error = app.errorMessage { errorBanner(error) }
                     if app.teacherSelectedClassId == nil {
                         introHeader
+                        unassignedLiveCard
                         if app.teacherClasses.isEmpty { classesEmpty } else { classCards }
                         newClassButton
                         libraryCard
@@ -238,10 +239,50 @@ struct TeacherHomeView: View {
         if app.liveSession?.classId == c.id {
             liveNowCard
             monitorRosterCard
+        } else if let live = app.liveSession, live.classId == nil {
+            // Belongs to no class, so no class can end it: see unassignedLiveCard.
+            unassignedLiveCard
         } else if app.liveSession != nil {
             livePointerRow
         } else {
             launchCard(c)
+        }
+    }
+
+    /// An open session with a NULL class_id. No class owns it, so liveNowCard
+    /// (which holds the only End session button) never renders and
+    /// livePointerRow has nowhere to point, while launchSession's
+    /// one-live-session guard refuses every launch: the teacher was locked out
+    /// with nothing to press. Rows like this come from the retired Electron
+    /// teacher UI, which never set class_id when it inserted a session. Shown
+    /// at the classes list AND inside every class, so it is always reachable.
+    @ViewBuilder private var unassignedLiveCard: some View {
+        if let live = app.liveSession, live.classId == nil {
+            GlassCard {
+                VStack(alignment: .leading, spacing: Theme.Space.md) {
+                    Text("A session is open with no class attached")
+                        .font(Theme.sans(17, .semibold))
+                        .foregroundStyle(Theme.inkSoft)
+                    Text("It was started by an older version of Weft, so no class can show it and no student can join it. End it to launch an assignment.")
+                        .font(Theme.sans(13))
+                        .foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: Theme.Space.md) {
+                        Kicker(text: "Session ID")
+                        Text(live.code)
+                            .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Theme.inkSoft)
+                        Spacer()
+                        Button("End session") {
+                            Task { await app.endSession() }
+                        }
+                        .buttonStyle(.glassProminent)
+                        .tint(Theme.accent)
+                        .help("Close this session so you can launch an assignment")
+                        .linkPointer()
+                    }
+                }
+            }
         }
     }
 
@@ -254,11 +295,15 @@ struct TeacherHomeView: View {
                 HStack(spacing: Theme.Space.md) {
                     Chip(text: "Open", kind: .good)
                     HStack(spacing: 6) {
-                        // "Session code", never "Class code": the class JOIN
-                        // code sits in the header directly above this card.
-                        Kicker(text: "Session code")
+                        // An identifier, NOT a code anyone enters: the student
+                        // app has one code field and it takes the CLASS join
+                        // code (StudentJoinView), which sits in the header
+                        // directly above this card. This one names the session
+                        // in the history list below.
+                        Kicker(text: "Session ID")
                         Text(app.liveSession?.code ?? "------").font(.system(size: 14, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.inkSoft)
                     }
+                    .help("Names this session in your session history. Students never type it.")
                     Spacer()
                     Button("End session") {
                         Task { await app.endSession() }
@@ -283,9 +328,13 @@ struct TeacherHomeView: View {
                 if app.roster.isEmpty {
                     // Zero joined is the NORMAL state right after launch:
                     // state it explicitly (house idiom), never a bare divider.
-                    Text("No students yet. Students join with the session code.")
+                    // There is no session code to read out: students join the
+                    // CLASS once (StudentJoinView), then this assignment shows
+                    // up on their class home with a Start writing button.
+                    Text("No students yet. Students who have joined this class with the class code will see this assignment on their class home and press Start writing. There is nothing for them to type.")
                         .font(Theme.sans(13))
                         .foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, Theme.Space.xl).padding(.vertical, 13)
                 } else {
                     ForEach(Array(app.roster.enumerated()), id: \.element.id) { idx, s in
