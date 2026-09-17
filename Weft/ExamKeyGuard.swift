@@ -4,11 +4,13 @@
 //
 //  NSApp.presentationOptions (set in KioskController) already disables Cmd-Tab,
 //  Cmd-Q, Force-Quit, and the Apple menu, but it does NOT stop the escape /
-//  launcher / capture hotkeys a student could cheat with: Spotlight & launchers
-//  (⌘Space / ⌥Space → Spotlight, Raycast, Alfred, the ChatGPT app, Siri),
-//  screenshots (⌘⇧3/4/5/6), and Mission Control / Spaces (⌃↑↓←→). The native
-//  route is a CGEventTap at the session level — the "separate component that
-//  degrades gracefully" the KioskController TODO asks for.
+//  launcher hotkeys a student could cheat with: Spotlight & launchers
+//  (⌘Space / ⌥Space → Spotlight, Raycast, Alfred, the ChatGPT app, Siri)
+//  and Mission Control / Spaces (⌃↑↓←→). The native route is a CGEventTap at
+//  the session level — the "separate component that degrades gracefully" the
+//  KioskController TODO asks for. Screenshot / screen-recording hotkeys
+//  (⌘⇧3/4/5/6) are intentionally left alone so a recording of the exam can
+//  actually be taken.
 //
 //  (CapsLock is intentionally NOT handled: macOS toggles it below the session
 //  tap, so a tap can't suppress it — and it isn't a cheating vector anyway.)
@@ -36,18 +38,19 @@ final class ExamKeyGuard {
     /// Whether to drop this key event during a locked exam. Every rule requires a
     /// MODIFIER (or is a bare function key never used for writing), so plain text —
     /// space, arrows, digits, punctuation — always passes through untouched.
-    /// kVK codes: Space 49, Tab 48, ←123 →124 ↓125 ↑126, 3=20 4=21 6=22 5=23,
-    /// F13–F19 = 105,107,113,106,64,79,80.
+    /// kVK codes: Space 49, Tab 48, ←123 →124 ↓125 ↑126,
+    /// F13–F19 = 105,107,113,106,64,79,80. Screenshot keys (3=20 4=21 6=22 5=23)
+    /// are not suppressed.
     nonisolated static func shouldSuppress(keyCode: Int64, flags: CGEventFlags) -> Bool {
         let cmd = flags.contains(.maskCommand)
         let opt = flags.contains(.maskAlternate)
         let ctrl = flags.contains(.maskControl)
-        let shift = flags.contains(.maskShift)
         switch keyCode {
         // Spotlight / Raycast / Alfred / ChatGPT (⌥Space) / Siri — Space + any modifier.
         case 49:                              return cmd || opt || ctrl
-        // Screenshots & screen recording — ⌘⇧3 / ⌘⇧4 / ⌘⇧5 / ⌘⇧6.
-        case 20, 21, 22, 23:                  return cmd && shift
+        // Screenshots & screen recording (⌘⇧3 / ⌘⇧4 / ⌘⇧5 / ⌘⇧6) pass through
+        // on purpose. Local capture is allowed; remote-control software is
+        // what pauses writing.
         // Mission Control / Spaces / App Exposé via keyboard — ⌃↑ ⌃↓ ⌃← ⌃→.
         case 123, 124, 125, 126:              return ctrl
         // App switcher — ⌘Tab (also covered by presentationOptions; belt + braces).
@@ -100,7 +103,7 @@ final class ExamKeyGuard {
             }
             let code = event.getIntegerValueField(.keyboardEventKeycode)
             if ExamKeyGuard.shouldSuppress(keyCode: code, flags: event.flags) {
-                return nil   // drop the escape / launcher / capture hotkey
+                return nil   // drop the escape / launcher hotkey
             }
             return Unmanaged.passUnretained(event)
         }

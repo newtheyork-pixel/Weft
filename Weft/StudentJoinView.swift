@@ -3,8 +3,6 @@
 //  Weft — the student join-a-class screen. A single class-code field and a
 //  Join button on a glass card. Students join a CLASS once (class code) and
 //  their assignments appear automatically; there is no per-assignment code.
-//  Ported from the Electron renderer's #stage-join (with auth-screen framing).
-//  Mock action only — backend is a later wave.
 //
 
 import SwiftUI
@@ -14,26 +12,31 @@ struct StudentJoinView: View {
 
     @State private var code: String = ""
     @State private var joining: Bool = false
-    @State private var joined: Bool = false
+    @State private var joinedName: String?
     @FocusState private var codeFocused: Bool
 
     /// A class code is letters + numbers, up to 6 characters.
     private var trimmedCode: String {
         code.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    private var canJoin: Bool { trimmedCode.count >= 4 && !joining }
+    private var canJoin: Bool { trimmedCode.count >= 4 && !joining && joinedName == nil }
 
     var body: some View {
         VStack(spacing: 0) {
             WeftTopBar(role: "Student")
             ScrollView {
                 VStack(spacing: Theme.Space.lg) {
-                    card
+                    if let name = joinedName {
+                        successCard(name)
+                    } else {
+                        card
+                    }
                 }
                 .padding(Theme.Space.xl)
                 .frame(maxWidth: 460)
                 .frame(maxWidth: .infinity)
-                .frame(maxWidth: .infinity, alignment: .center)
+                .animation(.easeOut(duration: 0.2), value: joinedName)
+                .animation(.easeOut(duration: 0.2), value: app.errorMessage)
             }
         }
         .background(AmbientBackground())
@@ -45,6 +48,7 @@ struct StudentJoinView: View {
     /// Driven by both appear and state-change so a link that arrives while the
     /// join screen is already visible still pre-fills.
     private func consumePrefill() {
+        guard joinedName == nil else { return }
         guard let pre = app.prefilledJoinCode, !pre.isEmpty else { return }
         code = String(pre.uppercased().filter { $0.isLetter || $0.isNumber }.prefix(6))
         app.prefilledJoinCode = nil
@@ -59,16 +63,45 @@ struct StudentJoinView: View {
                 field
                 joinButton
                 helper
-                if joined {
-                    Label("You're in. Your assignments will appear automatically.", systemImage: "checkmark.circle.fill")
-                        .font(Theme.sans(13, .semibold))
-                        .foregroundStyle(Theme.good)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                }
+                if let error = app.errorMessage { errorBanner(error) }
                 backLink
             }
         }
+    }
+
+    private func successCard(_ name: String) -> some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: Theme.Space.lg) {
+                HStack(spacing: Theme.Space.sm) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(Theme.good)
+                    Kicker(text: "You're in")
+                }
+                Text("Joined \(name)")
+                    .font(Theme.serif(26, .semibold))
+                    .foregroundStyle(Theme.inkSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Your assignments will appear on your class home. Taking you there now.")
+                    .font(Theme.sans(14))
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: Theme.Space.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Theme.warn)
+            Text(message)
+                .font(Theme.sans(12.5))
+                .foregroundStyle(Theme.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(Theme.Space.md)
+        .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
     }
 
     // MARK: Header
@@ -122,7 +155,6 @@ struct StudentJoinView: View {
                         .filter { $0.isLetter || $0.isNumber }
                     let capped = String(filtered.prefix(6))
                     if capped != newValue { code = capped }
-                    if joined { withAnimation(.easeOut(duration: 0.2)) { joined = false } }
                 }
                 .onSubmit { join() }
         }
@@ -185,12 +217,9 @@ struct StudentJoinView: View {
         Task {
             let result = await app.joinClass(code: entered)
             joining = false
-            if result != nil {
-                withAnimation(.easeOut(duration: 0.2)) { joined = true }
-                code = ""
-                // Let the confirmation read, then return to the class home where
-                // the newly joined class is selected and its work has loaded.
-                try? await Task.sleep(for: .seconds(1.1))
+            if let result {
+                joinedName = result.name
+                try? await Task.sleep(for: .seconds(1.2))
                 app.goToHome()
             }
         }

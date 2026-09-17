@@ -696,22 +696,38 @@ final class AppState {
         }
     }
 
-    /// Join a class by code; on success refresh the home and return to it.
-    /// Returns the joined class name (for the confirmation copy) or nil.
+    /// Join a class by code; on success refresh the home so the new class is
+    /// selected. Returns the joined class, or nil with errorMessage set.
     @discardableResult
     func joinClass(code: String) async -> ClassRoom? {
+        let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard signedIn else {
             // Mock path (dev / unsigned): pretend the join worked.
-            return ClassRoom(id: "mock", name: "Your class", joinCode: code, archivedAt: nil)
+            return ClassRoom(id: "mock", name: "Your class", joinCode: normalized, archivedAt: nil)
         }
         errorMessage = nil
         do {
-            let joined = try await supabase.joinClass(code: code, displayName: displayName)
-            await loadStudentHome()
-            if let joined { selectClass(joined.id) }
+            let joined = try await supabase.joinClass(code: normalized, displayName: displayName)
+            // Don't wait for the home refresh: the join screen used to sit on
+            // "Joining…" until myClasses returned, so a successful enroll never
+            // showed the success card. Home's .task reloads when we land there.
+            selectedClassId = joined.id
+            classWork = []
+            let joinedId = joined.id
+            Task {
+                await loadStudentHome()
+                if enrolledClasses.contains(where: { $0.id == joinedId }) {
+                    selectedClassId = joinedId
+                }
+            }
             return joined
         } catch {
-            errorMessage = describe(error)
+            let raw = describe(error).lowercased()
+            if raw.contains("class not found") || raw.contains("no data") {
+                errorMessage = "That class code wasn't found. Check the code and try again."
+            } else {
+                errorMessage = describe(error)
+            }
             return nil
         }
     }
@@ -830,13 +846,13 @@ final class AppState {
             // The mutable preview store is the single source of truth here:
             // launched and ended demo sessions live in it, so history is
             // stable across leaving and re-entering the class.
-            classSessions = previewSessions.filter { $0.classId == cid }
+            classSessions = previewSessions.filter { $0.classId == cid && $0.status != "archived" }
             return
         }
         do {
             let sessions = try await supabase.listClassSessions(classId: cid, teacherUserId: userId)
             guard teacherSelectedClassId == cid else { return }   // switched class mid-flight; drop stale payload
-            classSessions = sessions
+            classSessions = sessions.filter { $0.status != "archived" }
         } catch {
             guard teacherSelectedClassId == cid else { return }
             errorMessage = describe(error)
@@ -1284,8 +1300,58 @@ final class AppState {
                 previewSessions[i].status = "closed"
             }
             if let cid = teacherSelectedClassId {
-                classSessions = previewSessions.filter { $0.classId == cid }
+                classSessions = previewSessions.filter { $0.classId == cid && $0.status != "archived" }
             }
+        }
+    }
+
+    /// Hide a session from the history list. Essays stay on the server; the
+    /// row just stops appearing. An open session is closed as part of this.
+    func archiveSession(_ session: ExamSession) async {
+        errorMessage = nil
+        if signedIn {
+            do {
+                try await supabase.archiveSession(id: session.id)
+            } catch {
+                errorMessage = describe(error)
+                return
+            }
+        } else if let i = previewSessions.firstIndex(where: { $0.id == session.id }) {
+            previewSessions[i].status = "archived"
+        }
+        classSessions?.removeAll { $0.id == session.id }
+        if liveSession?.id == session.id {
+            liveSession = nil
+            stopRosterPolling()
+            roster = []
+        }
+        if gradingSession?.id == session.id {
+            gradingSession = nil
+        }
+    }
+
+    /// Permanently delete a session and everything keyed to it (essays, roster,
+    /// grades, comments, outlines). Closed/archived only — end a live session
+    /// first. Falls back to a clear error if RLS refuses the DELETE.
+    func deleteSession(_ session: ExamSession) async {
+        errorMessage = nil
+        guard session.status != "open" else {
+            errorMessage = "End the session before deleting it."
+            return
+        }
+        if signedIn {
+            do {
+                try await supabase.deleteSession(id: session.id)
+            } catch {
+                errorMessage = describe(error)
+                return
+            }
+        } else {
+            previewSessions.removeAll { $0.id == session.id }
+        }
+        classSessions?.removeAll { $0.id == session.id }
+        if gradingSession?.id == session.id {
+            gradingSession = nil
         }
     }
 

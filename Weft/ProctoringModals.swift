@@ -7,8 +7,8 @@
 
 import SwiftUI
 
-/// Full-screen blackout overlay used mid-exam — either because screen-sharing /
-/// recording software appeared, or because the student left the exam window.
+/// Full-screen blackout overlay used mid-exam — either because remote-control
+/// software appeared, or because the student left the exam window.
 /// Calm, not punitive. Defaults reproduce the original screen-sharing copy so the
 /// dev gallery preview is unchanged.
 struct StudentBlockedView: View {
@@ -18,9 +18,9 @@ struct StudentBlockedView: View {
     var detail: String? = "zoom.us"
     var footnote: String = "Close it and your writing will resume automatically. Your teacher has been notified."
     var submitTitle: String? = "Can't close it? Submit and exit"
-    /// Fully hide the exam content behind the wash. The screen-sharing flavor
-    /// MUST be opaque: its entire purpose is to keep the live question out of a
-    /// detected screen capture, and a translucent fill leaks the prompt + essay
+    /// Fully hide the exam content behind the wash. The remote-control flavor
+    /// MUST be opaque: its entire purpose is to keep the live question off a
+    /// live remote session, and a translucent fill leaks the prompt + essay
     /// into every captured frame. The focus-loss flavor can stay translucent.
     var opaque: Bool = false
     var onSubmit: () -> Void = {}

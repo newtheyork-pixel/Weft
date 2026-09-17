@@ -12,6 +12,8 @@ struct TeacherHomeView: View {
     @Environment(AppState.self) private var app
     @State private var newClassName = ""
     @State private var showNewClass = false
+    @State private var sessionToArchive: ExamSession?
+    @State private var sessionToDelete: ExamSession?
 
     /// The picked assignment's title (from grouped rows), falling back gracefully when nothing is set.
     private var pickedAssignmentTitle: String {
@@ -56,6 +58,38 @@ struct TeacherHomeView: View {
             Button("Cancel", role: .cancel) { newClassName = "" }
         } message: {
             Text("Give the class a name. Students join with the class code.")
+        }
+        .confirmationDialog(
+            sessionToArchive?.status == "open" ? "Archive this live session?" : "Archive this session?",
+            isPresented: Binding(
+                get: { sessionToArchive != nil },
+                set: { if !$0 { sessionToArchive = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Archive") {
+                if let s = sessionToArchive { Task { await app.archiveSession(s) } }
+                sessionToArchive = nil
+            }
+            Button("Cancel", role: .cancel) { sessionToArchive = nil }
+        } message: {
+            Text(sessionToArchive?.status == "open"
+                 ? "The session will close for students and disappear from this list. Essays stay saved."
+                 : "It leaves this list. Essays stay saved.")
+        }
+        .confirmationDialog(
+            "Delete this session?",
+            isPresented: Binding(
+                get: { sessionToDelete != nil },
+                set: { if !$0 { sessionToDelete = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Delete session and essays", role: .destructive) {
+                if let s = sessionToDelete { Task { await app.deleteSession(s) } }
+                sessionToDelete = nil
+            }
+            Button("Cancel", role: .cancel) { sessionToDelete = nil }
+        } message: {
+            Text("Every essay, grade, and comment in this session will be removed. This cannot be undone.")
         }
     }
 
@@ -499,6 +533,19 @@ struct TeacherHomeView: View {
                 app.openGrading(session: s, title: app.sessionTitle(s))
             }
             .buttonStyle(.glass)
+            .linkPointer()
+            Menu {
+                Button("Archive") { sessionToArchive = s }
+                if s.status != "open" {
+                    Button("Delete…", role: .destructive) { sessionToDelete = s }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 16))
+                    .foregroundStyle(Theme.muted)
+            }
+            .menuIndicator(.hidden)
+            .help("Archive or delete this session")
             .linkPointer()
         }
     }

@@ -321,6 +321,30 @@ final class SupabaseManager: @unchecked Sendable {
         }
     }
 
+    /// PostgREST returns a JSON object for `RETURNS composite` and a JSON
+    /// array for `RETURNS SETOF` / `RETURNS TABLE`. Join-class is the former
+    /// (`returns public.classes`) but has shipped both shapes; accept either
+    /// so a successful enroll is never discarded as a decode miss.
+    private func decodeOne<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        guard !data.isEmpty else { throw SupabaseError.noData }
+        if let one = try? decoder.decode(T.self, from: data) { return one }
+        if let many = try? decoder.decode([T].self, from: data) {
+            guard let first = many.first else { throw SupabaseError.noData }
+            return first
+        }
+        return try decode(T.self, from: data)
+    }
+
+    /// RPC that returns a single row, whether PostgREST wrapped it in an array.
+    func rpcOne<T: Decodable>(_ name: String, params: [String: Any] = [:]) async throws -> T {
+        var req = URLRequest(url: SupabaseConfig.url.appendingPathComponent("rest/v1/rpc/\(name)"))
+        req.httpMethod = "POST"
+        for (k, v) in await headers(contentJSON: true) { req.setValue(v, forHTTPHeaderField: k) }
+        req.httpBody = try JSONSerialization.data(withJSONObject: params, options: [])
+        let data = try await perform(req)
+        return try decodeOne(T.self, from: data)
+    }
+
     // MARK: - PostgREST helpers (the .from(...).select/insert/update surface)
 
     /// SELECT rows from a table. `query` carries the PostgREST filters and the
@@ -450,13 +474,14 @@ final class SupabaseManager: @unchecked Sendable {
     }
 
     /// Idempotent class enrollment by class code. Returns the joined class row.
-    /// SECURITY DEFINER on the server; matches student.js `join_class_by_code`.
-    func joinClass(code: String, displayName: String) async throws -> ClassRoom? {
-        let classes: [ClassRoom] = try await rpc("join_class_by_code", params: [
+    /// The SQL is `returns public.classes` (one composite row), so PostgREST
+    /// sends an object — decoding that as `[ClassRoom]` used to throw, the join
+    /// screen swallowed the error, and the student sat on the code field.
+    func joinClass(code: String, displayName: String) async throws -> ClassRoom {
+        try await rpcOne("join_class_by_code", params: [
             "p_code": code,
             "p_display_name": displayName
         ])
-        return classes.first
     }
 
     /// Released grades + essays for the signed-in student across all sessions.
@@ -635,6 +660,7 @@ final class SupabaseManager: @unchecked Sendable {
             URLQueryItem(name: "select", value: "id,code,test_id,class_id,status,created_at"),
             URLQueryItem(name: "class_id", value: "eq.\(classId)"),
             URLQueryItem(name: "teacher_user_id", value: "eq.\(teacherUserId)"),
+            URLQueryItem(name: "status", value: "neq.archived"),
             URLQueryItem(name: "order", value: "created_at.desc.nullslast"),
         ])
     }
@@ -814,6 +840,30 @@ final class SupabaseManager: @unchecked Sendable {
             query: [URLQueryItem(name: "teacher_user_id", value: "eq.\(teacherUserId)"),
                     URLQueryItem(name: "status", value: "eq.open")],
             returning: false)
+    }
+
+    /// Hide a session from the class history without deleting essays. Uses the
+    /// existing teacher UPDATE policy (status → archived). Open sessions are
+    /// closed at the same time so a leftover live row cannot resurrect.
+    func archiveSession(id: String) async throws {
+        struct Payload: Encodable { let status: String; let closed_at: String }
+        let _: [ExamSession] = try await update("sessions",
+            values: Payload(status: "archived", closed_at: Self.nowISO()),
+            query: [URLQueryItem(name: "id", value: "eq.\(id)")],
+            returning: false)
+    }
+
+    /// Permanently delete a session. Essays, roster rows, grades, comments and
+    /// outlines cascade with the session row. RLS must allow teacher DELETE
+    /// (see Tessera migration 20260917000009); an empty representation means
+    /// the policy refused the row and it is still there.
+    func deleteSession(id: String) async throws {
+        let gone: [ExamSession] = try await deleteReturning("sessions", query: [
+            URLQueryItem(name: "id", value: "eq.\(id)")
+        ])
+        guard !gone.isEmpty else {
+            throw SupabaseError.auth("Couldn't delete this session. Archive it to hide it from the list.")
+        }
     }
 
     /// Upsert a grade. `essay_grades.session_id` and `student_id` are NOT NULL,

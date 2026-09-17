@@ -13,10 +13,10 @@
 //    setKiosk(true) + hide dock/menubar     NSApp.presentationOptions
 //    setFullScreen(true)                    toggleFullScreen: (native fs space)
 //    setAlwaysOnTop('screen-saver')         window.level (very high CGWindowLevel)
-//    setContentProtection(true)             window.sharingType = .none  (TODO)
+//    setContentProtection(true)             not used — local recordings are allowed
 //    globalShortcut.register(...)           NSApp.presentationOptions
 //                                           (.disableProcessSwitching etc.) +
-//                                           a future CGEventTap (entitlement)
+//                                           ExamKeyGuard (launcher / Spaces hotkeys)
 //    blur / leave-full-screen fight-back    window/app notification observers
 //                                           with a settle window (see notes)
 //
@@ -26,7 +26,8 @@
 //  set, AppKit itself swallows Cmd+Tab, Cmd+Q, the Apple menu, Force-Quit, and
 //  the Dock — the things the Electron globalShortcut list was reaching for. We
 //  do not need a separate accelerator table for those; we DO still want an
-//  event tap for the launcher / screenshot / Mission-Control hotkeys (ExamKeyGuard).
+//  event tap for the launcher / Mission-Control hotkeys (ExamKeyGuard).
+//  Screenshot and screen-recording hotkeys are left alone on purpose.
 //
 //  NOTE — the macOS settle / focus quirk the Electron build fought for two
 //  releases (0.2.10 / 0.2.11, the "caret death" saga):
@@ -67,14 +68,14 @@ final class KioskController {
     /// normal window pinned above everything if the caller reuses it.
     private var savedLevel: NSWindow.Level = .normal
 
-    /// The window's pre-kiosk sharing type, restored on exit (see content
-    /// protection TODO below).
+    /// The window's pre-kiosk sharing type, restored on exit. We no longer
+    /// flip it to `.none` for the lock — recordings of the exam are allowed.
     private var savedSharingType: NSWindow.SharingType = .readOnly
 
     /// Raw-key suppression for the exam — blocks ⌘Space launchers (Spotlight /
-    /// Raycast / ChatGPT), screenshots, and Mission Control. Fail-open: a no-op
-    /// unless the app is trusted for Accessibility, so the lock degrades
-    /// gracefully when the grant is missing.
+    /// Raycast / ChatGPT) and Mission Control. Screenshot / recording hotkeys
+    /// pass through. Fail-open: a no-op unless the app is trusted for
+    /// Accessibility, so the lock degrades gracefully when the grant is missing.
     private let keyGuard = ExamKeyGuard()
 
     /// True between `enterKiosk` and `exitKiosk`. Gates the fight-back so we
@@ -88,6 +89,15 @@ final class KioskController {
     /// Torn down on exit so a reused window does not stack handlers (the bug
     /// the Electron `_kioskCleanup` guarded against).
     private var observers: [NSObjectProtocol] = []
+
+    /// System Screenshot / QuickTime capture UIs. While one of these is
+    /// frontmost, fight-back must not steal focus or the recording dies.
+    private static var isSystemCaptureFrontmost: Bool {
+        let bid = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        return bid == "com.apple.screencaptureui"
+            || bid == "com.apple.screenshot.launcher"
+            || bid == "com.apple.QuickTimePlayerX"
+    }
 
     /// Grace window after entering kiosk during which transient resign-key /
     /// full-screen-exit notifications are NOT treated as the student leaving.
@@ -120,12 +130,12 @@ final class KioskController {
     func enterKiosk(window: NSWindow) {
         // Re-entry (e.g. resume after a transient exit) must not stack observers
         // or clobber saved state. If a DIFFERENT window is still locked, fully
-        // restore it first (level/sharing/full-screen) so we never strand it
-        // pinned-above-everything with content protection on; otherwise just
+        // restore it first (level/full-screen) so we never strand it
+        // pinned-above-everything; otherwise just
         // drop the stale observers.
         // A same-window re-entry must NOT re-capture savedLevel/savedSharingType
-        // below — by now they already hold the kiosk values (.screenSaver/.none),
-        // so re-saving them would make exitKiosk "restore" the window to the
+        // below — by now savedLevel already holds the kiosk value (.screenSaver),
+        // so re-saving it would make exitKiosk "restore" the window to the
         // kiosk state instead of its real pre-kiosk one.
         let freshLock = lockedWindow !== window
         if let previous = lockedWindow, previous !== window {
@@ -164,24 +174,15 @@ final class KioskController {
         if freshLock { savedLevel = window.level }
         window.level = .screenSaver
 
-        // Content protection: hide the window's contents from screen-capture
-        // frames so an AI-launcher overlay (Raycast / Spotlight / a desktop
-        // assistant) that pops over us cannot snapshot the live question. This
-        // is the native NSWindowSharingType analogue of setContentProtection.
-        //
-        // TODO(content-protection / entitlement): sharingType = .none is the
-        // documented switch but is only fully honoured for capture exclusion on
-        // a window whose app is signed with a hardened runtime; under the
-        // unsigned dev build it is best-effort. Gate it behind the same
-        // "admin is test-driving (allowCapture)" escape hatch the Electron build
-        // had so an admin can still screenshot the app to file a bug. For now we
-        // save + set it unconditionally; wire the allowCapture flag in when the
-        // checks view passes one through.
+        // Content protection is OFF during the exam. Local screenshots and
+        // screen recordings (⌘⇧3/4/5, QuickTime, Loom, …) are allowed; the
+        // window must appear in those frames. Remote-control software is
+        // handled by the exam blackout, not by hiding the window from capture.
         if freshLock { savedSharingType = window.sharingType }
-        window.sharingType = .none
 
-        // Swallow the launcher / screenshot / Mission-Control hotkeys that
-        // presentationOptions can't. Fail-open: no-op unless trusted for Accessibility.
+        // Swallow the launcher / Mission-Control hotkeys that
+        // presentationOptions can't. Screenshot / recording hotkeys pass
+        // through. Fail-open: no-op unless trusted for Accessibility.
         keyGuard.start()
 
         // Take the window full-screen. toggleFullScreen drives the native
@@ -344,6 +345,10 @@ final class KioskController {
         // Electron build. Re-assert level only and return.
         if settling { return }
 
+        // ⌘⇧3/4/5 / QuickTime must keep focus or the capture UI is yanked
+        // closed. Local recordings are allowed; don't black out or re-key.
+        if Self.isSystemCaptureFrontmost { return }
+
         // Past settle: a genuine app switch. Raise the blackout FIRST (so it is
         // already up as the window comes forward), then re-grab and front. The
         // overlay stays until the student explicitly resumes.
@@ -397,19 +402,16 @@ final class KioskController {
 // MARK: - TODO (future hardening, needs entitlements / signing)
 //
 //  - Raw key suppression: DONE — ExamKeyGuard (a CGEventTap at .cgSessionEventTap)
-//    swallows the escape / launcher / capture hotkeys presentationOptions can't:
+//    swallows the launcher / Mission-Control hotkeys presentationOptions can't:
 //    ⌘Space / ⌥Space launchers (Spotlight, Raycast, Alfred, ChatGPT, Siri),
-//    ⌘⇧3/4/5/6 screenshots, ⌃-arrow Mission Control / Spaces, ⌘Tab, and F13-F19.
-//    Started/stopped with the lock; fails open until the app is trusted for
-//    Accessibility (System Settings > Privacy & Security > Accessibility). Extend
-//    the rules in ExamKeyGuard.shouldSuppress(keyCode:flags:) if needed.
+//    ⌃-arrow Mission Control / Spaces, ⌘Tab, and F13-F19. Screenshot /
+//    recording hotkeys (⌘⇧3/4/5/6) pass through so a recording of the exam
+//    can be taken. Started/stopped with the lock; fails open until the app is
+//    trusted for Accessibility (System Settings > Privacy & Security >
+//    Accessibility). Extend the rules in ExamKeyGuard.shouldSuppress if needed.
 //
-//  - Content protection durability: window.sharingType = .none only reliably
-//    excludes the window from capture under a hardened-runtime signed build
-//    (the team is already Developer-ID signed + notarized via
-//    `npm run build:signed`). Verify exclusion holds for ScreenCaptureKit
-//    capturers, not just legacy CGWindowList.
+//  - Content protection: OFF. window.sharingType is left at its pre-kiosk
+//    value so ⌘⇧3/4/5, QuickTime, and other local recorders capture the exam.
+//    Remote-control software still pauses writing via the exam blackout.
 //
-//  - allowCapture escape hatch: thread the admin "allow capture" flag from the
-//    checks view into enterKiosk so an admin test-driving the app can still
-//    screenshot it, exactly as the Electron build did.
+//  - allowCapture escape hatch: no longer needed; capture is allowed by default.

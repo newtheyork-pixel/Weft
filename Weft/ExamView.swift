@@ -9,8 +9,9 @@
 //  When `lockdown` is true (the real student flow) this also drives the full
 //  exam lifecycle: KioskController locks the window, a ProctoringEngine monitor
 //  re-sweeps every few seconds, and a blackout overlay covers the screen if
-//  screen-sharing software appears or the student leaves the window. With
-//  `lockdown` false (dev gallery / WEFT_SCREEN QA) it's an inert preview.
+//  remote-control software appears or the student leaves the window. Local
+//  screenshots and screen recordings are allowed. With `lockdown` false
+//  (dev gallery / WEFT_SCREEN QA) it's an inert preview.
 //
 
 import SwiftUI
@@ -209,7 +210,12 @@ struct ExamView: View {
         let engine = ProctoringEngine()
         while !Task.isCancelled {
             let report = await engine.runChecks(teacherIP: nil)
-            if report.screenCapture || report.remote {
+            // Pause only for remote-control / live screen-sharing (someone else
+            // driving or watching this Mac). Local recording and conferencing
+            // apps are a teacher-facing note, not a writing blackout — otherwise
+            // QuickTime, ⌘⇧5, Loom, or Slack in the background make the exam
+            // untakeable.
+            if report.remote {
                 let name = report.detectedApps.first ?? report.remoteReason ?? "screen-sharing software"
                 if runtime.block == nil || isSharing(runtime.block) {
                     runtime.block = .sharing(name)

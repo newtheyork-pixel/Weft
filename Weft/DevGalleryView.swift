@@ -144,7 +144,7 @@ struct KeyGuardTesterView: View {
                     trusted = ExamKeyGuard.isTrusted
                 }
                 .buttonStyle(.borderedProminent)
-                Text(running ? "ACTIVE — ⌘Space / screenshots / Mission Control should be inert"
+                Text(running ? "ACTIVE — ⌘Space / Mission Control should be inert"
                              : "Stopped")
                     .foregroundStyle(running ? .green : .secondary)
             }
@@ -159,8 +159,8 @@ struct KeyGuardTesterView: View {
             Text("""
             With the guard ACTIVE, each of these should do NOTHING:
             • ⌘Space / ⌥Space — Spotlight / Raycast / ChatGPT don't open.
-            • ⌘⇧4 / ⌘⇧5 — no screenshot crosshair or toolbar.
             • ⌃↑ / ⌃→ — Mission Control / space-switch don't fire.
+            ⌘⇧4 / ⌘⇧5 should still take a screenshot or start a recording.
             And typing stays normal: letters, numbers, the plain spacebar,
             arrows, ⌫, ⏎ all work in the box above. Stop guard → all restored.
             """)

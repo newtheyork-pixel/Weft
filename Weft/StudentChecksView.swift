@@ -20,11 +20,10 @@ struct StudentChecksView: View {
     /// loops. Honest, plain-language copy ported from renderTrustLabel().
     private let checks: [String] = [
         "Checks that no remote-control software (such as TeamViewer or Chrome Remote Desktop) is running.",
-        "Checks that no screen-sharing or screen-recording software is running.",
+        "Notes conferencing or recording apps for your teacher. They do not stop you from writing, and you can still take a screenshot or screen recording.",
         "Counts your displays and looks for a hidden second or virtual screen.",
         "Confirms this is a real computer, not a virtual machine.",
-        "Takes a still picture of your screen about once a minute so your teacher can see your work (only if you allow screen recording).",
-        "Keeps watching for those same things while you write, and rechecks every few seconds.",
+        "Keeps watching for remote-control software while you write, and rechecks every few seconds.",
     ]
 
     /// "What it never does" — the equally honest counter-list.
@@ -93,11 +92,15 @@ struct StudentChecksView: View {
     }
 
     /// Human-readable warnings derived from the report (advisory only; the
-    /// student can still enter — the exam itself blacks out on a live violation).
+    /// student can still enter). Only remote-control software pauses writing
+    /// inside the exam; recording and conferencing apps are a heads-up.
     private func warnings(_ r: ProctoringReport) -> [String] {
         var w: [String] = []
-        if r.screenCapture { w.append("Screen-share/recording app running" + (r.detectedApps.isEmpty ? "" : " (\(r.detectedApps.joined(separator: ", ")))")) }
-        if r.remote { w.append("Remote-control software detected") }
+        if r.remote {
+            w.append("Remote-control software detected" + (r.detectedApps.isEmpty ? "" : " (\(r.detectedApps.joined(separator: ", ")))"))
+        } else if r.screenCapture {
+            w.append("Recording or conferencing app running" + (r.detectedApps.isEmpty ? "" : " (\(r.detectedApps.joined(separator: ", ")))") + " — you can still enter")
+        }
         if r.displays > 1 { w.append("\(r.displays) displays connected") }
         if r.isVM { w.append("Running in a virtual machine") }
         return w
