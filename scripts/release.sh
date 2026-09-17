@@ -14,16 +14,24 @@
 #   - scripts/.env.signing filled in (Apple ID + app-specific password + team)
 #   - GH_TOKEN with contents:write on newtheyork-pixel/weft-releases
 #   - sudo xcodebuild -license accept   (notarytool is blocked otherwise)
-#   - For Sparkle updates: Sparkle's `generate_appcast` on PATH + an EdDSA key
-#     in the keychain (see RELEASE.md "Sparkle"). The script auto-detects these;
-#     without them it ships a notarized DMG with no appcast (fine for a first cut).
+#   - Sparkle's `generate_appcast` on PATH (or in the Sparkle DerivedData bin)
+#     plus an EdDSA key in the keychain matching SUPublicEDKey (see RELEASE.md).
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 # Sparkle's CLI tools (generate_appcast/sign_update) live here, so the appcast
-# step finds them without a system-wide install.
+# step finds them without a system-wide install. Also pick up the copy Xcode
+# already downloaded with the Sparkle package: without that, a missing PATH
+# entry used to ship a DMG and skip the feed, so installed apps never saw
+# the update.
 export PATH="$HOME/.local/bin:$PATH"
+for sparkle_bin in "$HOME/Library/Developer/Xcode/DerivedData"/Weft-*/SourcePackages/artifacts/sparkle/Sparkle/bin; do
+  if [ -x "$sparkle_bin/generate_appcast" ]; then
+    export PATH="$sparkle_bin:$PATH"
+    break
+  fi
+done
 
 fail() { printf '\n\033[31m✗ %s\033[0m\n' "$1" >&2; [ -n "${2:-}" ] && printf '  %s\n' "$2" >&2; exit 1; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$1"; }
@@ -45,7 +53,10 @@ set -a; source scripts/.env.signing; set +a
 : "${APPLE_TEAM_ID:?set in scripts/.env.signing}"
 : "${APPLE_ID:?set in scripts/.env.signing}"
 : "${APPLE_APP_SPECIFIC_PASSWORD:?set in scripts/.env.signing}"
-: "${GH_TOKEN:?export a token with contents:write on $RELEASES_REPO}"
+if [ -z "${GH_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
+  GH_TOKEN="$(gh auth token 2>/dev/null || true)"
+fi
+: "${GH_TOKEN:?export a token with contents:write on $RELEASES_REPO (or gh auth login)}"
 ok "Signing env + GH_TOKEN present (team $APPLE_TEAM_ID)"
 
 # 2. Toolchain preflight.
@@ -126,22 +137,22 @@ if ! spctl -a -t exec -vv "$APP" 2>/dev/null; then
 fi
 ok "Notarized + stapled + Gatekeeper-accepted"
 
-# 7. Sparkle (optional, auto-detected): zip the notarized app + EdDSA-sign it.
-#    The zip is the appcast enclosure; its download URL is this tag's asset URL.
-HAVE_APPCAST=0
-if command -v generate_appcast >/dev/null 2>&1; then
-  info "Sparkle detected — building + signing appcast…"
-  ditto -c -k --keepParent "$APP" "$ZIP"   # the stapled app, into $UPDATES only
-  # generate_appcast scans $UPDATES (zip only — the DMG is NOT here, so it can't
-  # be mistaken for an enclosure), EdDSA-signs each archive with the key in the
-  # keychain, and writes appcast.xml with enclosure URLs at the tag's assets.
-  generate_appcast "$UPDATES" \
-    --download-url-prefix "https://github.com/$RELEASES_REPO/releases/download/$TAG/"
-  [ -f "$UPDATES/appcast.xml" ] && HAVE_APPCAST=1 && ok "appcast.xml signed" \
-    || info "generate_appcast wrote no appcast (check the EdDSA key)"
-else
-  info "Sparkle tools not on PATH — shipping the DMG only (no appcast this run)."
-fi
+# 7. Sparkle: zip the notarized app + EdDSA-sign it. The zip is the appcast
+#    enclosure; its download URL is this tag's asset URL. Required, not
+#    optional: 0.3.2+ installs poll the feed, and shipping a DMG without
+#    updating it leaves every existing copy on the previous version.
+command -v generate_appcast >/dev/null 2>&1 \
+  || fail "generate_appcast not on PATH" "Sparkle's CLI tools must be available so installed apps see this release. They ship inside the Sparkle package under DerivedData, or copy bin/generate_appcast onto PATH (see RELEASE.md)."
+info "Building + signing appcast…"
+ditto -c -k --keepParent "$APP" "$ZIP"   # the stapled app, into $UPDATES only
+# generate_appcast scans $UPDATES (zip only — the DMG is NOT here, so it can't
+# be mistaken for an enclosure), EdDSA-signs each archive with the key in the
+# keychain, and writes appcast.xml with enclosure URLs at the tag's assets.
+generate_appcast "$UPDATES" \
+  --download-url-prefix "https://github.com/$RELEASES_REPO/releases/download/$TAG/"
+[ -f "$UPDATES/appcast.xml" ] || fail "generate_appcast wrote no appcast.xml" "Check that the EdDSA private key in the login keychain matches SUPublicEDKey in Info.plist (fiG4…)."
+HAVE_APPCAST=1
+ok "appcast.xml signed"
 
 # 8. Publish the binaries to the GitHub release (pre-release = clearly a beta).
 ASSETS=("$DMG"); [ "$HAVE_APPCAST" = 1 ] && ASSETS+=("$ZIP")

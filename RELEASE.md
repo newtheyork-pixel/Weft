@@ -9,8 +9,7 @@ download automatically.
   **off** (proctoring enumerates processes, displays, VMs), which the store forbids.
 - **Floor: macOS 26.1+** (the app uses current SwiftUI APIs). Anyone on older
   macOS can't run it.
-- Current version: `0.3.0` (set via `MARKETING_VERSION` in the project; it clears
-  the old Electron `0.2.22` so it becomes the download).
+- Current version: `0.3.5` (set via `MARKETING_VERSION` in the project).
 
 ## One-time setup
 
@@ -35,10 +34,10 @@ is set automatically by the script from the git commit count, so it always
 increases — don't hand-edit `CURRENT_PROJECT_VERSION`.
 
 The script: archives Release → exports a Developer ID app → builds a DMG →
-notarizes + staples both the DMG and the app → publishes a **pre-release** tag
-(`v<version>`) to `weft-releases`. If Sparkle is set up (below), it also signs a
-`.zip` and updates the appcast. It's safe to run before Sparkle exists — it just
-ships the DMG.
+notarizes + staples both the DMG and the app → signs a Sparkle `.zip` →
+publishes a GitHub release (`v<version>`) to `weft-releases` and commits
+`appcast.xml` so installed copies pick the update up. The website
+`/api/download` follows that same newest release.
 
 **Verify the beta** on a clean Mac (or after download): the DMG opens with no
 Gatekeeper warning, and (after mounting) `spctl -a -vvv -t exec /Volumes/Weft/Weft.app`
