@@ -51,8 +51,9 @@ private struct ReviewEntry: Identifiable {
 
     var initials: String { String((name.first ?? "?")).uppercased() }
 
-    /// An empty stand-in used only when a live load returns zero rows mid-render,
-    /// so `current` is never indexed out of bounds.
+    /// An empty stand-in used only when a live load returns zero rows
+    /// mid-render, so `current` is never indexed out of bounds. The canvas
+    /// branches on an empty roster and never paints this as a student.
     static let placeholder = ReviewEntry(
         id: "__none__", name: "No submissions", status: .joined, wordCount: 0,
         submitted: false, returned: false, lastEdited: "",
@@ -168,6 +169,11 @@ struct ReviewGradingView: View {
     @State private var savingIds: Set<String> = []
     /// Last confirmed save per submission id, for the "Saved 10:42" line.
     @State private var savedAt: [String: Date] = [:]
+    /// Parsed live roster, rebuilt when the session payload changes, NOT on
+    /// every keystroke. liveEntry used to re-flatten every essay's HTML and
+    /// allocate a DateFormatter per row from `roster`'s computed getter, so
+    /// typing a comment was visibly slow on a class of any size.
+    @State private var liveRoster: [ReviewEntry] = []
 
     private let defaultPointsPossible: Double = 100
 
@@ -192,10 +198,10 @@ struct ReviewGradingView: View {
         return p
     }
 
-    /// The rows the screen renders — live submissions mapped into `ReviewEntry`,
-    /// or the bundled mock essays when there is no real data.
+    /// The rows the screen renders — live submissions mapped into `ReviewEntry`
+    /// once per payload, or the bundled mock essays when there is no real data.
     private var roster: [ReviewEntry] {
-        isLive ? app.gradingSubmissions.map(liveEntry(from:)) : mockRoster
+        isLive ? liveRoster : mockRoster
     }
 
     private var current: ReviewEntry {
@@ -220,21 +226,46 @@ struct ReviewGradingView: View {
             topBar
             Divider().overlay(Color.black.opacity(0.08))
             HStack(spacing: 0) {
-                rosterRail
-                    .frame(width: 268)
-                Divider().overlay(Color.black.opacity(0.08))
-                reader
-                    .frame(maxWidth: .infinity)
-                Divider().overlay(Color.black.opacity(0.08))
-                gradeRail
-                    .frame(width: 320)
+                if isLive, !app.gradesFresh {
+                    if let error = app.errorMessage, app.gradingSubmissions.isEmpty {
+                        gradingMessage(title: "Couldn't load submissions", body: error)
+                    } else {
+                        gradingMessage(
+                            title: "Loading submissions…",
+                            body: "Fetching this session's essays.")
+                    }
+                } else if isLive, roster.isEmpty {
+                    gradingMessage(
+                        title: "No submissions yet",
+                        body: "Nobody in this session has started writing. Rows appear here as students begin.")
+                } else {
+                    rosterRail
+                        .frame(width: 268)
+                    Divider().overlay(Color.black.opacity(0.08))
+                    reader
+                        .frame(maxWidth: .infinity)
+                    Divider().overlay(Color.black.opacity(0.08))
+                    gradeRail
+                        .frame(width: 320)
+                }
             }
         }
         .background(AmbientBackground())
-        .task { await app.loadGrading() }
+        .task {
+            await app.loadGrading()
+            rebuildLiveRoster()
+        }
+        .onChange(of: app.gradingSubmissions) { _, _ in rebuildLiveRoster() }
+        .onChange(of: app.grades) { _, _ in rebuildLiveRoster() }
+        .onChange(of: app.gradingRoster) { _, _ in rebuildLiveRoster() }
         .onChange(of: current.id) { _, _ in seedBuffers() }
         .onChange(of: isLive) { _, _ in index = 0; seedBuffers() }
         .onAppear { seedBuffers() }
+    }
+
+    private func rebuildLiveRoster() {
+        liveRoster = app.gradingSubmissions.map(liveEntry(from:))
+        if index >= liveRoster.count { index = max(0, liveRoster.count - 1) }
     }
 
     // MARK: Live data ↔ ReviewEntry
@@ -279,12 +310,24 @@ struct ReviewGradingView: View {
         // "Submitted" only once submitted_at is stamped; an autosaved-but-
         // unsubmitted row is still in progress, so label it as last edited.
         guard let when = sub.submittedAt ?? sub.updatedAt else { return "" }
+        let prefix = sub.submittedAt != nil ? "Submitted " : "Edited "
+        return prefix + Self.editedFormatter.string(from: when)
+    }
+
+    /// One formatter for the whole screen. Allocating one per row per body
+    /// evaluation is what made paging the roster hitch.
+    private static let editedFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateStyle = .medium
         f.timeStyle = .short
-        let prefix = sub.submittedAt != nil ? "Submitted " : "Edited "
-        return prefix + f.string(from: when)
-    }
+        return f
+    }()
+    private static let clockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
 
     /// Seed the local Score / Final comment buffers from the selected grade, or
     /// from the unsaved typing if this student has some: a save that never
@@ -326,18 +369,18 @@ struct ReviewGradingView: View {
             Spacer(minLength: Theme.Space.lg)
 
             HStack(spacing: Theme.Space.sm) {
-                navButton("Back", system: "chevron.left", disabled: index <= 0) {
+                navButton("Back", system: "chevron.left", disabled: index <= 0 || roster.isEmpty) {
                     if index > 0 { flushIfDirty(); withAnimation(.easeOut(duration: 0.18)) { index -= 1 } }
                 }
                 .help("Previous student")
-                Text("Student \(index + 1) of \(roster.count)")
+                Text(roster.isEmpty ? "No students" : "Student \(index + 1) of \(roster.count)")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.muted)
                     .monospacedDigit()
                     .frame(minWidth: 104)
                     .contentTransition(.numericText())
                 navButton("Next", system: "chevron.right", trailingIcon: true,
-                          disabled: index >= roster.count - 1) {
+                          disabled: roster.isEmpty || index >= roster.count - 1) {
                     if index < roster.count - 1 { flushIfDirty(); withAnimation(.easeOut(duration: 0.18)) { index += 1 } }
                 }
                 .help("Next student")
@@ -1001,10 +1044,23 @@ struct ReviewGradingView: View {
 
     /// Clock time for the "Saved 10:42" confirmation (the liveEdited idiom).
     private func clockLabel(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateStyle = .none
-        f.timeStyle = .short
-        return f.string(from: date)
+        Self.clockFormatter.string(from: date)
+    }
+
+    private func gradingMessage(title: String, body: String) -> some View {
+        VStack(spacing: Theme.Space.sm) {
+            Text(title)
+                .font(Theme.sans(18, .semibold))
+                .foregroundStyle(Theme.inkSoft)
+            Text(body)
+                .font(Theme.sans(13))
+                .foregroundStyle(Theme.muted)
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+                .frame(maxWidth: 360)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(56)
     }
 }
 

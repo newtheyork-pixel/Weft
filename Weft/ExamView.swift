@@ -124,9 +124,15 @@ struct ExamView: View {
             startExam(in: window)
         }
         .task {
-            if deadline == nil {
-                let minutes = assignment.timeLimitMinutes ?? 45
-                deadline = Date().addingTimeInterval(TimeInterval(minutes * 60))
+            // Real exams take the server-anchored deadline beginExam seeded.
+            // A client Date()+limit here is what handed a crash-reentry a
+            // fresh window, and what invented a 45-minute bell on untimed
+            // assignments (the editor's blank = unlimited). Preview keeps a
+            // display-only countdown so the gallery still looks like an exam.
+            if lockdown {
+                deadline = app.examDeadline
+            } else if deadline == nil {
+                deadline = Date().addingTimeInterval(45 * 60)
             }
             // Seed filler text in preview only; a real exam starts blank.
             if !lockdown && !didSeedPreview {
@@ -193,6 +199,12 @@ struct ExamView: View {
     /// startExam and cancelled in endExam so it never outlives the kiosk lock.
     /// Only the screen-share/remote signals drive the blackout here; focus loss
     /// is handled by the kiosk `onBlackout` hook and `.focusLost` takes precedence.
+    ///
+    /// The same tick asks whether the session is still open. Ending a session
+    /// used to leave every student typing into a row the server would freeze
+    /// (or, before the window trigger, keep accepting), with no way out of
+    /// the kiosk except the 0:00 path. Force-submit is the same path as the
+    /// bell, so a failed flush still retries until it lands.
     private func monitorLoop() async {
         let engine = ProctoringEngine()
         while !Task.isCancelled {
@@ -204,6 +216,18 @@ struct ExamView: View {
                 }
             } else if isSharing(runtime.block) {
                 runtime.block = nil
+            }
+            if !expired, !submitting {
+                do {
+                    if try await app.examSessionStillOpen() == false {
+                        deadline = Date()
+                        expired = true
+                        submit()
+                    }
+                } catch {
+                    // Transport blip: the next tick retries. Treating a 502
+                    // as the bell would submit a class during a cold start.
+                }
             }
             try? await Task.sleep(for: .seconds(5))
         }

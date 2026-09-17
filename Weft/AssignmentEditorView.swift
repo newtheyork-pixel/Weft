@@ -260,9 +260,6 @@ struct AssignmentEditorView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: Theme.Space.xl) {
-                        if let message = app.errorMessage {
-                            errorBanner(message)
-                        }
                         titleField
                         promptField
                         wordLimitField
@@ -274,6 +271,12 @@ struct AssignmentEditorView: View {
                     }
                     .padding(.horizontal, Theme.Space.xl)
                     .padding(.bottom, Theme.Space.lg)
+                }
+
+                if let message = app.errorMessage {
+                    errorBanner(message)
+                        .padding(.horizontal, Theme.Space.xl)
+                        .padding(.bottom, Theme.Space.sm)
                 }
 
                 footer
@@ -309,15 +312,6 @@ struct AssignmentEditorView: View {
                     .foregroundStyle(Theme.inkSoft)
                 Spacer()
             }
-            Button {
-                // Blackbaud import is a later wave — surfaced for parity.
-            } label: {
-                Text("Import from Blackbaud →")
-                    .font(Theme.sans(13, .semibold))
-                    .foregroundStyle(Theme.accent)
-            }
-            .buttonStyle(.plain)
-            .linkPointer()
         }
     }
 
@@ -904,20 +898,35 @@ struct AssignmentEditorView: View {
     }
 
     private func save() {
-        // Persist through AppState. Blank -> nil = "unlimited"; trim whitespace
-        // and reject non-positive values so " 60" still counts and 0/-5 can't
-        // create an instantly-expired exam. The attached files are already
-        // uploaded, so only their ids travel here; the website list is
-        // reconciled against the rows this question already owns. On success
-        // AppState navigates home; on failure it sets app.errorMessage,
-        // surfaced inline above.
+        // Persist through AppState. Blank -> nil = "unlimited". A value
+        // that is not a bare positive integer is a typo, not a wish for
+        // unlimited: "60 min" used to write NULL and the teacher saw the
+        // field still holding their text. Refuse the save and say why,
+        // next to Save, which is the control that looked like a no-op
+        // when the banner lived up in the scroll view.
         guard canSave else { return }
+        let words: Int?
+        switch Self.parseLimit(wordLimit) {
+        case .unlimited: words = nil
+        case .value(let n): words = n
+        case .invalid:
+            app.errorMessage = "Word limit must be a whole number of words, or left blank for unlimited."
+            return
+        }
+        let minutes: Int?
+        switch Self.parseLimit(timeLimit) {
+        case .unlimited: minutes = nil
+        case .value(let n): minutes = n
+        case .invalid:
+            app.errorMessage = "Time limit must be a whole number of minutes, or left blank for unlimited."
+            return
+        }
         Task {
             await app.saveAssignment(
                 title: title,
                 prompt: prompt,
-                wordLimit: positiveInt(wordLimit),
-                timeLimitMinutes: positiveInt(timeLimit),
+                wordLimit: words,
+                timeLimitMinutes: minutes,
                 spellcheckEnabled: spellcheckEnabled,
                 outlineAllowed: outlineAllowed,
                 links: links.map { (name: $0.name, href: $0.href) },
@@ -933,9 +942,15 @@ struct AssignmentEditorView: View {
         onSave()
     }
 
-    /// Parse a positive integer from a text field, or nil for blank/invalid/non-positive.
-    private func positiveInt(_ text: String) -> Int? {
-        Int(text.trimmingCharacters(in: .whitespaces)).flatMap { $0 > 0 ? $0 : nil }
+    private enum LimitInput { case unlimited, value(Int), invalid }
+
+    /// Empty is unlimited; a positive integer is a limit; anything else
+    /// ("60 min", "1 hour", "none") is a typo the teacher must see.
+    private static func parseLimit(_ text: String) -> LimitInput {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return .unlimited }
+        if let n = Int(trimmed), n > 0 { return .value(n) }
+        return .invalid
     }
 }
 

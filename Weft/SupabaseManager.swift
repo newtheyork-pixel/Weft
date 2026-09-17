@@ -892,6 +892,18 @@ final class SupabaseManager: @unchecked Sendable {
         return rows.first?.id
     }
 
+    /// Stamp `students.started_at` (idempotent: coalesce keeps the first
+    /// registration) and return the server clock so the exam countdown is
+    /// the remainder of that window. The RPC has been deployed since the
+    /// essay-first wave; the native app just never called it, which is why
+    /// a crash-reentry got a fresh client-side hour and why an untimed
+    /// assignment still died at 45 minutes.
+    func startEssay(studentId: String) async throws -> EssayStart? {
+        let rows: [EssayStart] = try await rpc("start_essay",
+                                               params: ["p_student_id": studentId])
+        return rows.first
+    }
+
     /// Lock a submitted essay at the DB layer (SECURITY DEFINER submit_essay:
     /// stamps submitted_at; RLS then refuses student edits). Best-effort.
     func submitEssay(submissionId: String) async -> Bool {

@@ -176,6 +176,21 @@ struct ExamSession: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+/// `start_essay` RETURNS TABLE (started_at, server_now). The countdown is
+/// the remainder of that window on the server's clock, not a fresh hour
+/// from Date() at view appearance: a crash-reentry otherwise got a new
+/// full limit, and that is how a client-only deadline outlived the
+/// server's.
+struct EssayStart: Decodable, Sendable {
+    let startedAt: Date
+    let serverNow: Date
+
+    enum CodingKeys: String, CodingKey {
+        case startedAt = "started_at"
+        case serverNow = "server_now"
+    }
+}
+
 extension ExamSession {
     /// The open demo session for the signed-out preview. It seeds BOTH
     /// AppState.liveSession and the history's Open row (spec §5: one open +

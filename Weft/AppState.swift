@@ -45,6 +45,11 @@ final class AppState {
     var activeExamSession: ExamSession?
     /// The essay_submissions row id captured from the first durable save.
     var activeSubmissionId: String?
+    /// When this attempt's writing window ends, in local time, offset from
+    /// the server clock `start_essay` returned. nil = the teacher left the
+    /// time limit blank (unlimited). Seeded in beginExam, never from Date()
+    /// at ExamView appearance: that reset the clock on every re-entry.
+    var examDeadline: Date?
 
     // MARK: Student in-role navigation
     var studentScreen: StudentScreen = .home
@@ -72,7 +77,9 @@ final class AppState {
     private var launchInFlight = false
     /// True only after a *successful* grading load, so a first-release email is
     /// never sent off a stale/failed grades cache (which would duplicate).
-    private var gradesFresh = false
+    /// The grading screen also reads this: an empty roster before the load
+    /// returns is "still loading", not a fake student called "No submissions".
+    private(set) var gradesFresh = false
     /// The live-roster sweep (see startRosterPolling). nil when nothing is live.
     private var rosterPollTask: Task<Void, Never>?
     /// Monotonic sweep generation (the ExamView saveGeneration idiom): a tick
@@ -273,6 +280,7 @@ final class AppState {
         studentScreen = .home
         pendingDeepLink = nil; pendingExamCode = nil; prefilledJoinCode = nil
         activeStudentId = nil; activeExamSession = nil; activeSubmissionId = nil
+        examDeadline = nil
         gradesFresh = false
         enrolledClasses = [.sample, .sample2]
         classWork = ClassWorkItem.sampleList
@@ -1299,7 +1307,9 @@ final class AppState {
         gradingOutlines = []
         gradesFresh = false
         teacherScreen = .grading
-        Task { await loadGrading() }
+        // ReviewGradingView's .task owns the load (auto-cancelled with the
+        // view), the same shape as openReturnedWork. Firing one here as
+        // well ran the four queries twice on every open.
     }
 
     func loadGrading() async {
@@ -1307,7 +1317,10 @@ final class AppState {
         // sessions stay gradeable forever. nil (dev gallery / #Preview) keeps
         // the silent no-op so the grading screen's mock fallback renders.
         guard let sid = gradingSession?.id else { return }
-        gradesFresh = false
+        // Do not clear gradesFresh here: saveGrade reloads after every
+        // write, and flipping it false would paint "Loading submissions"
+        // over the essay the teacher is in the middle of scoring.
+        // openGrading already set it false for a first open.
         if !signedIn {
             gradingSubmissions = []
             grades = [:]
@@ -1417,7 +1430,7 @@ final class AppState {
                                  prompt: Assignment.sample.questions.first?.prompt
                                      ?? "Respond to the prompt your teacher set.",
                                  wordLimit: 600)],
-            timeLimitMinutes: 45)
+            timeLimitMinutes: nil)
         // Seed empty when signed in (loadExamMaterials fills in the teacher's
         // real files/links); the bundled samples are for the not-signed-in
         // preview only. Seeding samples for a signed-in student would leak fake
@@ -1428,6 +1441,7 @@ final class AppState {
         activeExamSession = nil
         activeStudentId = nil
         activeSubmissionId = nil
+        examDeadline = nil
         markedWriting = false
         if signedIn, let code = item.activeCode {
             Task {
@@ -1529,16 +1543,27 @@ final class AppState {
             // changes for this session from here on — reflect that immediately
             // (even if the late-success guard below bails out of entering).
             outlineLockedSessionIds.insert(session.id)
-            // The registration round-trip is long enough for the student to
-            // have left checks (deep link, sign-out, back). A late success
-            // must not shove them into the kiosk — or worse, cross-wire a
-            // stale students-row id with a newer session (every autosave
-            // would then fail RLS inside a locked exam).
+            // Anchor the countdown to the server BEFORE entering the kiosk:
+            // ExamView used to seed Date()+limit at appearance, so a
+            // crash-reentry got a brand-new window. start_essay is
+            // idempotent (first started_at wins) and returns server_now
+            // so the remaining minutes are the original window.
+            guard let start = try await supabase.startEssay(studentId: sid) else {
+                errorMessage = "Couldn't start the exam clock. Try Begin again."
+                return false
+            }
+            // The registration + start round-trip is long enough for the
+            // student to have left checks (deep link, sign-out, back). A
+            // late success must not shove them into the kiosk — or worse,
+            // cross-wire a stale students-row id with a newer session
+            // (every autosave would then fail RLS inside a locked exam).
             guard studentScreen == .checks, activeExamSession?.id == session.id else {
                 return false
             }
             activeStudentId = sid
             activeSubmissionId = nil
+            examDeadline = Self.deadline(from: start,
+                                         minutes: activeAssignment?.timeLimitMinutes)
             markedWriting = false   // this attempt's row is back at "joined"
             errorMessage = nil
             enterExam()
@@ -1599,8 +1624,30 @@ final class AppState {
         activeStudentId = nil
         activeSubmissionId = nil
         activeExamSession = nil
+        examDeadline = nil
         markedWriting = false
         return true
+    }
+
+    /// True while the attempt's session is still open. lookup_session_by_code
+    /// already returns no row for a closed session (and 000005 keeps that
+    /// filter), so nil and status != open are the same signal: the teacher
+    /// ended it. Throws on a transport failure so a blip is not the bell.
+    func examSessionStillOpen() async throws -> Bool {
+        guard signedIn, let code = activeExamSession?.code else { return true }
+        let session = try await supabase.lookupSession(code: code)
+        return session?.status == "open"
+    }
+
+    /// Convert the server's (started_at, server_now) pair plus the
+    /// assignment's minute limit into a local Date. nil minutes = unlimited,
+    /// matching the editor's "leave blank" and the server's NULL time_limit.
+    private static func deadline(from start: EssayStart, minutes: Int?) -> Date? {
+        guard let minutes, minutes > 0 else { return nil }
+        let remaining = start.startedAt
+            .addingTimeInterval(TimeInterval(minutes * 60))
+            .timeIntervalSince(start.serverNow)
+        return Date().addingTimeInterval(remaining)
     }
 
     func openReturnedWork() {
@@ -1669,6 +1716,7 @@ final class AppState {
             classWork[idx].myActiveSubmittedAt = Date()
         }
         activeAssignment = nil
+        examDeadline = nil
         studentScreen = .done
         if signedIn { Task { await loadClassWork() } }
     }
