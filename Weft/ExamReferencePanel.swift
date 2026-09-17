@@ -1,6 +1,6 @@
 //
 //  ExamReferencePanel.swift
-//  Weft — the exam's reference area, browser-style: every teacher document and
+//  Weft, the exam's reference area, browser-style: every teacher document and
 //  approved website is a TAB. Click to switch instantly; the render surfaces
 //  live in the store and are kept alive for the whole exam, so page, scroll,
 //  zoom and web-navigation state survive even hiding the panel (⌘⇧R), and
@@ -56,9 +56,11 @@ struct ExamReferencePanel: View {
     @ViewBuilder private var content: some View {
         if !store.materials.isEmpty {
             materialCanvas
-        } else if materialsLoading {
-            // The fetch is still out: a "nothing attached" message here would
-            // be a claim the app can't make yet.
+        } else if materialsLoading || !files.isEmpty || !links.isEmpty {
+            // The fetch is still out, or the store has materials to configure
+            // and has simply not run its .task yet (which happens after the
+            // first frame): a "nothing attached" message either way would be a
+            // claim the app can't make.
             loadingCard("Loading your reference materials…")
         } else {
             emptyState

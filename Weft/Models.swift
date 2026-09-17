@@ -294,11 +294,17 @@ struct ExamFile: Identifiable, Codable, Hashable, Sendable {
     var isPDF: Bool { mimeType.contains("pdf") || originalName.lowercased().hasSuffix(".pdf") }
 
     /// How (and whether) the exam reference panel can render this file. A PDF
-    /// goes to PDFKit; Word / RTF / plain text are read with AppKit's document
-    /// importers; anything else is refused honestly rather than being offered a
-    /// "couldn't load" with a retry that can never succeed.
+    /// goes to PDFKit; a picture (a chart, a photographed source, a scanned
+    /// page) is decoded and shown in that same PDF surface, as the Electron
+    /// viewer showed images inline; Word / RTF / plain text are read with
+    /// AppKit's document importers; anything else is refused honestly rather
+    /// than being offered a "couldn't load" with a retry that can never
+    /// succeed.
     enum Renderable: Equatable, Sendable {
         case pdf
+        /// Anything AppKit can decode into an NSImage: PNG, JPEG, HEIC, GIF,
+        /// TIFF, SVG.
+        case image
         /// Word: Office Open XML (.docx) or the classic .doc format.
         case word
         case rtf
@@ -312,6 +318,11 @@ struct ExamFile: Identifiable, Codable, Hashable, Sendable {
         let name = originalName.lowercased()
         func named(_ suffixes: String...) -> Bool { suffixes.contains { name.hasSuffix($0) } }
 
+        if mime.hasPrefix("image/")
+            || named(".png", ".jpg", ".jpeg", ".gif", ".heic", ".heif",
+                     ".webp", ".tif", ".tiff", ".bmp") {
+            return .image
+        }
         if mime.contains("wordprocessingml") || mime.contains("msword") || named(".docx", ".doc") {
             return .word
         }

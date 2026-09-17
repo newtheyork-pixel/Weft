@@ -128,9 +128,9 @@ final class AppState {
     var examMaterialsLoading = false
 
     /// Materials shown in the exam reference panel: the student's own outline
-    /// first (whenever the assignment allowed one — the panel renders PDFs,
-    /// Word, RTF and plain text, and says so honestly for anything else), then
-    /// the teacher's files. Falls back to just the teacher files.
+    /// first (whenever the assignment allowed one: the panel renders PDFs,
+    /// images, Word, RTF and plain text, and says so honestly for anything
+    /// else), then the teacher's files. Falls back to just the teacher files.
     var examReferenceFiles: [ExamFile] {
         guard let sid = activeExamSession?.id,
               outlineAllowedBySession[sid] == true,

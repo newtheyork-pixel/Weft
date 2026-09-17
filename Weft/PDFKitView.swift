@@ -1,10 +1,10 @@
 //
 //  PDFKitView.swift
-//  Weft — the render surfaces for the exam reference panel: a real PDF viewer
-//  (PDFKit), a read-only text viewer for Word / RTF / plain-text references
-//  (AppKit's document importers), and the loader that turns a stored file into
-//  one of them. The Electron build only ever showed file *names*; this renders
-//  the actual document.
+//  Weft, the render surfaces for the exam reference panel: a real PDF viewer
+//  (PDFKit, which also shows image references), a read-only text viewer for
+//  Word / RTF / plain-text references (AppKit's document importers), and the
+//  loader that turns a stored file into one of them. The Electron build only
+//  ever showed file *names*; this renders the actual document.
 //
 //  Every surface is created ONCE per file and retained by ReferenceTabStore,
 //  then hosted through `RetainedViewHost`. That is what makes page, scroll and
@@ -134,11 +134,35 @@ enum ReferenceDocumentLoader {
             // uploaded them: a retry downloads the same thing. A truncated
             // download of a real PDF is worth retrying.
             return data.starts(with: Array("%PDF".utf8)) ? .failed : .unsupported
+        case .image:
+            return imageDocument(from: data)
         case .word, .rtf, .plainText:
             return textDocument(from: data, file: file)
         case .unsupported:
             return .unsupported
         }
+    }
+
+    /// A picture (a chart, a photographed source, a scanned page): teachers
+    /// attach these freely, and the Electron viewer showed them inline, so the
+    /// exam panel must too. The decoded image is wrapped in a one-page PDF and
+    /// handed to the same PDFKit surface as every other reference, which is what
+    /// gives it fit-to-width, zoom and scrolling for free.
+    @MainActor
+    private static func imageDocument(from data: Data) -> ReferenceDocument {
+        guard let image = NSImage(data: data),
+              image.size.width > 0, image.size.height > 0,
+              let page = PDFPage(image: image)
+        else {
+            // Bytes AppKit cannot decode at all, i.e. a file mislabelled as an
+            // image: a retry downloads exactly the same thing, so this is
+            // "cannot be shown", not "couldn't load". (PNG, JPEG, HEIC, GIF,
+            // TIFF and SVG all decode; verified against real bytes.)
+            return .unsupported
+        }
+        let doc = PDFDocument()
+        doc.insert(page, at: 0)
+        return .pdf(doc)
     }
 
     @MainActor

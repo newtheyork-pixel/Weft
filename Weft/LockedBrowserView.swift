@@ -36,8 +36,8 @@ import AppKit
 /// Two deliberate, documented differences:
 ///   - an entry's apex and its `www.` form are treated as the same site (school
 ///     sheets mix the two, and they are the same site by convention);
-///   - a teacher can opt into subdomains explicitly by writing `*.` in the
-///     entry ("*.jstor.org"), which nothing else in the app grants.
+///   - a teacher can opt into subdomains explicitly by prefixing the host with
+///     `*.` ("*.jstor.org"), which nothing else in the app grants.
 struct AllowRule: Equatable, Sendable {
     let scheme: String
     let host: String
@@ -59,14 +59,11 @@ nonisolated enum ApprovedURLs {
         let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        let wildcard = trimmed.contains("*.")
-        let cleaned = wildcard ? trimmed.replacingOccurrences(of: "*.", with: "") : trimmed
-
         // Split the scheme off by hand rather than letting URLComponents guess:
         // prefixing "https://" onto "mailto:librarian@school.org" parses as the
         // host school.org, which would quietly widen the allow-list.
         var scheme = "https"
-        var body = cleaned
+        var body = trimmed
         if let separator = body.range(of: "://") {
             scheme = String(body[body.startIndex..<separator.lowerBound]).lowercased()
             body = String(body[separator.upperBound...])
@@ -77,6 +74,16 @@ nonisolated enum ApprovedURLs {
         }
         guard scheme == "http" || scheme == "https" else { return nil }
 
+        // "*." widens the host ONLY as the leading component of the host, which
+        // is the one place a teacher can mean it. A "*." anywhere else is part
+        // of a path ("/files/*.pdf") and must never turn into a subdomain rule;
+        // the host guard below then refuses the leftover star.
+        var includeSubdomains = false
+        if body.hasPrefix("*.") {
+            includeSubdomains = true
+            body.removeFirst(2)
+        }
+
         guard let comps = URLComponents(string: scheme + "://" + body),
               var host = comps.host?.lowercased(), !host.isEmpty
         else { return nil }
@@ -84,7 +91,7 @@ nonisolated enum ApprovedURLs {
         guard !host.isEmpty, !host.contains("*"), !host.contains(" ") else { return nil }
 
         return AllowRule(scheme: scheme, host: host, port: comps.port,
-                         includeSubdomains: wildcard)
+                         includeSubdomains: includeSubdomains)
     }
 
     static func rules(from entries: [String]) -> [AllowRule] {
@@ -161,6 +168,12 @@ final class ReferenceWebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
     private var progressTask: Task<Void, Never>?
     private var started = false
     private var torn = false
+    /// True once a page has actually committed in this web view, i.e. there is
+    /// something readable on screen. WKWebView.url is NOT this: it already
+    /// reports the provisional request the moment load() is called, so a
+    /// navigation cancelled while still provisional (the download gate, the
+    /// whitelist gate) would look like a rendered page.
+    private var hasCommitted = false
 
     init(url: URL, rules: [AllowRule], dataStore: WKWebsiteDataStore,
          onNotice: @escaping (String) -> Void) {
@@ -195,7 +208,7 @@ final class ReferenceWebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
         guard !started, !torn else { return }
         started = true
         guard ApprovedURLs.isAllowed(home, rules: rules) else {
-            state.failure = "This link isn't on your teacher's approved list."
+            state.failure = Self.notApprovedText
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.onNotice(Self.blockedText(for: self.home))
@@ -210,10 +223,13 @@ final class ReferenceWebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
     func reload() {
         guard !torn else { return }
         state.failure = nil
-        if webView.url != nil {
+        if hasCommitted {
             beginLoading()
             webView.reload()
         } else {
+            // Nothing ever committed, so there is no page to reload: go back to
+            // the teacher's link. reload() on a web view that never committed
+            // does nothing at all.
             started = false
             start()
         }
@@ -260,7 +276,15 @@ final class ReferenceWebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     private func reportBlocked(_ url: URL) {
         onNotice(Self.blockedText(for: url))
+        // Blocked before anything ever rendered (a redirect off the teacher's
+        // own link, say): the banner clears itself after 3 seconds, so the
+        // empty pane has to explain itself too.
+        if !hasCommitted {
+            state.failure = Self.notApprovedText
+        }
     }
+
+    private static let notApprovedText = "This link isn't on your teacher's approved list."
 
     private static func blockedText(for url: URL) -> String {
         "Blocked: \(url.host ?? "that site") is not on your teacher's list."
@@ -273,7 +297,7 @@ final class ReferenceWebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
         onNotice("Downloads are turned off during the exam.")
         // If nothing ever rendered in this tab (the teacher's own link points
         // straight at a file), the pane would otherwise stay blank.
-        if webView.url == nil {
+        if !hasCommitted {
             state.failure = "That link is a file download, which is turned off during the exam."
         }
     }
@@ -325,7 +349,7 @@ final class ReferenceWebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
                 // A blocked main-frame click leaves the current page in place;
                 // the spinner must not keep spinning for a navigation that
                 // will never happen.
-                if state.isLoading, webView.url != nil { endLoading() }
+                if state.isLoading { endLoading() }
             }
             return
         }
@@ -390,6 +414,7 @@ final class ReferenceWebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        hasCommitted = true
         state.host = webView.url?.host ?? state.host
     }
 
@@ -419,8 +444,10 @@ final class ReferenceWebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
         // superseding this one) is not a failure to report: the blocked banner
         // has already explained it, and the page on screen is still fine.
         guard let message = Self.message(for: error) else { return }
-        // Only claim the pane when there is nothing readable in it.
-        if webView.url == nil || webView.estimatedProgress == 0 {
+        // Only claim the pane when there is nothing readable in it. A failure
+        // while the first load is still provisional has committed nothing, even
+        // though webView.url already reports the pending address.
+        if !hasCommitted {
             state.failure = message
         } else {
             onNotice(message)

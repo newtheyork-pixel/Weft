@@ -42,7 +42,11 @@ enum ReferenceMaterial: Identifiable, Hashable {
         switch self {
         case .pdf(let f):
             if f.isOutline { return "pencil.and.outline" }
-            return f.renderable == .unsupported ? "doc.questionmark" : "doc.text.fill"
+            switch f.renderable {
+            case .unsupported: return "doc.questionmark"
+            case .image: return "photo"
+            default: return "doc.text.fill"
+            }
         case .web: return "globe"
         }
     }
@@ -88,7 +92,7 @@ final class ReferenceTabStore {
     /// counts are small (2-6) by design — revisit before a 30-link world.
     private(set) var visitedIDs: Set<String> = []
     /// Per-file load state, keyed by the raw ExamFile.id (NOT the prefixed
-    /// ReferenceMaterial.id — use the documentState(for:) accessors, which
+    /// ReferenceMaterial.id: use the documentState(for:) accessors, which
     /// exist precisely because there are two id spaces).
     private var docStates: [String: ReferenceDocument] = [:]
     /// The locked browser's allow-list for this exam, parsed from the teacher's
@@ -114,6 +118,11 @@ final class ReferenceTabStore {
     @ObservationIgnored private var webDataStore: WKWebsiteDataStore?
     @ObservationIgnored private var queue: [ExamFile] = []
     @ObservationIgnored private var worker: Task<Void, Never>?
+    /// Per-file download generation, bumped whenever an older result must be
+    /// thrown away (Try again while the first attempt is still in flight, or a
+    /// file that left the material list and came back). A result carrying a
+    /// stale generation is dropped instead of overwriting the newer one.
+    @ObservationIgnored private var generations: [String: Int] = [:]
     /// Web tabs ARE observed: the panel renders a tab's web view as soon as it
     /// exists, and creation happens in a `.task`, never in a view builder.
     private var webTabs: [String: ReferenceWebTab] = [:]
@@ -163,6 +172,7 @@ final class ReferenceTabStore {
             pdfViews[staleID] = nil
             textViews[staleID] = nil
             queue.removeAll { $0.id == staleID }
+            generations[staleID] = (generations[staleID] ?? 0) + 1
         }
         let linkIDs = Set(links.map(\.id))
         for (staleID, tab) in Array(webTabs) where !linkIDs.contains(staleID) {
@@ -228,6 +238,9 @@ final class ReferenceTabStore {
 
     func retry(file: ExamFile) {
         queue.removeAll { $0.id == file.id }
+        // A first attempt may still be in flight; make its result stale so it
+        // cannot land on top of this one.
+        generations[file.id] = (generations[file.id] ?? 0) + 1
         guard signedIn, !file.storagePath.isEmpty else {
             docStates[file.id] = SamplePDF.shared.map { .pdf($0) } ?? .failed
             return
@@ -288,17 +301,19 @@ final class ReferenceTabStore {
     private func startWorker() {
         guard worker == nil, !queue.isEmpty else { return }
         worker = Task { [weak self] in
-            while let store = self, !Task.isCancelled, let file = store.takeNext() {
-                let document = await store.fetch(file)
+            while let store = self, !Task.isCancelled, let next = store.takeNext() {
+                let document = await store.fetch(next.file)
                 if Task.isCancelled { return }
-                store.apply(document, to: file)
+                store.apply(document, to: next.file, generation: next.generation)
             }
             self?.worker = nil
         }
     }
 
-    private func takeNext() -> ExamFile? {
-        queue.isEmpty ? nil : queue.removeFirst()
+    private func takeNext() -> (file: ExamFile, generation: Int)? {
+        guard !queue.isEmpty else { return nil }
+        let file = queue.removeFirst()
+        return (file, generations[file.id] ?? 0)
     }
 
     private func fetch(_ file: ExamFile) async -> ReferenceDocument {
@@ -311,11 +326,12 @@ final class ReferenceTabStore {
         }
     }
 
-    private func apply(_ document: ReferenceDocument, to file: ExamFile) {
-        // The file may have been replaced while it was downloading.
-        guard materials.contains(where: { $0.id == ReferenceMaterial.id(forFile: file) }) else {
-            return
-        }
+    private func apply(_ document: ReferenceDocument, to file: ExamFile, generation: Int) {
+        // The file may have been replaced while it was downloading, or a Try
+        // again may have superseded this attempt.
+        guard materials.contains(where: { $0.id == ReferenceMaterial.id(forFile: file) }),
+              (generations[file.id] ?? 0) == generation
+        else { return }
         docStates[file.id] = document
     }
 
@@ -336,18 +352,37 @@ final class ReferenceTabStore {
         tab.start()
     }
 
-    /// A loadable URL for an approved link: teachers may store a bare host.
-    /// Anything that is not an http(s) address gets no tab at all (the panel
-    /// says the link cannot be opened), rather than a tab whose very creation
-    /// reports a block.
+    /// A loadable URL for an approved link: teachers may store a bare host, and
+    /// a subdomain entry ("*.jstor.org") is an allow-rule rather than an
+    /// address, so the "*." comes off and the tab opens the site itself. Anything
+    /// that is not an http(s) address gets no tab at all (the panel says the
+    /// link cannot be opened), rather than a tab whose very creation reports a
+    /// block, or one pointing at a host no DNS can ever resolve.
     static func webURL(_ raw: String) -> URL? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let text = trimmed.contains("://") ? trimmed : "https://" + trimmed
+        // An entry that is not an allow-rule can never be opened anyway, so the
+        // same parser decides both. Without this, "mailto:librarian@school.org"
+        // becomes https://mailto:librarian@school.org (userinfo, host
+        // school.org) and gets a tab whose only act is to report a block.
+        guard !trimmed.isEmpty, ApprovedURLs.rule(from: trimmed) != nil else { return nil }
+        var text = trimmed.contains("://") ? trimmed : "https://" + trimmed
+        // Strip the leading "*." of the host only, exactly where ApprovedURLs
+        // honours it. Foundation happily parses "*.jstor.org" as a host, so
+        // without this the student gets a tab that can never load.
+        if let separator = text.range(of: "://") {
+            let body = text[separator.upperBound...]
+            if body.hasPrefix("*.") {
+                text = String(text[text.startIndex..<separator.upperBound])
+                    + String(body.dropFirst(2))
+            }
+        }
         guard let url = URL(string: text),
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
-              let host = url.host, !host.isEmpty
+              let host = url.host, !host.isEmpty,
+              // A star left anywhere in the host is not an address, and
+              // ApprovedURLs refuses it as a rule too: no tab.
+              !host.contains("*")
         else { return nil }
         return url
     }
@@ -385,6 +420,7 @@ final class ReferenceTabStore {
         pdfViews.removeAll()
         textViews.removeAll()
         docStates.removeAll()
+        generations.removeAll()
         notice = nil
     }
 }
