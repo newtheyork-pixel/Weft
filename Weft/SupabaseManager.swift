@@ -72,8 +72,9 @@ enum SupabaseError: LocalizedError {
 
 // MARK: - Manager
 
-/// `@unchecked Sendable`: the only mutable state (`accessToken`/`refreshToken`)
-/// is isolated to `@MainActor`; everything else is immutable (`let`). The
+/// `@unchecked Sendable`: all mutable state (the token, its refresh token, the
+/// refresh deadline and the in-flight refresh) is isolated to `@MainActor`;
+/// everything else is immutable (`let`). The
 /// URLSession/JSONCoder members are thread-safe. That makes the shared singleton
 /// safe to reach from any task under Swift 6 strict concurrency.
 final class SupabaseManager: @unchecked Sendable {
@@ -89,6 +90,16 @@ final class SupabaseManager: @unchecked Sendable {
     @MainActor private(set) var accessToken: String?
     /// Refresh token from the same GoTrue session, kept for `grant_type=refresh_token`.
     @MainActor private(set) var refreshToken: String?
+    /// When to swap the access token out: 80% of its advertised lifetime, so a
+    /// request never carries a token that dies in flight. nil means "unknown"
+    /// (no expires_in was returned), which is treated as fresh; the 401 path
+    /// below is the backstop.
+    @MainActor private var accessTokenRefreshAfter: Date?
+    /// The refresh currently in flight. A whole exam's worth of requests can
+    /// notice the same expiring token at once; they share ONE round-trip
+    /// instead of racing GoTrue and rotating the refresh token N times (every
+    /// rotation but the last would be invalidated).
+    @MainActor private var refreshInFlight: Task<Bool, Never>?
 
     private init(session: URLSession = .shared) {
         self.session = session
@@ -105,15 +116,118 @@ final class SupabaseManager: @unchecked Sendable {
     // MARK: Token
 
     @MainActor
-    func setSession(accessToken: String?, refreshToken: String?) {
+    func setSession(accessToken: String?, refreshToken: String?, expiresIn: Int? = nil) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
+        if accessToken != nil, let expiresIn, expiresIn > 0 {
+            // Supabase access tokens last an hour by default, so this lands
+            // ~48 minutes in: well inside a 90-minute exam, and long before
+            // any request could be refused.
+            accessTokenRefreshAfter = Date().addingTimeInterval(TimeInterval(expiresIn) * 0.8)
+        } else {
+            accessTokenRefreshAfter = nil
+        }
     }
 
     @MainActor
     func clearSession() {
         accessToken = nil
         refreshToken = nil
+        accessTokenRefreshAfter = nil
+        refreshInFlight?.cancel()
+        refreshInFlight = nil
+    }
+
+    /// Refresh the GoTrue session (`grant_type=refresh_token`), storing the
+    /// rotated pair. Single-flight and never throwing: the Bool says whether a
+    /// retry is worth attempting. A failure deliberately does NOT clear the
+    /// session (signing a student out mid-exam would be far worse than one
+    /// failed request), but it does back the next attempt off by 30 seconds so
+    /// a dead network can't turn into a refresh storm.
+    @MainActor
+    @discardableResult
+    func refreshSession() async -> Bool {
+        if let inFlight = refreshInFlight { return await inFlight.value }
+        guard let token = refreshToken, !token.isEmpty else { return false }
+        let task = Task<Bool, Never> {
+            do {
+                return try await self.exchangeRefreshToken(token)
+            } catch {
+                print("session refresh failed: \(error)")
+                // Only back off if this is still the session we were refreshing:
+                // a sign-out or a new sign-in during the round-trip must not
+                // hobble the next account's first refresh.
+                if !Task.isCancelled, self.refreshToken == token {
+                    self.accessTokenRefreshAfter = Date().addingTimeInterval(30)
+                }
+                return false
+            }
+        }
+        refreshInFlight = task
+        let ok = await task.value
+        // Not `refreshInFlight = nil`: clearSession plus a new sign-in may have
+        // installed a different in-flight refresh while this one was running,
+        // and dropping the reference to it would let two rotations race.
+        if refreshInFlight == task { refreshInFlight = nil }
+        return ok
+    }
+
+    /// POST /auth/v1/token?grant_type=refresh_token. GoTrue rotates the refresh
+    /// token on every use, so the response's is stored (falling back to the one
+    /// we sent, which some GoTrue versions omit on an unchanged session).
+    /// Returns whether the rotated pair was actually installed: false when the
+    /// session it belongs to is no longer the signed-in one.
+    @MainActor
+    private func exchangeRefreshToken(_ token: String) async throws -> Bool {
+        var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("auth/v1/token"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.queryItems = [URLQueryItem(name: "grant_type", value: "refresh_token")]
+
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "POST"
+        req.setValue(SupabaseConfig.anonKey, forHTTPHeaderField: "apikey")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["refresh_token": token])
+
+        // allowRefresh: false. This request IS the refresh; letting it take
+        // the refresh-and-retry path would recurse.
+        let data = try await perform(req, allowRefresh: false)
+        // The account we were refreshing for may be gone: signing out cancels
+        // this task and clears the session, and the next sign-in installs a
+        // different pair. Installing the rotated tokens now would put the
+        // previous account's token back on every following request, which on a
+        // stalled network (URLSession waits 60 seconds) means the next person's
+        // writes would be made as the person before them.
+        guard !Task.isCancelled, refreshToken == token else { return false }
+        let new = try decode(TokenResponse.self, from: data)
+        setSession(accessToken: new.accessToken,
+                   refreshToken: new.refreshToken ?? token,
+                   expiresIn: new.expiresIn)
+        return true
+    }
+
+    /// Proactive half of the refresh: swap the token out before it expires.
+    /// True when the token actually changed, so the caller re-stamps the
+    /// Authorization header it already built.
+    @MainActor
+    private func refreshIfExpiring() async -> Bool {
+        guard accessToken != nil, refreshToken != nil,
+              let after = accessTokenRefreshAfter, Date() >= after else { return false }
+        let before = accessToken
+        await refreshSession()
+        return accessToken != before
+    }
+
+    /// Re-stamp a built request's Authorization header with the CURRENT bearer
+    /// token. Only touches a request that already carried one, so the token
+    /// endpoints (apikey only) are left exactly as they were.
+    @MainActor
+    private func reauthorized(_ request: URLRequest) -> URLRequest {
+        guard request.value(forHTTPHeaderField: "Authorization") != nil else { return request }
+        var req = request
+        req.setValue("Bearer \(accessToken ?? SupabaseConfig.anonKey)",
+                     forHTTPHeaderField: "Authorization")
+        return req
     }
 
     /// Headers for every PostgREST / RPC call. `apikey` is always the anon key;
@@ -133,7 +247,45 @@ final class SupabaseManager: @unchecked Sendable {
 
     // MARK: - Low-level request
 
-    private func perform(_ request: URLRequest) async throws -> Data {
+    /// Send `request`, keeping the session alive around it: refresh the access
+    /// token before it expires, and if the server rejects the token anyway,
+    /// refresh once and retry the same request with the new one. That is what
+    /// lets a 90-minute exam keep autosaving and keep loading reference PDFs
+    /// past the hour mark. `allowRefresh: false` is for the token endpoints
+    /// themselves (they carry no Bearer token and must not recurse).
+    private func perform(_ request: URLRequest, allowRefresh: Bool = true) async throws -> Data {
+        var req = request
+        if allowRefresh, await refreshIfExpiring() {
+            req = reauthorized(req)
+        }
+        let sentToken = accessToken
+        let (data, http) = try await send(req)
+
+        if allowRefresh, sentToken != nil, Self.isTokenRejection(status: http.statusCode, body: data) {
+            // If another request already refreshed while this one was in
+            // flight, just retry with the new token; otherwise refresh once.
+            var refreshed = accessToken != sentToken
+            if !refreshed { refreshed = await refreshSession() }
+            if refreshed {
+                let (retryData, retryHTTP) = try await send(reauthorized(req))
+                guard (200..<300).contains(retryHTTP.statusCode) else {
+                    throw SupabaseError.badResponse(status: retryHTTP.statusCode,
+                                                    body: String(data: retryData, encoding: .utf8) ?? "")
+                }
+                return retryData
+            }
+        }
+
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw SupabaseError.badResponse(status: http.statusCode, body: body)
+        }
+        return data
+    }
+
+    /// One URLSession round-trip, with transport errors mapped the way the rest
+    /// of this file expects and a non-HTTP response treated as no data.
+    private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await session.data(for: request)
@@ -143,11 +295,18 @@ final class SupabaseManager: @unchecked Sendable {
         guard let http = response as? HTTPURLResponse else {
             throw SupabaseError.noData
         }
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw SupabaseError.badResponse(status: http.statusCode, body: body)
-        }
-        return data
+        return (data, http)
+    }
+
+    /// True when the response says the TOKEN was the problem, not the caller's
+    /// permissions. PostgREST answers an expired JWT with 401 (PGRST301);
+    /// Storage has shipped versions that answer 400 with the JWT named in the
+    /// body, and an RLS refusal (a real 403) must not trigger a refresh.
+    private static func isTokenRejection(status: Int, body: Data) -> Bool {
+        if status == 401 { return true }
+        guard status == 400 || status == 403 else { return false }
+        let text = String(data: body.prefix(400), encoding: .utf8)?.lowercased() ?? ""
+        return text.contains("jwt")
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
@@ -606,6 +765,12 @@ final class SupabaseManager: @unchecked Sendable {
             query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
     }
 
+    /// Open a session, retrying the insert when the join code collides.
+    /// `sessions.code` is UNIQUE and the code is a 6-digit draw that is never
+    /// checked against history, so a collision with any session ever opened in
+    /// this project is a hard failure in front of a waiting class. PostgREST
+    /// reports it as 409 / SQLSTATE 23505; draw a fresh code and try again.
+    /// Five attempts, so even a heavily used project resolves in one launch.
     @discardableResult
     func launchSession(testId: String?, classId: String?, teacherUserId: String,
                        teacherIP: String?) async throws -> ExamSession? {
@@ -613,10 +778,29 @@ final class SupabaseManager: @unchecked Sendable {
             let code: String; let teacher_ip: String?; let status: String
             let teacher_user_id: String; let test_id: String?; let class_id: String?
         }
-        let result: [ExamSession] = try await insert("sessions",
-            values: Payload(code: Self.sessionCode(), teacher_ip: teacherIP, status: "open",
-                            teacher_user_id: teacherUserId, test_id: testId, class_id: classId))
-        return result.first
+        var lastCollision: Error?
+        for _ in 0..<5 {
+            do {
+                let result: [ExamSession] = try await insert("sessions",
+                    values: Payload(code: Self.sessionCode(), teacher_ip: teacherIP, status: "open",
+                                    teacher_user_id: teacherUserId, test_id: testId, class_id: classId))
+                return result.first
+            } catch let error as SupabaseError {
+                guard case let .badResponse(_, body) = error,
+                      Self.isUniqueViolation(body: body) else { throw error }
+                lastCollision = error
+            }
+        }
+        throw lastCollision ?? SupabaseError.auth("Could not allocate a session code. Try again.")
+    }
+
+    /// True when PostgREST is reporting a unique-constraint collision
+    /// (SQLSTATE 23505, surfaced as 409 Conflict). The SQLSTATE is what decides
+    /// it, not the status: PostgREST answers 409 for a foreign-key violation
+    /// too (23503), and retrying a stale test_id or class_id five times with
+    /// fresh codes would only bury the real error.
+    private static func isUniqueViolation(body: String) -> Bool {
+        body.contains("23505") || body.lowercased().contains("duplicate key")
     }
 
     /// Close EVERY open session this teacher owns. End-session uses this
@@ -721,14 +905,20 @@ final class SupabaseManager: @unchecked Sendable {
         }
     }
 
-    /// students.status transition (joined -> submitted). Best-effort.
-    func updateStudentStatus(id: String, status: String) async {
+    /// students.status transition (joined -> writing -> submitted). Best-effort,
+    /// but the Bool is reported: the caller retries the writing transition on
+    /// the next edit rather than leaving the teacher's monitor saying "Joined"
+    /// for a student who has been typing for an hour.
+    @discardableResult
+    func updateStudentStatus(id: String, status: String) async -> Bool {
         struct Payload: Encodable { let status: String }
         do {
             let _: [StudentRowID] = try await update("students", values: Payload(status: status),
                 query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
+            return true
         } catch {
             print("students.status update failed: \(error)")
+            return false
         }
     }
 
@@ -1178,9 +1368,12 @@ final class SupabaseManager: @unchecked Sendable {
             "code_verifier": verifier
         ])
 
-        let data = try await perform(req)
+        // allowRefresh: false. There is no session to refresh yet: this is
+        // the call that establishes one.
+        let data = try await perform(req, allowRefresh: false)
         let token = try decode(TokenResponse.self, from: data)
-        setSession(accessToken: token.accessToken, refreshToken: token.refreshToken)
+        setSession(accessToken: token.accessToken, refreshToken: token.refreshToken,
+                   expiresIn: token.expiresIn)
     }
 
     /// Sign out: drop the local session. The GoTrue `/logout` round-trip is best

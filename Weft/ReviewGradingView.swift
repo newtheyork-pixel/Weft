@@ -129,6 +129,13 @@ private struct ReviewEntry: Identifiable {
     ]
 }
 
+/// A score/comment pair the teacher typed that the server has not accepted yet.
+/// Kept per submission id so a failed save survives paging to another student.
+private struct PendingGrade: Equatable {
+    var score: String
+    var comment: String
+}
+
 // MARK: - The screen
 
 struct ReviewGradingView: View {
@@ -146,6 +153,21 @@ struct ReviewGradingView: View {
     @State private var commentText: String = ""
     /// Tracks which submission the buffers were seeded for, so we reseed on move.
     @State private var seededSubmissionId: String?
+
+    /// Typing the server has NOT accepted yet, per submission id. A grade save
+    /// is the one write on this screen that cannot be redone from memory, so
+    /// the text lives here until a write succeeds: coming back to the student
+    /// restores what was typed instead of reseeding the old server values over
+    /// it. Cleared only on a confirmed save.
+    @State private var pendingGrades: [String: PendingGrade] = [:]
+    /// The last failure per submission id. Kept locally because app.errorMessage
+    /// is transient and is cleared by unrelated navigation, which is exactly
+    /// how a failed save used to disappear without a trace.
+    @State private var saveErrors: [String: String] = [:]
+    /// Submissions with a save in flight (the rail's "Saving" line).
+    @State private var savingIds: Set<String> = []
+    /// Last confirmed save per submission id, for the "Saved 10:42" line.
+    @State private var savedAt: [String: Date] = [:]
 
     private let defaultPointsPossible: Double = 100
 
@@ -264,7 +286,9 @@ struct ReviewGradingView: View {
         return prefix + f.string(from: when)
     }
 
-    /// Seed the local Score / Final comment buffers from the selected grade.
+    /// Seed the local Score / Final comment buffers from the selected grade, or
+    /// from the unsaved typing if this student has some: a save that never
+    /// landed must not be quietly overwritten by the stale server values.
     private func seedBuffers() {
         let row = current
         guard isLive else {
@@ -274,9 +298,15 @@ struct ReviewGradingView: View {
         }
         guard seededSubmissionId != row.id else { return }
         seededSubmissionId = row.id
-        scoreText = row.score
-        commentText = row.finalComment
-        gradeDirty = false
+        if let pending = pendingGrades[row.id] {
+            scoreText = pending.score
+            commentText = pending.comment
+            gradeDirty = true
+        } else {
+            scoreText = row.score
+            commentText = row.finalComment
+            gradeDirty = false
+        }
     }
 
     // MARK: Top bar
@@ -424,6 +454,16 @@ struct ReviewGradingView: View {
                 }
                 HStack(spacing: 6) {
                     Chip(text: s.status.label, kind: s.status.chipKind)
+                    // A grade the server has not accepted yet. Visible from the
+                    // rail so a failed save is not forgotten once the teacher
+                    // has paged on to the next student. Not while the save is
+                    // still in flight: a marker that flashes on every save
+                    // teaches the teacher to ignore it.
+                    if pendingGrades[s.id] != nil, !savingIds.contains(s.id) {
+                        Text("Unsaved")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Theme.bad)
+                    }
                     Text(s.submitted ? "\(s.wordCount) words" : "Not submitted")
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.muted)
@@ -785,13 +825,7 @@ struct ReviewGradingView: View {
             .help(current.returned ? "Update and re-share with this student" : "Send the score and your comment to the student")
             .linkPointer()
 
-            if let error = app.errorMessage {
-                Text(error)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.bad)
-                    .lineSpacing(2)
-                    .transition(.opacity)
-            }
+            saveStatusBlock
 
             Text("Once shared, the student sees the score and your Shared comments. Private notes stay hidden.")
                 .font(.system(size: 11))
@@ -799,6 +833,50 @@ struct ReviewGradingView: View {
                 .lineSpacing(2)
         }
         .padding(Theme.Space.lg)
+    }
+
+    /// What happened to this student's grade: a failure that stays put until it
+    /// is fixed (with the reason and a Retry), the save in flight, or a quiet
+    /// confirmation with the time. Per student, so paging away does not hide a
+    /// failure and coming back does not hide a success.
+    @ViewBuilder private var saveStatusBlock: some View {
+        if isLive, let error = saveErrors[current.id] {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 5) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Not saved")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .foregroundStyle(Theme.bad)
+                Text("\(error) Your score and comment are kept here until they save.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.muted)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Retry save") { saveCurrentGrade(share: current.returned) }
+                    .buttonStyle(.glass)
+                    .font(Theme.sans(12, .semibold))
+                    .disabled(savingIds.contains(current.id))
+                    .linkPointer()
+            }
+            .transition(.opacity)
+        } else if isLive, savingIds.contains(current.id) {
+            Text("Saving…")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.muted)
+        } else if isLive, let when = savedAt[current.id] {
+            Text("Saved \(clockLabel(when))")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.muted)
+                .monospacedDigit()
+        } else if let error = app.errorMessage {
+            Text(error)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.bad)
+                .lineSpacing(2)
+                .transition(.opacity)
+        }
     }
 
     // MARK: Bindings into the current entry
@@ -838,6 +916,12 @@ struct ReviewGradingView: View {
 
     /// Persist the current score + comment. `share` true releases to the student;
     /// false saves privately, preserving whatever released state already exists.
+    ///
+    /// The dirty flag and the typed text are held until the write is ACCEPTED.
+    /// Clearing them up front (as this used to) meant a failed save was
+    /// indistinguishable from a successful one: nothing retried it, and the
+    /// next visit to that student reseeded the buffers from the server and the
+    /// typed grade was gone.
     private func saveCurrentGrade(share: Bool) {
         guard isLive else {
             // Preview path: keep the existing local "Shared" demo behaviour.
@@ -845,17 +929,82 @@ struct ReviewGradingView: View {
             return
         }
         guard let submission = app.gradingSubmissions.first(where: { $0.id == current.id }) else { return }
-        let trimmed = scoreText.trimmingCharacters(in: .whitespaces)
-        let points = trimmed.isEmpty ? nil : Double(trimmed)
-        let alreadyReleased = app.grades[submission.id]?.isReleased ?? false
-        gradeDirty = false
-        Task {
-            await app.saveGrade(submission: submission,
-                                points: points,
-                                pointsPossible: pointsPossible,
-                                feedback: commentText,
-                                share: share || alreadyReleased)
+        // Read everything HERE, synchronously. The caller may be flushIfDirty()
+        // on the way to another student, and by the time the task runs the
+        // buffers and `current` belong to that student instead.
+        let id = submission.id
+        let comment = commentText
+        let possible = pointsPossible
+        let alreadyReleased = app.grades[id]?.isReleased ?? false
+        // Exactly what THIS write carries. The teacher often keeps typing while
+        // a save is in flight (the Score field's onSubmit saves, and so does
+        // Save without sharing), so the completion below clears the pending
+        // text and the dirty flag only if the buffers still hold this text.
+        let sent = PendingGrade(score: scoreText, comment: comment)
+        pendingGrades[id] = sent
+
+        let points: Double?
+        switch Self.scoreInput(scoreText) {
+        case .blank:
+            points = nil
+        case .value(let entered):
+            points = entered
+        case .invalid:
+            // Don't write: "9o" would be stored as "no score at all" with
+            // nothing on screen to say so. Keep the typing and say why.
+            saveErrors[id] = "Score must be a number, or left blank."
+            gradeDirty = true
+            return
         }
+
+        saveErrors[id] = nil
+        savingIds.insert(id)
+        Task {
+            let saved = await app.saveGrade(submission: submission,
+                                            points: points,
+                                            pointsPossible: possible,
+                                            feedback: comment,
+                                            share: share || alreadyReleased)
+            savingIds.remove(id)
+            if saved {
+                // Anything typed during the round-trip stays pending and dirty,
+                // so the next flush writes the newer text instead of the screen
+                // going quietly clean over it.
+                if pendingGrades[id] == sent { pendingGrades[id] = nil }
+                saveErrors[id] = nil
+                savedAt[id] = Date()
+                if current.id == id, scoreText == sent.score, commentText == sent.comment {
+                    gradeDirty = false
+                }
+            } else {
+                saveErrors[id] = app.errorMessage
+                    ?? "Could not save this grade. Check your connection and try again."
+                // The per-student failure above is now the record of this save.
+                // Leaving the transient banner text set would show this
+                // student's failure under the next student's Share button.
+                app.errorMessage = nil
+            }
+        }
+    }
+
+    /// What the teacher typed in the Score field.
+    private enum ScoreInput { case blank, value(Double), invalid }
+
+    /// Empty is a legitimate "feedback only" grade; a number is a score;
+    /// anything else is a typo the teacher must see rather than lose.
+    private static func scoreInput(_ raw: String) -> ScoreInput {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return .blank }
+        if let value = Double(trimmed) { return .value(value) }
+        return .invalid
+    }
+
+    /// Clock time for the "Saved 10:42" confirmation (the liveEdited idiom).
+    private func clockLabel(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f.string(from: date)
     }
 }
 

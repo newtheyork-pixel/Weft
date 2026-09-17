@@ -73,6 +73,15 @@ final class AppState {
     /// True only after a *successful* grading load, so a first-release email is
     /// never sent off a stale/failed grades cache (which would duplicate).
     private var gradesFresh = false
+    /// The live-roster sweep (see startRosterPolling). nil when nothing is live.
+    private var rosterPollTask: Task<Void, Never>?
+    /// Monotonic sweep generation (the ExamView saveGeneration idiom): a tick
+    /// whose generation is stale returns instead of polling, so a restart can
+    /// never leave two sweeps hitting the server every five seconds.
+    private var rosterPollGeneration = 0
+    /// True once this attempt's `students` row has been moved to "writing", so
+    /// the transition costs ONE update per exam and not one per keystroke.
+    private var markedWriting = false
 
     // MARK: Data (mock defaults; replaced by real loads when signed in)
     var enrolledClasses: [ClassRoom] = [.sample, .sample2]
@@ -237,6 +246,7 @@ final class AppState {
     }
 
     func enterStudent() {
+        stopRosterPolling()   // the teacher monitor is off screen
         role = .student
         if displayName.isEmpty { displayName = "Ava Chen" }
         studentScreen = .home
@@ -246,6 +256,8 @@ final class AppState {
 
     func signOut() {
         supabase.signOut()
+        stopRosterPolling()
+        markedWriting = false
         role = nil
         accountRole = nil
         signedIn = false
@@ -727,8 +739,6 @@ final class AppState {
             if liveSession == nil, let open = try? await supabase.listOpenSessions(userId: userId).first {
                 guard signedIn else { return }   // signed out during the fetch
                 liveSession = open
-                await loadLiveRoster()
-                guard signedIn else { return }   // signed out during the roster load
                 // Prime the selection ONLY here, inside the restore branch:
                 // a genuine relaunch lands the teacher next to their live exam,
                 // but returning from the editor or grading never yanks a
@@ -738,6 +748,15 @@ final class AppState {
                     teacherSelectedClassId = cid
                     classSessions = nil
                 }
+            }
+            // The live card IS the proctoring monitor, so the roster is loaded
+            // on EVERY home load (returning from grading or the editor must
+            // never leave a roster frozen at launch time) and the five-second
+            // sweep runs for as long as the session is live.
+            if liveSession != nil {
+                await loadLiveRoster()
+                guard signedIn else { return }   // signed out during the roster load
+                startRosterPolling()
             }
             // Refresh an open detail (covers priming and post-mutation reloads).
             if teacherSelectedClassId != nil { await loadClassSessions() }
@@ -1156,6 +1175,7 @@ final class AppState {
             liveSession = try await supabase.launchSession(testId: testId, classId: classId,
                                                            teacherUserId: userId, teacherIP: ip)
             await loadLiveRoster()
+            startRosterPolling()           // students join AFTER the launch; the card must follow them
             await loadClassSessions()      // the new open session appears as history row 1; NO tab jump
             // Email every enrolled student that the assignment is live. Best
             // effort; never blocks the launch.
@@ -1167,18 +1187,59 @@ final class AppState {
         }
     }
 
-    func loadLiveRoster() async {
+    /// Load the live monitor's roster. `quiet` is for the five-second sweep: a
+    /// blip on one tick must not throw a banner over the teacher's screen (or
+    /// wipe an unrelated one), and the next tick is five seconds away.
+    func loadLiveRoster(quiet: Bool = false) async {
         guard signedIn, let sid = liveSession?.id else { return }
         do {
             let students = try await supabase.listSessionStudents(sessionId: sid)
             // Signed out (or session swapped) mid-flight: don't clobber the
             // just-restored mock roster with the old account's students.
             guard signedIn, liveSession?.id == sid else { return }
-            roster = students
+            // Only publish a change. AppState is observed, so re-assigning an
+            // identical roster every five seconds would re-render (and re-animate)
+            // the live card and the header count for the whole exam.
+            if roster != students { roster = students }
         } catch {
-            guard signedIn else { return }
+            guard signedIn, !quiet else { return }
             errorMessage = describe(error)
         }
+    }
+
+    /// Start (or restart) the live-roster sweep: every five seconds while a
+    /// session is open and the teacher is in the teacher view. This is the
+    /// proctoring monitor, so it has to move on its own; without it a student
+    /// who joins or starts writing after launch never appears at all (the
+    /// retired Electron build subscribed to postgres_changes on `students`,
+    /// which the native client has no channel for, so a poll at the cadence
+    /// the marketing pages promise is the honest equivalent).
+    ///
+    /// Self-terminating: every tick re-checks the conditions, so ending the
+    /// session, signing out or leaving the teacher view stops the sweep without
+    /// another call site.
+    func startRosterPolling() {
+        guard signedIn, liveSession != nil else { return }
+        rosterPollGeneration += 1
+        let generation = rosterPollGeneration
+        rosterPollTask?.cancel()
+        rosterPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled, let self,
+                      generation == self.rosterPollGeneration,
+                      self.signedIn, self.route == .teacher,
+                      self.liveSession != nil else { return }
+                await self.loadLiveRoster(quiet: true)
+            }
+        }
+    }
+
+    /// Stop the sweep (session ended, signed out, left the teacher view).
+    func stopRosterPolling() {
+        rosterPollGeneration += 1
+        rosterPollTask?.cancel()
+        rosterPollTask = nil
     }
 
     func endSession() async {
@@ -1199,6 +1260,7 @@ final class AppState {
         // Preview path (not signed in), or successful server close: clear local state.
         let ended = liveSession
         liveSession = nil
+        stopRosterPolling()   // nothing live to sweep
         roster = []        // the live MONITOR roster only
         // Grading state is deliberately NOT cleared. Grading keys on
         // gradingSession now; the just-closed session's essays are the very
@@ -1278,12 +1340,19 @@ final class AppState {
     /// Save (and optionally share) a grade. essay_grades requires session_id +
     /// student_id, taken from the submission. Sharing keeps the original release
     /// timestamp if already shared; saving-without-sharing never un-shares.
+    ///
+    /// Returns whether the write was ACCEPTED. The grading screen holds the
+    /// teacher's typing (and its dirty flag) until it sees true, so a failed
+    /// save can never be mistaken for a saved one.
+    @discardableResult
     func saveGrade(submission: TeacherSubmission, points: Double?, pointsPossible: Double,
-                   feedback: String, share: Bool) async {
-        guard signedIn else { return }
+                   feedback: String, share: Bool) async -> Bool {
+        // Not signed in there is nothing to write, so report it as not saved
+        // rather than letting a caller clear its unsaved state on a no-op.
+        guard signedIn else { return false }
         guard let sid = submission.sessionId, let stid = submission.studentId else {
             errorMessage = "This submission is missing its session or student."
-            return
+            return false
         }
         errorMessage = nil
         let cached = grades[submission.id]?.releasedAt
@@ -1324,8 +1393,10 @@ final class AppState {
             if share, existing == nil, wasFresh {
                 Task { await supabase.notify("grades_published", body: ["submission_id": submission.id]) }
             }
+            return true
         } catch {
             errorMessage = describe(error)
+            return false
         }
     }
 
@@ -1357,6 +1428,7 @@ final class AppState {
         activeExamSession = nil
         activeStudentId = nil
         activeSubmissionId = nil
+        markedWriting = false
         if signedIn, let code = item.activeCode {
             Task {
                 await resolveActiveExam(code: code)
@@ -1467,12 +1539,29 @@ final class AppState {
             }
             activeStudentId = sid
             activeSubmissionId = nil
+            markedWriting = false   // this attempt's row is back at "joined"
             errorMessage = nil
             enterExam()
             return true
         } catch {
             errorMessage = describe(error)
             return false
+        }
+    }
+
+    /// Move this attempt's roster row from "joined" to "writing" on the first
+    /// edit. The teacher's live monitor labels students from students.status,
+    /// and nothing ever wrote "writing", so a whole class of people typing read
+    /// as "Joined" (which a teacher reads as "has not started") until submit.
+    /// Called from every keystroke and costs one update per exam: the flag is
+    /// set before the write, and only cleared again if the write failed, so the
+    /// next edit retries rather than leaving the roster lying all lesson.
+    func markWriting() {
+        guard signedIn, !markedWriting, let studentId = activeStudentId else { return }
+        markedWriting = true
+        Task {
+            let ok = await supabase.updateStudentStatus(id: studentId, status: "writing")
+            if !ok { markedWriting = false }
         }
     }
 
@@ -1510,6 +1599,7 @@ final class AppState {
         activeStudentId = nil
         activeSubmissionId = nil
         activeExamSession = nil
+        markedWriting = false
         return true
     }
 

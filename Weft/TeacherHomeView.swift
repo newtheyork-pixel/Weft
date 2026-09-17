@@ -345,12 +345,41 @@ struct TeacherHomeView: View {
                             if let same = s.networkSame {
                                 Text(same ? "Same Wi-Fi" : "Different network").font(Theme.sans(12.5)).foregroundStyle(same ? Theme.muted : Theme.warn)
                             }
-                            Chip(text: s.status.capitalized, kind: s.signal == .ok ? .good : .warn)
+                            Chip(text: Self.statusLabel(s.status), kind: Self.statusKind(s))
                         }
                         .padding(.horizontal, Theme.Space.xl).padding(.vertical, 13)
                     }
                 }
             }
+        }
+    }
+
+    /// Roster chip text. `students.status` carries this app's vocabulary
+    /// (joined / writing / review / submitted) and, for a class that sat an exam
+    /// on the Electron build, its values too (`test` is that build's "writing").
+    /// Both are mapped, because the raw column printed at a teacher reads as
+    /// "Test" or "Left_fullscreen", and an unmapped state must never be
+    /// presented as if it were understood.
+    private static func statusLabel(_ status: String) -> String {
+        switch status.lowercased() {
+        case "joined":          "Joined"
+        case "writing", "test": "Writing"
+        case "review":          "In review"
+        case "submitted":       "Submitted"
+        case "left_fullscreen": "Left fullscreen"
+        case "blocked":         "Blocked"
+        case "exited_early":    "Exited early"
+        default:                status.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    /// Chip colour. A status that IS the problem always reads bad; every other
+    /// state keeps the proctoring signal's meaning, so an amber chip still says
+    /// "check this machine" rather than "check this status".
+    private static func statusKind(_ s: RosterStudent) -> Chip.Kind {
+        switch s.status.lowercased() {
+        case "left_fullscreen", "blocked", "exited_early": .bad
+        default:                                           s.signal == .ok ? .good : .warn
         }
     }
 
