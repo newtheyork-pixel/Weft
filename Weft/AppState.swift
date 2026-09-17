@@ -1036,7 +1036,10 @@ final class AppState {
             // Signed out (or session swapped) mid-flight: don't clobber the
             // just-restored mock roster with the old account's students.
             guard signedIn, liveSession?.id == sid else { return }
-            roster = students
+            // Only publish a change. AppState is observed, so re-assigning an
+            // identical roster every five seconds would re-render (and re-animate)
+            // the live card and the header count for the whole exam.
+            if roster != students { roster = students }
         } catch {
             guard signedIn, !quiet else { return }
             errorMessage = describe(error)

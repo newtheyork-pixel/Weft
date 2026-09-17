@@ -456,8 +456,10 @@ struct ReviewGradingView: View {
                     Chip(text: s.status.label, kind: s.status.chipKind)
                     // A grade the server has not accepted yet. Visible from the
                     // rail so a failed save is not forgotten once the teacher
-                    // has paged on to the next student.
-                    if pendingGrades[s.id] != nil {
+                    // has paged on to the next student. Not while the save is
+                    // still in flight: a marker that flashes on every save
+                    // teaches the teacher to ignore it.
+                    if pendingGrades[s.id] != nil, !savingIds.contains(s.id) {
                         Text("Unsaved")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(Theme.bad)
@@ -934,7 +936,12 @@ struct ReviewGradingView: View {
         let comment = commentText
         let possible = pointsPossible
         let alreadyReleased = app.grades[id]?.isReleased ?? false
-        pendingGrades[id] = PendingGrade(score: scoreText, comment: comment)
+        // Exactly what THIS write carries. The teacher often keeps typing while
+        // a save is in flight (the Score field's onSubmit saves, and so does
+        // Save without sharing), so the completion below clears the pending
+        // text and the dirty flag only if the buffers still hold this text.
+        let sent = PendingGrade(score: scoreText, comment: comment)
+        pendingGrades[id] = sent
 
         let points: Double?
         switch Self.scoreInput(scoreText) {
@@ -960,13 +967,22 @@ struct ReviewGradingView: View {
                                             share: share || alreadyReleased)
             savingIds.remove(id)
             if saved {
-                pendingGrades[id] = nil
+                // Anything typed during the round-trip stays pending and dirty,
+                // so the next flush writes the newer text instead of the screen
+                // going quietly clean over it.
+                if pendingGrades[id] == sent { pendingGrades[id] = nil }
                 saveErrors[id] = nil
                 savedAt[id] = Date()
-                if current.id == id { gradeDirty = false }
+                if current.id == id, scoreText == sent.score, commentText == sent.comment {
+                    gradeDirty = false
+                }
             } else {
                 saveErrors[id] = app.errorMessage
                     ?? "Could not save this grade. Check your connection and try again."
+                // The per-student failure above is now the record of this save.
+                // Leaving the transient banner text set would show this
+                // student's failure under the next student's Share button.
+                app.errorMessage = nil
             }
         }
     }

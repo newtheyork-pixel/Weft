@@ -151,25 +151,34 @@ final class SupabaseManager: @unchecked Sendable {
         guard let token = refreshToken, !token.isEmpty else { return false }
         let task = Task<Bool, Never> {
             do {
-                try await self.exchangeRefreshToken(token)
-                return true
+                return try await self.exchangeRefreshToken(token)
             } catch {
                 print("session refresh failed: \(error)")
-                self.accessTokenRefreshAfter = Date().addingTimeInterval(30)
+                // Only back off if this is still the session we were refreshing:
+                // a sign-out or a new sign-in during the round-trip must not
+                // hobble the next account's first refresh.
+                if !Task.isCancelled, self.refreshToken == token {
+                    self.accessTokenRefreshAfter = Date().addingTimeInterval(30)
+                }
                 return false
             }
         }
         refreshInFlight = task
         let ok = await task.value
-        refreshInFlight = nil
+        // Not `refreshInFlight = nil`: clearSession plus a new sign-in may have
+        // installed a different in-flight refresh while this one was running,
+        // and dropping the reference to it would let two rotations race.
+        if refreshInFlight == task { refreshInFlight = nil }
         return ok
     }
 
     /// POST /auth/v1/token?grant_type=refresh_token. GoTrue rotates the refresh
     /// token on every use, so the response's is stored (falling back to the one
     /// we sent, which some GoTrue versions omit on an unchanged session).
+    /// Returns whether the rotated pair was actually installed: false when the
+    /// session it belongs to is no longer the signed-in one.
     @MainActor
-    private func exchangeRefreshToken(_ token: String) async throws {
+    private func exchangeRefreshToken(_ token: String) async throws -> Bool {
         var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("auth/v1/token"),
                                   resolvingAgainstBaseURL: false)!
         comps.queryItems = [URLQueryItem(name: "grant_type", value: "refresh_token")]
@@ -183,10 +192,18 @@ final class SupabaseManager: @unchecked Sendable {
         // allowRefresh: false. This request IS the refresh; letting it take
         // the refresh-and-retry path would recurse.
         let data = try await perform(req, allowRefresh: false)
+        // The account we were refreshing for may be gone: signing out cancels
+        // this task and clears the session, and the next sign-in installs a
+        // different pair. Installing the rotated tokens now would put the
+        // previous account's token back on every following request, which on a
+        // stalled network (URLSession waits 60 seconds) means the next person's
+        // writes would be made as the person before them.
+        guard !Task.isCancelled, refreshToken == token else { return false }
         let new = try decode(TokenResponse.self, from: data)
         setSession(accessToken: new.accessToken,
                    refreshToken: new.refreshToken ?? token,
                    expiresIn: new.expiresIn)
+        return true
     }
 
     /// Proactive half of the refresh: swap the token out before it expires.
@@ -769,8 +786,8 @@ final class SupabaseManager: @unchecked Sendable {
                                     teacher_user_id: teacherUserId, test_id: testId, class_id: classId))
                 return result.first
             } catch let error as SupabaseError {
-                guard case let .badResponse(status, body) = error,
-                      Self.isUniqueViolation(status: status, body: body) else { throw error }
+                guard case let .badResponse(_, body) = error,
+                      Self.isUniqueViolation(body: body) else { throw error }
                 lastCollision = error
             }
         }
@@ -778,11 +795,12 @@ final class SupabaseManager: @unchecked Sendable {
     }
 
     /// True when PostgREST is reporting a unique-constraint collision
-    /// (SQLSTATE 23505, surfaced as 409 Conflict).
-    private static func isUniqueViolation(status: Int, body: String) -> Bool {
-        status == 409
-            || body.contains("23505")
-            || body.lowercased().contains("duplicate key")
+    /// (SQLSTATE 23505, surfaced as 409 Conflict). The SQLSTATE is what decides
+    /// it, not the status: PostgREST answers 409 for a foreign-key violation
+    /// too (23503), and retrying a stale test_id or class_id five times with
+    /// fresh codes would only bury the real error.
+    private static func isUniqueViolation(body: String) -> Bool {
+        body.contains("23505") || body.lowercased().contains("duplicate key")
     }
 
     /// Close EVERY open session this teacher owns. End-session uses this
