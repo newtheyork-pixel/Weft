@@ -315,7 +315,7 @@ struct ExamView: View {
             toolbarRow
             RichTextEditor(controller: controller, isEditable: !expired,
                            spellcheckEnabled: assignment.spellcheckEnabled,
-                           onEdit: { scheduleSave() })
+                           onEdit: { scheduleSave(); app.markWriting() })
                 .background(Color.white)
                 .padding(.horizontal, Theme.Space.xl)
             footerBar
