@@ -121,15 +121,20 @@ final class AppState {
     /// real test_files / test_urls when an active session resolves).
     var examFiles: [ExamFile] = ExamFile.sample
     var examLinks: [ExamLink] = ExamLink.sample
+    /// True while a signed-in exam's real test_files / test_urls are still
+    /// resolving. The reference panel must show a loading state while this is
+    /// true: "your teacher didn't attach any materials" is a positive claim the
+    /// app cannot make until the fetch has actually come back.
+    var examMaterialsLoading = false
 
     /// Materials shown in the exam reference panel: the student's own outline
-    /// first (only when the assignment allowed one AND it's a PDF — the locked
-    /// panel renders PDFs only, and a Word doc can't be opened externally
-    /// mid-exam), then the teacher's files. Falls back to just the teacher files.
+    /// first (whenever the assignment allowed one: the panel renders PDFs,
+    /// images, Word, RTF and plain text, and says so honestly for anything
+    /// else), then the teacher's files. Falls back to just the teacher files.
     var examReferenceFiles: [ExamFile] {
         guard let sid = activeExamSession?.id,
               outlineAllowedBySession[sid] == true,
-              let outline = myOutlines[sid], outline.isPDF
+              let outline = myOutlines[sid]
         else { return examFiles }
         let outlineFile = ExamFile(
             id: "outline-\(outline.id)",
@@ -269,6 +274,7 @@ final class AppState {
         // Exam reference materials back to the preview samples.
         examFiles = ExamFile.sample
         examLinks = ExamLink.sample
+        examMaterialsLoading = false
         // Teacher state back to defaults.
         teacherScreen = .home
         editingAssignment = nil
@@ -1363,7 +1369,11 @@ final class AppState {
     /// Resolve the active session's test, then load its reference files + links.
     /// Best-effort: on any failure we keep the sample materials.
     func loadExamMaterials(code: String) async {
-        guard signedIn else { return }
+        guard signedIn else { examMaterialsLoading = false; return }
+        // Cleared on every exit path (including the guards below), so the panel
+        // can never be left spinning.
+        examMaterialsLoading = true
+        defer { examMaterialsLoading = false }
         do {
             guard let session = try await supabase.lookupSession(code: code),
                   let testId = session.testId,
@@ -1388,6 +1398,11 @@ final class AppState {
     /// question id would write a corrupt submission row.
     func resolveActiveExam(code: String) async {
         guard signedIn else { return }
+        // The materials fetch runs immediately after this resolve (the same
+        // Task), so raise the flag here: it covers the whole window in which a
+        // student could reach the exam with no materials yet, and
+        // loadExamMaterials always lowers it again.
+        examMaterialsLoading = true
         do {
             guard let session = try await supabase.lookupSession(code: code),
                   session.status == "open" else {

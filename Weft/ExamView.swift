@@ -40,10 +40,9 @@ struct ExamView: View {
     @State private var controller = RichTextController()
     private var wordCount: Int { controller.wordCount }
     /// Owned here, not by the panel: hiding references (⌘⇧R) unmounts the
-    /// panel, and the store carries the loaded PDFs, tab/pin/visited state,
-    /// and divider position across that. (The web views themselves are torn
-    /// down with the panel; full keep-alive would need zero-width mounting
-    /// under HSplitView and isn't worth it yet.)
+    /// panel, and the store carries the loaded documents, the live web tabs
+    /// (with their pages and logins), tab/pin/visited state and the divider
+    /// position across that, so showing the panel again reloads nothing.
     @State private var refStore = ReferenceTabStore()
     @State private var referencesVisible = true
     @State private var expiryTask: Task<Void, Never>?
@@ -99,9 +98,14 @@ struct ExamView: View {
                     files: app.examReferenceFiles,
                     links: app.examLinks,
                     signedIn: app.signedIn,
+                    materialsLoading: app.examMaterialsLoading,
                     store: refStore,
                     onHide: { toggleReferences() }
                 )
+                // Equatable: a save-state or word-count change invalidates this
+                // body on every keystroke, and the panel must not be rebuilt
+                // for it.
+                .equatable()
                 .frame(minWidth: 320, idealWidth: 460)
             }
         }
@@ -172,6 +176,9 @@ struct ExamView: View {
         expiryTask = nil
         saveDebounce?.cancel()
         saveGeneration += 1
+        // Reference downloads and live web tabs belong to the exam, not to the
+        // panel: they are only torn down here, never when references are hidden.
+        refStore.endExam()
         guard kioskEntered, let window = examWindow else { return }
         kiosk.exitKiosk(window: window)
         kioskEntered = false
