@@ -90,13 +90,30 @@ final class KioskController {
     /// the Electron `_kioskCleanup` guarded against).
     private var observers: [NSObjectProtocol] = []
 
-    /// System Screenshot / QuickTime capture UIs. While one of these is
-    /// frontmost, fight-back must not steal focus or the recording dies.
-    private static var isSystemCaptureFrontmost: Bool {
-        let bid = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
-        return bid == "com.apple.screencaptureui"
-            || bid == "com.apple.screenshot.launcher"
-            || bid == "com.apple.QuickTimePlayerX"
+    /// System Screenshot / QuickTime / allowed local recorders. While one of
+    /// these is frontmost, fight-back must not steal focus or the recording dies.
+    private static var isLocalCaptureFrontmost: Bool {
+        let bid = (NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "").lowercased()
+        let name = (NSWorkspace.shared.frontmostApplication?.localizedName ?? "").lowercased()
+        let prefixes = [
+            "com.apple.screencaptureui",
+            "com.apple.screenshot.launcher",
+            "com.apple.quicktimeplayerx",
+            "com.obsproject",
+            "com.loom",
+            "pl.maketheweb.cleanshot",
+            "com.wulkano.kap",
+            "com.techsmith",
+            "tv.telestream.screenflow",
+            "com.telestream.screenflow",
+            "com.banzai.kap",
+        ]
+        if prefixes.contains(where: { bid == $0 || bid.hasPrefix($0 + ".") || bid.hasPrefix($0) }) {
+            return true
+        }
+        let names = ["obs studio", "loom", "cleanshot", "cleanshot x", "quicktime player",
+                     "screenshot", "screenflow", "snagit", "kap"]
+        return names.contains(where: { name == $0 || name.hasPrefix($0) })
     }
 
     /// Grace window after entering kiosk during which transient resign-key /
@@ -347,7 +364,7 @@ final class KioskController {
 
         // ⌘⇧3/4/5 / QuickTime must keep focus or the capture UI is yanked
         // closed. Local recordings are allowed; don't black out or re-key.
-        if Self.isSystemCaptureFrontmost { return }
+        if Self.isLocalCaptureFrontmost { return }
 
         // Past settle: a genuine app switch. Raise the blackout FIRST (so it is
         // already up as the window comes forward), then re-grab and front. The

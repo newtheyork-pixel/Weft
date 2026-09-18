@@ -35,6 +35,7 @@ struct StudentBlockedView: View {
                 Text(title)
                     .font(Theme.serif(26, .semibold))
                     .foregroundStyle(.white)
+                    .accessibilityAddTraits(.isHeader)
                 Text(message)
                     .font(Theme.sans(14))
                     .foregroundStyle(.white.opacity(0.8))
@@ -60,6 +61,8 @@ struct StudentBlockedView: View {
             }
             .padding(Theme.Space.xxxl)
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
     }
 }
 

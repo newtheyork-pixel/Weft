@@ -237,6 +237,19 @@ final class ReferenceWebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func updateRules(_ rules: [AllowRule]) { self.rules = rules }
 
+    /// The current web selection, for Insert quote. Empty selection is nil.
+    func selectedText() async -> String? {
+        let js = "(window.getSelection && window.getSelection().toString()) || ''"
+        do {
+            let raw = try await webView.evaluateJavaScript(js)
+            let text = (raw as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return text.isEmpty ? nil : text
+        } catch {
+            return nil
+        }
+    }
+
     /// End of exam: stop the network, drop the delegates, let the web content
     /// process go. The tab is discarded by the store straight after.
     func teardown() {
@@ -261,7 +274,10 @@ final class ReferenceWebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
         // the seconds a page takes, where a KVO handler would have to hop.
         progressTask = Task { [weak self] in
             while let tab = self, tab.state.isLoading, !Task.isCancelled {
-                tab.state.progress = max(0.05, tab.webView.estimatedProgress)
+                let next = max(0.05, tab.webView.estimatedProgress)
+                if abs(next - tab.state.progress) >= 0.02 {
+                    tab.state.progress = next
+                }
                 try? await Task.sleep(for: .milliseconds(120))
             }
         }

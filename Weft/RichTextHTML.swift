@@ -17,6 +17,29 @@ import AppKit
 
 enum RichTextHTML {
 
+    /// Rebuild an attributed string from saved subset HTML so a crash-reentry
+    /// can restore the editor. Uses AppKit's HTML importer (main-thread).
+    static func attributed(fromHTML html: String) -> NSAttributedString {
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return NSAttributedString() }
+        let source = trimmed.contains("<") ? trimmed : "<p>\(escape(trimmed))</p>"
+        guard let data = source.data(using: .utf8) else { return NSAttributedString() }
+        let attrs: [NSAttributedString.DocumentReadingOptionKey: Any] = [
+            .documentType: NSAttributedString.DocumentType.html,
+            .characterEncoding: String.Encoding.utf8.rawValue,
+        ]
+        if let parsed = try? NSAttributedString(data: data, options: attrs,
+                                                documentAttributes: nil),
+           parsed.length > 0 {
+            return parsed
+        }
+        let font = NSFont(name: "Times New Roman", size: 12) ?? .systemFont(ofSize: 12)
+        return NSAttributedString(string: trimmed, attributes: [
+            .font: font,
+            .foregroundColor: NSColor.textColor,
+        ])
+    }
+
     /// Convert `text` to subset HTML. Paragraphs whose first character's font
     /// is at least `h1Size` / `h2Size` points become <h1> / <h2>; paragraphs
     /// whose style carries an NSTextList become <li> grouped into <ul>/<ol>;
@@ -27,7 +50,9 @@ enum RichTextHTML {
     /// <span style="…">. Defaults match RichTextStyle: Times New Roman 12.
     /// Note: Electron's grading sanitizer strips font-size and line-height;
     /// family/color/background-color survive.
-    static func html(from text: NSAttributedString,
+    /// Safe to call off the main actor: the input is an immutable copy of the
+    /// document. Autosave serializes here so HTML encoding never hitch-types.
+    nonisolated static func html(from text: NSAttributedString,
                      h1Size: CGFloat = 28,
                      h2Size: CGFloat = 21,
                      defaultFamily: String = "Times New Roman",

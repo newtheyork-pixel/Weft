@@ -373,12 +373,15 @@ struct TeacherHomeView: View {
                 } else {
                     ForEach(Array(app.roster.enumerated()), id: \.element.id) { idx, s in
                         if idx > 0 { Divider().opacity(0.4).padding(.horizontal, Theme.Space.xl) }
-                        HStack(spacing: Theme.Space.md) {
-                            Text(s.name).font(Theme.sans(14)).foregroundStyle(Theme.inkSoft)
-                            Spacer()
-                            if let same = s.networkSame {
-                                Text(same ? "Same Wi-Fi" : "Different network").font(Theme.sans(12.5)).foregroundStyle(same ? Theme.muted : Theme.warn)
+                        HStack(alignment: .top, spacing: Theme.Space.md) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(s.name).font(Theme.sans(14)).foregroundStyle(Theme.inkSoft)
+                                Text(pulseLine(for: s))
+                                    .font(Theme.sans(12.5))
+                                    .foregroundStyle(Theme.muted)
+                                    .monospacedDigit()
                             }
+                            Spacer()
                             Chip(text: Self.statusLabel(s.status), kind: Self.statusKind(s))
                         }
                         .padding(.horizontal, Theme.Space.xl).padding(.vertical, 13)
@@ -386,6 +389,30 @@ struct TeacherHomeView: View {
                 }
             }
         }
+    }
+
+    private func pulseLine(for s: RosterStudent) -> String {
+        let pulse = app.essayPulse[s.id]
+        let words = pulse?.wordCount ?? 0
+        let saved = Self.ago(pulse?.updatedAt)
+        let lock: String
+        switch s.status.lowercased() {
+        case "writing", "test": lock = "in the lock"
+        case "left_fullscreen", "left fullscreen": lock = "left the window"
+        case "submitted": lock = "submitted"
+        default: lock = Self.statusLabel(s.status).lowercased()
+        }
+        if words == 0 { return "\(lock) · no words yet" }
+        return "\(lock) · \(words) word\(words == 1 ? "" : "s") · \(saved)"
+    }
+
+    private static func ago(_ date: Date?) -> String {
+        guard let date else { return "not saved" }
+        let s = Int(Date().timeIntervalSince(date))
+        if s < 8 { return "saved just now" }
+        if s < 60 { return "saved \(s)s ago" }
+        if s < 3600 { return "saved \(s / 60)m ago" }
+        return "saved \(s / 3600)h ago"
     }
 
     /// Roster chip text. `students.status` carries this app's vocabulary
@@ -400,7 +427,7 @@ struct TeacherHomeView: View {
         case "writing", "test": "Writing"
         case "review":          "In review"
         case "submitted":       "Submitted"
-        case "left_fullscreen": "Left fullscreen"
+        case "left_fullscreen", "left fullscreen": "Left window"
         case "blocked":         "Blocked"
         case "exited_early":    "Exited early"
         default:                status.replacingOccurrences(of: "_", with: " ").capitalized
@@ -412,7 +439,7 @@ struct TeacherHomeView: View {
     /// "check this machine" rather than "check this status".
     private static func statusKind(_ s: RosterStudent) -> Chip.Kind {
         switch s.status.lowercased() {
-        case "left_fullscreen", "blocked", "exited_early": .bad
+        case "left_fullscreen", "left fullscreen", "blocked", "exited_early": .bad
         default:                                           s.signal == .ok ? .good : .warn
         }
     }
@@ -445,7 +472,8 @@ struct TeacherHomeView: View {
     /// With an empty library it points back to the Library instead of
     /// presenting an empty picker and a Start that can only fail post-click.
     private func launchCard(_ c: ClassRoom) -> some View {
-        GlassCard {
+        @Bindable var app = app
+        return GlassCard {
             VStack(alignment: .leading, spacing: Theme.Space.md) {
                 Kicker(text: "Launch")
                 if app.groupedAssignments.isEmpty {
@@ -470,10 +498,25 @@ struct TeacherHomeView: View {
                              items: app.groupedAssignments.map { a in
                                  (a.id, a.versionNumber > 1 ? "\(a.title) · v\(a.versionNumber)" : a.title)
                              }) { app.pickedAssignmentId = $0 }
+                    Toggle("Schedule a start time", isOn: $app.scheduleLaunch)
+                        .font(Theme.sans(13))
+                    if app.scheduleLaunch {
+                        DatePicker("Opens",
+                                   selection: $app.scheduledLaunchAt,
+                                   in: Date()...,
+                                   displayedComponents: [.date, .hourAndMinute])
+                            .font(Theme.sans(13))
+                        Text("Students see this assignment when the clock hits that time. You get the join code now.")
+                            .font(Theme.sans(12.5))
+                            .foregroundStyle(Theme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     Button {
                         Task { await app.launchSession() }
                     } label: {
-                        Label("Start live assignment", systemImage: "play.fill").frame(maxWidth: .infinity)
+                        Label(app.scheduleLaunch ? "Schedule assignment" : "Start live assignment",
+                              systemImage: app.scheduleLaunch ? "calendar" : "play.fill")
+                            .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.glassProminent)
                     .tint(Theme.accent)
@@ -527,8 +570,7 @@ struct TeacherHomeView: View {
                 Text(meta(for: s)).font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             }
             Spacer()
-            Chip(text: s.status == "open" ? "Open" : "Closed",
-                 kind: s.status == "open" ? .good : .neutral)
+            Chip(text: sessionChip(s).text, kind: sessionChip(s).kind)
             Button("Review essays") {
                 app.openGrading(session: s, title: app.sessionTitle(s))
             }
@@ -548,6 +590,12 @@ struct TeacherHomeView: View {
             .help("Archive or delete this session")
             .linkPointer()
         }
+    }
+
+    private func sessionChip(_ s: ExamSession) -> (text: String, kind: Chip.Kind) {
+        if s.status != "open" { return ("Closed", .neutral) }
+        if let opens = s.opensAt, opens > Date() { return ("Scheduled", .warn) }
+        return ("Open", .good)
     }
 
     /// Row meta: the launch date (matching ReviewGradingView's date treatment)

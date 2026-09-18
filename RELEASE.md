@@ -9,7 +9,7 @@ download automatically.
   **off** (proctoring enumerates processes, displays, VMs), which the store forbids.
 - **Floor: macOS 26.1+** (the app uses current SwiftUI APIs). Anyone on older
   macOS can't run it.
-- Current version: `0.3.6` (set via `MARKETING_VERSION` in the project).
+- Current version: `0.3.7` (set via `MARKETING_VERSION` in the project).
 
 ## One-time setup
 

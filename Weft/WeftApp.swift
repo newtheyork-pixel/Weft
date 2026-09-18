@@ -66,8 +66,10 @@ struct WeftApp: App {
                     Divider()
                     if app.canChooseView, app.route != .signIn {
                         Button("Switch View") { app.switchView() }
+                            .disabled(ExamGate.inProgress)
                     }
                     Button("Sign Out") { app.signOut() }
+                        .disabled(ExamGate.inProgress)
                 } else if app.role != nil {
                     Divider()
                     Button("Exit Preview") { app.signOut() }

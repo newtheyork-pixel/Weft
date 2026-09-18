@@ -20,15 +20,21 @@ struct ClassRoom: Identifiable, Codable, Hashable, Sendable {
     var name: String
     var joinCode: String
     var archivedAt: Date?
+    /// Owning teacher. Students get this from the enrolled-class read so they
+    /// can wrap essays to the teacher's published device key without a second hop.
+    var teacherUserId: String?
 
     enum CodingKeys: String, CodingKey {
         case id, name
         case joinCode = "join_code"
         case archivedAt = "archived_at"
+        case teacherUserId = "teacher_user_id"
     }
 
-    init(id: String, name: String, joinCode: String, archivedAt: Date?) {
-        self.id = id; self.name = name; self.joinCode = joinCode; self.archivedAt = archivedAt
+    init(id: String, name: String, joinCode: String, archivedAt: Date?,
+         teacherUserId: String? = nil) {
+        self.id = id; self.name = name; self.joinCode = joinCode
+        self.archivedAt = archivedAt; self.teacherUserId = teacherUserId
     }
 
     /// Tolerant decode: `join_class_by_code` returns id + name but not always a
@@ -39,6 +45,7 @@ struct ClassRoom: Identifiable, Codable, Hashable, Sendable {
         name = try c.decode(String.self, forKey: .name)
         joinCode = (try? c.decode(String.self, forKey: .joinCode)) ?? ""
         archivedAt = try? c.decode(Date.self, forKey: .archivedAt)
+        teacherUserId = try? c.decode(String.self, forKey: .teacherUserId)
     }
 
     static let sample = ClassRoom(id: "c1", name: "AP English", joinCode: "ABC234", archivedAt: nil)
@@ -149,18 +156,22 @@ struct ExamSession: Identifiable, Codable, Hashable, Sendable {
     /// path) don't select it, and a missing or malformed value must never
     /// break the student exam flow that shares this model.
     var createdAt: Date?
+    /// Students may enter at or after this instant. nil = immediately.
+    var opensAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case id, code, status
         case testId = "test_id"
         case classId = "class_id"
         case createdAt = "created_at"
+        case opensAt = "opens_at"
     }
 
     init(id: String, code: String, testId: String?, classId: String?,
-         status: String, createdAt: Date? = nil) {
+         status: String, createdAt: Date? = nil, opensAt: Date? = nil) {
         self.id = id; self.code = code; self.testId = testId
         self.classId = classId; self.status = status; self.createdAt = createdAt
+        self.opensAt = opensAt
     }
 
     /// Tolerant decode (house pattern, see ClassRoom/Assignment above):
@@ -173,6 +184,7 @@ struct ExamSession: Identifiable, Codable, Hashable, Sendable {
         testId = try? c.decode(String.self, forKey: .testId)
         classId = try? c.decode(String.self, forKey: .classId)
         createdAt = try? c.decode(Date.self, forKey: .createdAt)
+        opensAt = try? c.decode(Date.self, forKey: .opensAt)
     }
 }
 
@@ -287,6 +299,16 @@ struct ClassWorkItem: Identifiable, Codable, Hashable, Sendable {
                                     myReleasedAt: nil, myPoints: nil, myPointsPossible: nil,
                                     myActiveSubmittedAt: nil, activeVersion: nil, latestVersion: nil)
     static let sampleList = [active, graded, past]
+}
+
+/// An open assignment the student can enter from a signed-in Mac — no code at the bell.
+struct LiveExamOffer: Equatable, Hashable, Sendable {
+    var item: ClassWorkItem
+    var classId: String
+    var className: String
+
+    static let sample = LiveExamOffer(
+        item: .active, classId: ClassRoom.sample.id, className: ClassRoom.sample.name)
 }
 
 // MARK: - Exam reference materials (test_files / test_urls)
@@ -523,8 +545,29 @@ struct RosterStudent: Identifiable, Codable, Hashable, Sendable {
 
     static let sample = [
         RosterStudent(id: "1", name: "Ava Chen", networkSame: true, remote: false, capture: false, displays: 1, isVM: false, status: "writing", userId: "u1"),
-        RosterStudent(id: "2", name: "Ben Ortiz", networkSame: false, remote: false, capture: false, displays: 1, isVM: false, status: "review"),
+        RosterStudent(id: "2", name: "Ben Ortiz", networkSame: false, remote: false, capture: false, displays: 1, isVM: false, status: "left fullscreen"),
         RosterStudent(id: "3", name: "Maya Singh", networkSame: true, remote: false, capture: false, displays: 2, isVM: false, status: "writing"),
+    ]
+}
+
+/// Word count + last save for the live monitor. Never carries essay text.
+struct EssayPulse: Codable, Hashable, Sendable {
+    var studentId: String
+    var wordCount: Int
+    var updatedAt: Date?
+    var submittedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case studentId = "student_id"
+        case wordCount = "word_count"
+        case updatedAt = "updated_at"
+        case submittedAt = "submitted_at"
+    }
+
+    static let sample: [String: EssayPulse] = [
+        "1": EssayPulse(studentId: "1", wordCount: 412, updatedAt: Date().addingTimeInterval(-14), submittedAt: nil),
+        "2": EssayPulse(studentId: "2", wordCount: 188, updatedAt: Date().addingTimeInterval(-90), submittedAt: nil),
+        "3": EssayPulse(studentId: "3", wordCount: 267, updatedAt: Date().addingTimeInterval(-6), submittedAt: nil),
     ]
 }
 
@@ -555,6 +598,7 @@ struct TeacherSubmission: Identifiable, Codable, Hashable, Sendable {
     var studentId: String?
     var questionId: String?
     var contentHtml: String?
+    var contentCipher: WeftEnvelope?
     var wordCount: Int?
     var submittedAt: Date?
     var updatedAt: Date?
@@ -565,6 +609,7 @@ struct TeacherSubmission: Identifiable, Codable, Hashable, Sendable {
         case studentId = "student_id"
         case questionId = "question_id"
         case contentHtml = "content_html"
+        case contentCipher = "content_cipher"
         case wordCount = "word_count"
         case submittedAt = "submitted_at"
         case updatedAt = "updated_at"
@@ -575,15 +620,40 @@ struct TeacherSubmission: Identifiable, Codable, Hashable, Sendable {
 
 struct SubmittedEssay: Decodable, Sendable {
     let title: String
-    let contentHtml: String
+    var contentHtml: String
+    var contentCipher: WeftEnvelope?
     let wordCount: Int
     let submittedAt: Date
 
     enum CodingKeys: String, CodingKey {
         case title
         case contentHtml = "content_html"
+        case contentCipher = "content_cipher"
         case wordCount = "word_count"
         case submittedAt = "submitted_at"
+    }
+}
+
+/// A teacher margin note anchored to a quote in the essay (`essay_comments`).
+struct EssayComment: Identifiable, Codable, Hashable, Sendable {
+    var id: String
+    var submissionId: String?
+    var sessionId: String?
+    var studentId: String?
+    var rangeStart: Int
+    var rangeEnd: Int
+    var quote: String
+    var body: String
+    var visibility: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case submissionId = "submission_id"
+        case sessionId = "session_id"
+        case studentId = "student_id"
+        case rangeStart = "range_start"
+        case rangeEnd = "range_end"
+        case quote, body, visibility
     }
 }
 

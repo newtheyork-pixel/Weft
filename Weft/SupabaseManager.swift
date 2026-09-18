@@ -484,10 +484,31 @@ final class SupabaseManager: @unchecked Sendable {
         ])
     }
 
-    /// Released grades + essays for the signed-in student across all sessions.
-    /// New consolidated RPC replacing the multi-table stitch in loadReturnedEssays().
+    /// Released grades for the signed-in student. The RPC never returns the
+    /// paper (HTML or ciphertext); call `listOwnSubmissionBodies` for that.
     func getMyReturnedWork() async throws -> [ReturnedWorkItem] {
         try await rpc("get_my_returned_work")
+    }
+
+    /// The caller's own essay bodies, gated by RLS. Used by the Mac app after
+    /// `get_my_returned_work` so the student portal never has to see the paper.
+    func listOwnSubmissionBodies(ids: [String]) async throws -> [OwnSubmissionBody] {
+        let clean = ids.filter { !$0.isEmpty }
+        guard !clean.isEmpty else { return [] }
+        let inList = "in.(" + clean.joined(separator: ",") + ")"
+        let cipher = "id,content_html,content_cipher"
+        let plain = "id,content_html"
+        do {
+            return try await rows("essay_submissions", query: [
+                URLQueryItem(name: "select", value: cipher),
+                URLQueryItem(name: "id", value: inList),
+            ])
+        } catch {
+            return try await rows("essay_submissions", query: [
+                URLQueryItem(name: "select", value: plain),
+                URLQueryItem(name: "id", value: inList),
+            ])
+        }
     }
 
     /// The signed-in student's classes, via the documented enrollment join
@@ -496,12 +517,13 @@ final class SupabaseManager: @unchecked Sendable {
     /// (the student home never shows it).
     func myClasses(userId: String) async throws -> [ClassRoom] {
         let rows: [EnrollmentRow] = try await rows("class_enrollments", query: [
-            URLQueryItem(name: "select", value: "class_id,classes(id,name,archived_at)"),
+            URLQueryItem(name: "select", value: "class_id,classes(id,name,archived_at,teacher_user_id)"),
             URLQueryItem(name: "user_id", value: "eq.\(userId)")
         ])
         return rows.compactMap { row in
             guard let c = row.classes else { return nil }
-            return ClassRoom(id: c.id, name: c.name, joinCode: "", archivedAt: c.archivedAt)
+            return ClassRoom(id: c.id, name: c.name, joinCode: "", archivedAt: c.archivedAt,
+                             teacherUserId: c.teacherUserId)
         }
     }
 
@@ -673,6 +695,14 @@ final class SupabaseManager: @unchecked Sendable {
         ])
     }
 
+    /// Word count and last save only — the live monitor must never fetch the essay.
+    func listSessionPulse(sessionId: String) async throws -> [EssayPulse] {
+        try await rows("essay_submissions", query: [
+            URLQueryItem(name: "select", value: "student_id,word_count,updated_at,submitted_at"),
+            URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+        ])
+    }
+
     func listClassEnrollments(classId: String) async throws -> [ClassEnrollment] {
         try await rows("class_enrollments", query: [
             URLQueryItem(name: "select", value: "display_name,user_id,created_at,removed_at"),
@@ -682,11 +712,67 @@ final class SupabaseManager: @unchecked Sendable {
     }
 
     func listSessionSubmissions(sessionId: String) async throws -> [TeacherSubmission] {
-        try await rows("essay_submissions", query: [
-            URLQueryItem(name: "select", value: "id,session_id,student_id,question_id,content_html,word_count,updated_at,submitted_at"),
+        let cipher = "id,session_id,student_id,question_id,content_html,content_cipher,word_count,updated_at,submitted_at"
+        let plain = "id,session_id,student_id,question_id,content_html,word_count,updated_at,submitted_at"
+        do {
+            return try await rows("essay_submissions", query: [
+                URLQueryItem(name: "select", value: cipher),
+                URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+                URLQueryItem(name: "order", value: "submitted_at.asc.nullslast"),
+            ])
+        } catch {
+            return try await rows("essay_submissions", query: [
+                URLQueryItem(name: "select", value: plain),
+                URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+                URLQueryItem(name: "order", value: "submitted_at.asc.nullslast"),
+            ])
+        }
+    }
+
+    func listEssayComments(sessionId: String) async throws -> [EssayComment] {
+        try await rows("essay_comments", query: [
+            URLQueryItem(name: "select",
+                         value: "id,submission_id,session_id,student_id,range_start,range_end,quote,body,visibility"),
             URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
-            URLQueryItem(name: "order", value: "submitted_at.asc.nullslast"),
+            URLQueryItem(name: "order", value: "created_at.asc"),
         ])
+    }
+
+    @discardableResult
+    func createEssayComment(submissionId: String, sessionId: String, studentId: String,
+                            quote: String, body: String) async throws -> EssayComment? {
+        struct Payload: Encodable {
+            let submission_id: String; let session_id: String; let student_id: String
+            let range_start: Int; let range_end: Int
+            let quote: String; let body: String; let visibility: String
+        }
+        let utf = quote.utf16.count
+        let end = max(utf, 1)
+        let rows: [EssayComment] = try await insert("essay_comments",
+            values: Payload(submission_id: submissionId, session_id: sessionId,
+                            student_id: studentId, range_start: 0, range_end: end,
+                            quote: quote, body: body, visibility: "shared"))
+        return rows.first
+    }
+
+    func listDeviceKeys(userIds: [String]) async throws -> [DevicePublicKey] {
+        let ids = userIds.filter { !$0.isEmpty }
+        guard !ids.isEmpty else { return [] }
+        return try await rows("user_device_keys", query: [
+            URLQueryItem(name: "select", value: "user_id,kid,public_x963"),
+            URLQueryItem(name: "user_id", value: "in.(\(ids.joined(separator: ",")))"),
+        ])
+    }
+
+    func upsertDeviceKey(userId: String, kid: String, publicX963: String) async throws {
+        struct Payload: Encodable {
+            let user_id: String
+            let kid: String
+            let public_x963: String
+        }
+        let _: [DevicePublicKey] = try await upsert("user_device_keys",
+            values: Payload(user_id: userId, kid: kid, public_x963: publicX963),
+            onConflict: "user_id,kid")
     }
 
     func listGrades(submissionIds: [String]) async throws -> [EssayGrade] {
@@ -799,17 +885,35 @@ final class SupabaseManager: @unchecked Sendable {
     /// Five attempts, so even a heavily used project resolves in one launch.
     @discardableResult
     func launchSession(testId: String?, classId: String?, teacherUserId: String,
-                       teacherIP: String?) async throws -> ExamSession? {
+                       teacherIP: String?, opensAt: Date? = nil) async throws -> ExamSession? {
         struct Payload: Encodable {
             let code: String; let teacher_ip: String?; let status: String
             let teacher_user_id: String; let test_id: String?; let class_id: String?
+            let opens_at: String?
+            enum CodingKeys: String, CodingKey {
+                case code, teacher_ip, status, teacher_user_id, test_id, class_id, opens_at
+            }
+            func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: CodingKeys.self)
+                try c.encode(code, forKey: .code)
+                try c.encodeIfPresent(teacher_ip, forKey: .teacher_ip)
+                try c.encode(status, forKey: .status)
+                try c.encode(teacher_user_id, forKey: .teacher_user_id)
+                try c.encodeIfPresent(test_id, forKey: .test_id)
+                try c.encodeIfPresent(class_id, forKey: .class_id)
+                // Omit the key when nil so an unmigrated database still accepts
+                // an immediate launch.
+                try c.encodeIfPresent(opens_at, forKey: .opens_at)
+            }
         }
         var lastCollision: Error?
         for _ in 0..<5 {
             do {
+                let opens = opensAt.map { SupabaseDate.fractional.string(from: $0) }
                 let result: [ExamSession] = try await insert("sessions",
                     values: Payload(code: Self.sessionCode(), teacher_ip: teacherIP, status: "open",
-                                    teacher_user_id: teacherUserId, test_id: testId, class_id: classId))
+                                    teacher_user_id: teacherUserId, test_id: testId, class_id: classId,
+                                    opens_at: opens))
                 return result.first
             } catch let error as SupabaseError {
                 guard case let .badResponse(_, body) = error,
@@ -909,6 +1013,22 @@ final class SupabaseManager: @unchecked Sendable {
     func registerStudent(sessionId: String, userId: String, email: String?,
                          name: String, screenCapture: Bool, remote: Bool,
                          displayCount: Int, isVM: Bool) async throws -> String? {
+        // Re-entry must not reset status to "joined" (the teacher would see a
+        // writer as not started). Look up first: UPDATE flags only when the
+        // row exists, INSERT with joined only on the first Begin.
+        struct Existing: Decodable { let id: String }
+        let found: [Existing] = try await rows("students", query: [
+            URLQueryItem(name: "select", value: "id"),
+            URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+            URLQueryItem(name: "user_id", value: "eq.\(userId)"),
+            URLQueryItem(name: "limit", value: "1"),
+        ])
+        if let id = found.first?.id {
+            _ = await updateProctoringFlags(id: id, screenCapture: screenCapture,
+                                            remote: remote, displayCount: displayCount,
+                                            isVM: isVM)
+            return id
+        }
         struct Payload: Encodable {
             let session_id: String; let user_id: String
             let email: String?; let name: String
@@ -916,28 +1036,141 @@ final class SupabaseManager: @unchecked Sendable {
             let display_count: Int; let is_vm: Bool
             let status: String
         }
-        let rows: [StudentRowID] = try await upsert("students",
+        let rows: [StudentRowID] = try await insert("students",
             values: Payload(session_id: sessionId, user_id: userId, email: email,
                             name: name, remote_session: remote,
                             screen_capture: screenCapture, display_count: displayCount,
                             is_vm: isVM, status: "joined"),
-            onConflict: "session_id,user_id")
+            returning: true)
         return rows.first?.id
+    }
+
+    /// The in-progress essay for this attempt, or nil if the student has not
+    /// saved yet. Used to restore the editor after a crash or re-entry.
+    func getMyEssayDraft(sessionId: String, studentId: String,
+                         questionId: String) async throws -> (id: String, html: String, cipher: WeftEnvelope?, updatedAt: Date?)? {
+        struct Row: Decodable {
+            let id: String
+            let contentHtml: String?
+            let contentCipher: WeftEnvelope?
+            let updatedAt: Date?
+            enum CodingKeys: String, CodingKey {
+                case id
+                case contentHtml = "content_html"
+                case contentCipher = "content_cipher"
+                case updatedAt = "updated_at"
+            }
+        }
+        let selectCipher = "id,content_html,content_cipher,updated_at"
+        let selectPlain = "id,content_html,updated_at"
+        let query: (String) -> [URLQueryItem] = { select in
+            [
+                URLQueryItem(name: "select", value: select),
+                URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+                URLQueryItem(name: "student_id", value: "eq.\(studentId)"),
+                URLQueryItem(name: "question_id", value: "eq.\(questionId)"),
+                URLQueryItem(name: "limit", value: "1"),
+            ]
+        }
+        let rows: [Row]
+        do {
+            rows = try await self.rows("essay_submissions", query: query(selectCipher))
+        } catch {
+            rows = try await self.rows("essay_submissions", query: query(selectPlain))
+        }
+        guard let row = rows.first else { return nil }
+        return (row.id, row.contentHtml ?? "", row.contentCipher, row.updatedAt)
+    }
+
+    /// The caller's outlines for many sessions in one hop (class-home badges).
+    func getMyOutlines(sessionIds: [String], userId: String) async throws -> [OutlineUpload] {
+        guard !sessionIds.isEmpty else { return [] }
+        return try await rows("outline_uploads", query: [
+            URLQueryItem(name: "select", value: "*"),
+            URLQueryItem(name: "user_id", value: "eq.\(userId)"),
+            URLQueryItem(name: "session_id", value: "in.(\(sessionIds.joined(separator: ",")))"),
+        ])
+    }
+
+    /// `outline_allowed` for many tests in one hop. Students can SELECT tests.
+    func outlineAllowedByTestIds(_ ids: [String]) async throws -> [String: Bool] {
+        guard !ids.isEmpty else { return [:] }
+        struct Row: Decodable {
+            let id: String
+            let outlineAllowed: Bool
+            enum CodingKeys: String, CodingKey {
+                case id
+                case outlineAllowed = "outline_allowed"
+            }
+        }
+        let found: [Row] = try await rows("tests", query: [
+            URLQueryItem(name: "select", value: "id,outline_allowed"),
+            URLQueryItem(name: "id", value: "in.(\(ids.joined(separator: ",")))"),
+        ])
+        return Dictionary(uniqueKeysWithValues: found.map { ($0.id, $0.outlineAllowed) })
+    }
+
+    /// Push the latest detection flags. The DB trigger ORs these upward, so a
+    /// re-entry cannot clear a genuine hit. Best-effort: a failed patch must
+    /// not trap the student in the kiosk.
+    @discardableResult
+    func updateProctoringFlags(id: String, screenCapture: Bool, remote: Bool,
+                               displayCount: Int, isVM: Bool) async -> Bool {
+        struct Payload: Encodable {
+            let remote_session: Bool; let screen_capture: Bool
+            let display_count: Int; let is_vm: Bool
+        }
+        do {
+            let _: [StudentRowID] = try await update("students",
+                values: Payload(remote_session: remote, screen_capture: screenCapture,
+                                display_count: displayCount, is_vm: isVM),
+                query: [URLQueryItem(name: "id", value: "eq.\(id)")],
+                returning: false)
+            return true
+        } catch {
+            print("students proctoring flags update failed: \(error)")
+            return false
+        }
     }
 
     /// Autosave/flush one essay (upsert: the row IS the submission). Returns
     /// the row id for the submit lock. updated_at is client-stamped: the table
     /// has no server now() trigger (Electron does the same).
+    ///
+    /// `cipher` is the sealed envelope when the teacher has published a device
+    /// key. The HTML sent alongside is empty in that case so the server does
+    /// not hold the writing. If the ciphertext column is not deployed yet the
+    /// write falls back to plaintext so the hour is never lost.
     func upsertEssaySubmission(sessionId: String, studentId: String, questionId: String,
-                               contentHTML: String, wordCount: Int) async throws -> String? {
-        struct Payload: Encodable {
+                               contentHTML: String, wordCount: Int,
+                               cipher: WeftEnvelope? = nil) async throws -> String? {
+        struct Plain: Encodable {
             let session_id: String; let student_id: String; let question_id: String
             let content_html: String; let word_count: Int; let updated_at: String
         }
+        struct Sealed: Encodable {
+            let session_id: String; let student_id: String; let question_id: String
+            let content_html: String; let content_cipher: WeftEnvelope
+            let word_count: Int; let updated_at: String
+        }
+        let stamped = Self.nowISO()
+        if let cipher {
+            do {
+                let rows: [StudentRowID] = try await upsert("essay_submissions",
+                    values: Sealed(session_id: sessionId, student_id: studentId,
+                                   question_id: questionId, content_html: "",
+                                   content_cipher: cipher, word_count: wordCount,
+                                   updated_at: stamped),
+                    onConflict: "session_id,student_id,question_id")
+                return rows.first?.id
+            } catch {
+                // Column missing or RLS: keep the writing as plaintext.
+            }
+        }
         let rows: [StudentRowID] = try await upsert("essay_submissions",
-            values: Payload(session_id: sessionId, student_id: studentId,
-                            question_id: questionId, content_html: contentHTML,
-                            word_count: wordCount, updated_at: Self.nowISO()),
+            values: Plain(session_id: sessionId, student_id: studentId,
+                          question_id: questionId, content_html: contentHTML,
+                          word_count: wordCount, updated_at: stamped),
             onConflict: "session_id,student_id,question_id")
         return rows.first?.id
     }
@@ -1449,17 +1682,18 @@ final class SupabaseManager: @unchecked Sendable {
 
 // MARK: - Returned-work DTO (the get_my_returned_work RPC row)
 
-/// A single released (graded) essay for the signed-in student. Mirrors the
-/// stitched shape student.js builds in loadReturnedEssays(): the essay body, the
-/// score, the teacher's overall feedback, and the shared inline comments.
+/// A single released (graded) essay for the signed-in student. The RPC carries
+/// the score, overall feedback, and shared comments — never the paper. HTML and
+/// ciphertext are filled in by `listOwnSubmissionBodies` on the Mac app.
 ///
 /// This is the network DTO; the read-only UI (ReturnedWorkView) maps it into its
 /// own presentation model. Lives here (not Models.swift) so this file stays
 /// self-contained and the typed RPC actually compiles.
-struct ReturnedWorkItem: Identifiable, Codable, Hashable, Sendable {
+struct ReturnedWorkItem: Identifiable, Decodable, Hashable, Sendable {
     let submissionId: String
     var questionId: String?
     var contentHtml: String
+    var contentCipher: WeftEnvelope?
     var wordCount: Int
     var points: Double?
     var pointsPossible: Double
@@ -1473,12 +1707,47 @@ struct ReturnedWorkItem: Identifiable, Codable, Hashable, Sendable {
         case submissionId = "submission_id"
         case questionId = "question_id"
         case contentHtml = "content_html"
+        case contentCipher = "content_cipher"
         case wordCount = "word_count"
         case points
         case pointsPossible = "points_possible"
         case feedback
         case releasedAt = "released_at"
         case comments
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        submissionId = try c.decode(String.self, forKey: .submissionId)
+        questionId = try c.decodeIfPresent(String.self, forKey: .questionId)
+        contentHtml = try c.decodeIfPresent(String.self, forKey: .contentHtml) ?? ""
+        contentCipher = try c.decodeIfPresent(WeftEnvelope.self, forKey: .contentCipher)
+        wordCount = try c.decodeIfPresent(Int.self, forKey: .wordCount) ?? 0
+        points = try c.decodeIfPresent(Double.self, forKey: .points)
+        pointsPossible = try c.decodeIfPresent(Double.self, forKey: .pointsPossible) ?? 0
+        feedback = try c.decodeIfPresent(String.self, forKey: .feedback) ?? ""
+        releasedAt = try c.decodeIfPresent(Date.self, forKey: .releasedAt)
+        comments = try c.decodeIfPresent([ReturnedComment].self, forKey: .comments) ?? []
+    }
+}
+
+/// The signed-in student's own `essay_submissions` body, selected by id.
+struct OwnSubmissionBody: Decodable, Sendable {
+    let id: String
+    var contentHtml: String
+    var contentCipher: WeftEnvelope?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case contentHtml = "content_html"
+        case contentCipher = "content_cipher"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        contentHtml = try c.decodeIfPresent(String.self, forKey: .contentHtml) ?? ""
+        contentCipher = try c.decodeIfPresent(WeftEnvelope.self, forKey: .contentCipher)
     }
 }
 
@@ -1503,6 +1772,18 @@ struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
         case body
         case visibility
         case createdAt = "created_at"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString
+        submissionId = try? c.decode(String.self, forKey: .submissionId)
+        rangeStart = try? c.decode(Int.self, forKey: .rangeStart)
+        rangeEnd = try? c.decode(Int.self, forKey: .rangeEnd)
+        quote = try? c.decode(String.self, forKey: .quote)
+        body = (try? c.decode(String.self, forKey: .body)) ?? ""
+        visibility = try? c.decode(String.self, forKey: .visibility)
+        createdAt = try? c.decode(Date.self, forKey: .createdAt)
     }
 }
 
@@ -1609,9 +1890,11 @@ private struct EnrollmentRow: Decodable {
         let id: String
         let name: String
         let archivedAt: Date?
+        let teacherUserId: String?
         enum CodingKeys: String, CodingKey {
             case id, name
             case archivedAt = "archived_at"
+            case teacherUserId = "teacher_user_id"
         }
     }
 

@@ -35,6 +35,7 @@ struct StudentClassHomeView: View {
                 VStack(alignment: .leading, spacing: Theme.Space.lg) {
                     if app.selectedClassId == nil { intro }
                     if let error = app.errorMessage { errorBanner(error) }
+                    if let offer = app.liveExamOffer { liveBanner(offer) }
                     if app.selectedClassId == nil {
                         if app.enrolledClasses.isEmpty {
                             emptyState
@@ -172,6 +173,30 @@ struct StudentClassHomeView: View {
         }
         .padding(Theme.Space.md)
         .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+    }
+
+    private func liveBanner(_ offer: LiveExamOffer) -> some View {
+        HStack(alignment: .center, spacing: Theme.Space.md) {
+            Image(systemName: "lock.square")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(offer.item.title) is live")
+                    .font(Theme.sans(14, .semibold))
+                    .foregroundStyle(Theme.inkSoft)
+                Text(offer.className)
+                    .font(Theme.sans(12.5))
+                    .foregroundStyle(Theme.muted)
+            }
+            Spacer(minLength: 0)
+            Button("Begin") { app.enterLiveExam(offer) }
+                .buttonStyle(.glassProminent)
+                .tint(Theme.accent)
+                .linkPointer()
+        }
+        .padding(Theme.Space.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .weftGlass(Theme.Radius.md)
     }
 
     // MARK: Intro (classes level only)

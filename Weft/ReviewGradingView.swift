@@ -29,6 +29,7 @@ private struct ReviewEntry: Identifiable {
     var score: String          // points entered, empty == not scored yet
     var finalComment: String
     var paragraphs: [String]    // the essay body, paragraph by paragraph
+    var comments: [EssayComment] = []
 
     enum Status {
         case writing, submitted, joined, leftFullscreen
@@ -152,6 +153,9 @@ struct ReviewGradingView: View {
     /// Local edit buffers for the selected submission, seeded from the live grade.
     @State private var scoreText: String = ""
     @State private var commentText: String = ""
+    @State private var marginQuote: String = ""
+    @State private var marginNote: String = ""
+    @State private var marginBusy = false
     /// Tracks which submission the buffers were seeded for, so we reseed on move.
     @State private var seededSubmissionId: String?
 
@@ -258,7 +262,11 @@ struct ReviewGradingView: View {
         .onChange(of: app.gradingSubmissions) { _, _ in rebuildLiveRoster() }
         .onChange(of: app.grades) { _, _ in rebuildLiveRoster() }
         .onChange(of: app.gradingRoster) { _, _ in rebuildLiveRoster() }
-        .onChange(of: current.id) { _, _ in seedBuffers() }
+        .onChange(of: current.id) { _, _ in
+            seedBuffers()
+            marginQuote = ""
+            marginNote = ""
+        }
         .onChange(of: isLive) { _, _ in index = 0; seedBuffers() }
         .onAppear { seedBuffers() }
     }
@@ -620,6 +628,7 @@ struct ReviewGradingView: View {
                             .font(.system(size: 15))
                             .foregroundStyle(Color.black)
                             .lineSpacing(5)
+                            .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -677,6 +686,7 @@ struct ReviewGradingView: View {
                         }
                         scoreBlock
                         finalCommentBlock
+                        marginCommentsBlock
                     }
                     .padding(Theme.Space.lg)
                 }
@@ -821,6 +831,100 @@ struct ReviewGradingView: View {
                             .allowsHitTesting(false)
                     }
                 }
+        }
+    }
+
+    private var currentComments: [EssayComment] {
+        isLive ? (app.gradingComments[current.id] ?? []) : current.comments
+    }
+
+    private var marginCommentsBlock: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.md) {
+            slotHead("In the margin", system: "text.quote")
+            Text("Select a sentence on the paper, paste it here, and leave a note on that line.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.muted)
+                .lineSpacing(2)
+            TextField("Quoted sentence", text: $marginQuote, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(Theme.sans(12))
+                .lineLimit(2...4)
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                        .fill(Color.white.opacity(0.6)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                        .stroke(Color.black.opacity(0.10), lineWidth: 1))
+            TextField("Your note", text: $marginNote, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(Theme.sans(13))
+                .lineLimit(3...6)
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                        .fill(Color.white.opacity(0.6)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                        .stroke(Color.black.opacity(0.10), lineWidth: 1))
+            Button {
+                addMarginComment()
+            } label: {
+                Text("Pin to the paper")
+                    .font(Theme.sans(13, .semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glass)
+            .disabled(marginBusy || marginQuote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || marginNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .linkPointer()
+
+            if currentComments.isEmpty {
+                Text("No margin notes yet.")
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.muted)
+            } else {
+                VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                    ForEach(currentComments) { c in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(c.quote)
+                                .font(Theme.sans(12))
+                                .foregroundStyle(Theme.muted)
+                                .lineLimit(2)
+                                .padding(.leading, Theme.Space.sm)
+                                .overlay(alignment: .leading) {
+                                    Rectangle().fill(Theme.accent).frame(width: 3)
+                                }
+                            Text(c.body)
+                                .font(Theme.sans(13))
+                                .foregroundStyle(Theme.inkSoft)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func addMarginComment() {
+        let quote = marginQuote.trimmingCharacters(in: .whitespacesAndNewlines)
+        let note = marginNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !quote.isEmpty, !note.isEmpty else { return }
+        if !isLive {
+            let row = EssayComment(id: UUID().uuidString, submissionId: current.id,
+                                   sessionId: nil, studentId: nil,
+                                   rangeStart: 0, rangeEnd: max(quote.utf16.count, 1),
+                                   quote: quote, body: note, visibility: "shared")
+            mockRoster[safeMockIndex].comments.append(row)
+            marginQuote = ""; marginNote = ""
+            return
+        }
+        guard let submission = app.gradingSubmissions.first(where: { $0.id == current.id }) else { return }
+        marginBusy = true
+        Task {
+            let ok = await app.addEssayComment(submission: submission, quote: quote, body: note)
+            marginBusy = false
+            if ok { marginQuote = ""; marginNote = "" }
         }
     }
 

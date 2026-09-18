@@ -53,7 +53,7 @@ enum ReferenceMaterial: Identifiable, Hashable {
 }
 
 /// What the panel has for one reference file.
-enum ReferenceDocument {
+enum ReferenceDocument: @unchecked Sendable {
     case loading
     case pdf(PDFDocument)
     /// Word / RTF / plain text, read with AppKit's document importers.
@@ -338,6 +338,40 @@ final class ReferenceTabStore {
     // MARK: Web tabs
 
     func webTab(for link: ExamLink) -> ReferenceWebTab? { webTabs[link.id] }
+
+    /// The student's current selection in the visible reference, for Insert quote.
+    func captureQuote() async -> (text: String, citation: String)? {
+        guard let material = selected else { return nil }
+        switch material {
+        case .pdf(let file):
+            if let pdf = pdfViews[file.id],
+               let sel = pdf.currentSelection?.string?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+               !sel.isEmpty {
+                var cite = file.originalName
+                if let page = pdf.currentPage, let doc = pdf.document {
+                    cite += ", p. \(doc.index(for: page) + 1)"
+                }
+                return (sel, cite)
+            }
+            if let scroll = textViews[file.id],
+               let tv = scroll.documentView as? NSTextView {
+                let range = tv.selectedRange
+                guard range.length > 0 else { return nil }
+                let sel = (tv.string as NSString).substring(with: range)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !sel.isEmpty else { return nil }
+                return (sel, file.originalName)
+            }
+            return nil
+        case .web(let link):
+            guard let tab = webTabs[link.id],
+                  let sel = await tab.selectedText(),
+                  !sel.isEmpty else { return nil }
+            let host = tab.state.host ?? link.displayName
+            return (sel, host)
+        }
+    }
 
     /// Create (once) and start the tab for an approved link. Called from the
     /// panel's `.task`, never from a view builder: creating a tab starts a

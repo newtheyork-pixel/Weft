@@ -42,9 +42,11 @@ final class RichTextController {
     /// (e.g. the preview seed runs before makeNSView's async registration).
     private var pendingContent: NSAttributedString?
 
-    /// Words in the document. Recomputed on every edit; @Observable, so labels
-    /// update without the document itself ever crossing into SwiftUI state.
+    /// Words in the document. Recomputed on a short debounce during typing;
+    /// @Observable, so labels update without the document itself ever crossing
+    /// into SwiftUI state.
     private(set) var wordCount: Int = 0
+    @ObservationIgnored private var recountTask: Task<Void, Never>?
 
     /// Called by the editor when the live text view appears. Applies any
     /// content that arrived early and primes the word count.
@@ -84,6 +86,57 @@ final class RichTextController {
         RichTextHTML.html(from: snapshot(),
                           h1Size: RichTextStyle.h1FontSize,
                           h2Size: RichTextStyle.h2FontSize)
+    }
+
+    /// Copy the document on the typing thread, then serialize off it.
+    func htmlSnapshotOffMain() async -> String {
+        let copy = snapshot()
+        let h1 = RichTextStyle.h1FontSize
+        let h2 = RichTextStyle.h2FontSize
+        return await Task.detached(priority: .utility) {
+            RichTextHTML.html(from: copy, h1Size: h1, h2Size: h2)
+        }.value
+    }
+
+    /// Drop a source quotation at the caret: italic indented paragraph plus
+    /// a citation (page or URL). The student never leaves the lock to retype.
+    func insertQuote(_ text: String, citation: String) {
+        let quote = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
+        guard !quote.isEmpty, let tv = textView, let storage = tv.textStorage else { return }
+        let para = NSMutableParagraphStyle()
+        para.lineHeightMultiple = RichTextStyle.defaultLineHeightMultiple
+        para.firstLineHeadIndent = 28
+        para.headIndent = 28
+        let italic = NSFontManager.shared.convert(RichTextStyle.bodyFont, toHaveTrait: .italicFontMask)
+        var block = "“\(quote)”"
+        let trimmedCite = citation.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedCite.isEmpty { block += " (\(trimmedCite))" }
+        if tv.selectedRange.location > 0 { block = "\n" + block }
+        block += "\n"
+        let attr = NSAttributedString(string: block, attributes: [
+            .font: italic,
+            .foregroundColor: RichTextStyle.inkColor,
+            .paragraphStyle: para,
+        ])
+        let range = tv.selectedRange
+        guard tv.shouldChangeText(in: range, replacementString: attr.string) else { return }
+        storage.replaceCharacters(in: range, with: attr)
+        tv.setSelectedRange(NSRange(location: range.location + attr.length, length: 0))
+        tv.typingAttributes = RichTextStyle.body.attributes()
+        tv.didChangeText()
+        recountWords()
+    }
+
+    /// Debounced word count so a mid-word keystroke does not walk the whole
+    /// document on the typing path. Toolbar actions still call `recountWords`
+    /// immediately.
+    func scheduleRecount() {
+        recountTask?.cancel()
+        recountTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            self?.recountWords()
+        }
     }
 
     /// Recompute the published word count from the live document. Matches the
@@ -748,6 +801,8 @@ struct RichTextEditor: NSViewRepresentable {
         textView.importsGraphics = false
         textView.font = RichTextStyle.bodyFont
         textView.textColor = RichTextStyle.inkColor
+        textView.setAccessibilityLabel("Essay")
+        textView.setAccessibilityRole(.textArea)
 
         // White opaque page (NOT glass) — the clean writing surface.
         textView.drawsBackground = true
@@ -815,7 +870,7 @@ struct RichTextEditor: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
-            controller.recountWords()
+            controller.scheduleRecount()
             onEdit?()
         }
     }
@@ -882,6 +937,7 @@ struct RichTextToolbar: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Font")
+            .accessibilityLabel("Font")
             .linkPointer()
 
             // Font size menu: textformat.size icon.
@@ -897,6 +953,7 @@ struct RichTextToolbar: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Size")
+            .accessibilityLabel("Size")
             .linkPointer()
 
             // Color menu: text colors + highlight colors in two sections.
@@ -919,6 +976,7 @@ struct RichTextToolbar: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Color")
+            .accessibilityLabel("Color")
             .linkPointer()
 
             // Line spacing menu.
@@ -934,6 +992,7 @@ struct RichTextToolbar: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .help("Line Spacing")
+            .accessibilityLabel("Line spacing")
             .linkPointer()
         }
         .padding(.horizontal, Theme.Space.md)
@@ -961,6 +1020,7 @@ struct RichTextToolbar: View {
         .buttonStyle(.plain)
         .contentShape(Rectangle())
         .help(label)
+        .accessibilityLabel(label)
         .linkPointer()
     }
 
@@ -978,6 +1038,7 @@ struct RichTextToolbar: View {
         .buttonStyle(.plain)
         .contentShape(Rectangle())
         .help(label)
+        .accessibilityLabel(label)
         .linkPointer()
     }
 }
