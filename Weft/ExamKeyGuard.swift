@@ -15,7 +15,7 @@
 //  (CapsLock is intentionally NOT handled: macOS toggles it below the session
 //  tap, so a tap can't suppress it — and it isn't a cheating vector anyway.)
 //
-//  Safe by construction — three guarantees that matter for a live exam app:
+//  Safe by construction — four guarantees that matter for a live exam app:
 //    1. NEVER EATS TYPING. Every rule in shouldSuppress(keyCode:flags:) requires
 //       a modifier (or is a bare F13-F19 key never used for writing), so plain
 //       space, arrows, digits, and punctuation always pass through. A bug cannot
@@ -25,6 +25,8 @@
 //       raw-key suppression. No grant → no behavior change.
 //    3. EXAM-SCOPED + SELF-HEALING. start() on kiosk enter, stop() on exit; the
 //       tap re-enables itself if the system disables it under load (timeout).
+//    4. VOICEOVER PASSES. Control+Option (the VoiceOver modifier) is never
+//       swallowed, so VO-Space and VO-arrows still work in a locked exam.
 //
 //  Requires the Accessibility TCC grant (System Settings → Privacy & Security →
 //  Accessibility) to actually intercept — see ROADMAP.md / XCODE_SETUP.md §6.
@@ -45,6 +47,11 @@ final class ExamKeyGuard {
         let cmd = flags.contains(.maskCommand)
         let opt = flags.contains(.maskAlternate)
         let ctrl = flags.contains(.maskControl)
+        // VoiceOver's modifier is Control+Option. Swallowing those chords
+        // (VO-Space to activate, VO-arrows to move) makes the locked exam
+        // unusable with VoiceOver — a Section 508 / WCAG fail. Mission Control
+        // and Spotlight never use both Control and Option together.
+        if ctrl && opt { return false }
         switch keyCode {
         // Spotlight / Raycast / Alfred / ChatGPT (⌥Space) / Siri — Space + any modifier.
         case 49:                              return cmd || opt || ctrl

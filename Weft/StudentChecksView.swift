@@ -15,6 +15,7 @@ struct StudentChecksView: View {
     @State private var report: ProctoringReport?
     @State private var running = true
     @State private var beginBusy = false
+    @State private var keyGuardTrusted = ExamKeyGuard.isTrusted
 
     /// "What it checks" — grounded in runChecks()/monitorTick() and the in-exam
     /// loops. Honest, plain-language copy ported from renderTrustLabel().
@@ -43,6 +44,7 @@ struct StudentChecksView: View {
                 VStack(alignment: .leading, spacing: Theme.Space.lg) {
                     header
                     statusCard
+                    keyGuardCard
                     nutritionLabel
                     enterButton
                 }
@@ -54,6 +56,8 @@ struct StudentChecksView: View {
         .background(AmbientBackground())
         .task {
             running = true
+            if !ExamKeyGuard.isTrusted { ExamKeyGuard.requestTrust() }
+            keyGuardTrusted = ExamKeyGuard.isTrusted
             report = await ProctoringEngine().runChecks(teacherIP: nil)
             running = false
         }
@@ -88,6 +92,40 @@ struct StudentChecksView: View {
                 Spacer(minLength: 0)
             }
             .animation(.easeOut(duration: 0.25), value: running)
+        }
+    }
+
+    /// Spotlight / Mission Control stay live unless Accessibility is granted.
+    /// Prompt here, before the lock, so ExamKeyGuard is armed when they Begin.
+    private var keyGuardCard: some View {
+        GlassCard {
+            HStack(alignment: .top, spacing: Theme.Space.md) {
+                Image(systemName: keyGuardTrusted ? "checkmark.seal.fill" : "keyboard")
+                    .font(.system(size: 18))
+                    .foregroundStyle(keyGuardTrusted ? Theme.good : Theme.warn)
+                    .symbolRenderingMode(.hierarchical)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(keyGuardTrusted
+                         ? "Launcher shortcuts will be blocked"
+                         : "Allow Accessibility to lock launchers")
+                        .font(Theme.sans(14, .semibold))
+                        .foregroundStyle(Theme.inkSoft)
+                    Text(keyGuardTrusted
+                         ? "Spotlight, Raycast, and Mission Control cannot open during the exam."
+                         : "Without this, ⌘Space still opens Spotlight. Weft never reads what you type.")
+                        .font(Theme.sans(12.5))
+                        .foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                if !keyGuardTrusted {
+                    Button("Allow") {
+                        ExamKeyGuard.requestTrust()
+                        keyGuardTrusted = ExamKeyGuard.isTrusted
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
         }
     }
 
@@ -222,7 +260,7 @@ struct StudentChecksView: View {
     /// has resolved. Preview/dev (not signed in) never has a session but must
     /// still be able to enter, so the session gate is skipped there.
     private var beginDisabled: Bool {
-        running || beginBusy || sessionPending
+        running || beginBusy || sessionPending || (app.signedIn && app.activeExamSession == nil)
     }
 
     private var enterButton: some View {
@@ -269,6 +307,12 @@ struct StudentChecksView: View {
                         .foregroundStyle(Theme.inkSoft)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
+                    if app.signedIn, app.activeExamSession == nil {
+                        Button("Try again") {
+                            Task { await app.retryResolveActiveExam() }
+                        }
+                        .buttonStyle(.bordered)
+                    }
                 }
                 .padding(Theme.Space.md)
                 .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))

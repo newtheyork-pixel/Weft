@@ -47,7 +47,10 @@ struct ExamView: View {
     @State private var refStore = ReferenceTabStore()
     @State private var referencesVisible = true
     @State private var expiryTask: Task<Void, Never>?
+    @State private var countdownAnchor = Date()
+    @State private var draftReady = false
     @State private var didSeedPreview = false
+    @State private var lastSavedHTML: String?
 
     /// Filler text shown ONLY in the preview/gallery (lockdown == false) so the
     /// screen reads as a real writing session for QA. A real exam starts blank.
@@ -100,8 +103,16 @@ struct ExamView: View {
                     links: app.examLinks,
                     signedIn: app.signedIn,
                     materialsLoading: app.examMaterialsLoading,
+                    materialsFailed: app.examMaterialsFailed,
                     store: refStore,
-                    onHide: { toggleReferences() }
+                    onHide: { toggleReferences() },
+                    onRetryMaterials: { Task { await app.retryExamMaterials() } },
+                    onInsertQuote: { text, cite in
+                        controller.insertQuote(text, citation: cite)
+                        refStore.post(notice: "Quoted into your essay.")
+                        scheduleSave()
+                        app.markWriting()
+                    }
                 )
                 // Equatable: a save-state or word-count change invalidates this
                 // body on every keystroke, and the panel must not be rebuilt
@@ -125,17 +136,22 @@ struct ExamView: View {
             startExam(in: window)
         }
         .task {
-            // Real exams take the server-anchored deadline beginExam seeded.
-            // A client Date()+limit here is what handed a crash-reentry a
-            // fresh window, and what invented a 45-minute bell on untimed
-            // assignments (the editor's blank = unlimited). Preview keeps a
-            // display-only countdown so the gallery still looks like an exam.
             if lockdown {
                 deadline = app.examDeadline
+                countdownAnchor = Date()
+                if let html = app.examDraftHTML, !html.isEmpty {
+                    controller.setContent(RichTextHTML.attributed(fromHTML: html))
+                    lastSavedHTML = html
+                } else {
+                    lastSavedHTML = ""
+                }
+                app.examDraftHTML = nil
+                draftReady = true
             } else if deadline == nil {
                 deadline = Date().addingTimeInterval(45 * 60)
+                countdownAnchor = Date()
+                draftReady = true
             }
-            // Seed filler text in preview only; a real exam starts blank.
             if !lockdown && !didSeedPreview {
                 didSeedPreview = true
                 controller.setContent(NSAttributedString(
@@ -167,8 +183,9 @@ struct ExamView: View {
     private func startExam(in window: NSWindow) {
         examWindow = window
         kioskEntered = true
-        kiosk.onBlackout = { [runtime] in
+        kiosk.onBlackout = { [runtime, app] in
             if runtime.block == nil { runtime.block = .focusLost }
+            app.noteExamFocusLoss()
         }
         kiosk.enterKiosk(window: window)
         monitorTask?.cancel()
@@ -193,6 +210,7 @@ struct ExamView: View {
 
     private func resumeFromFocusLoss() {
         runtime.block = nil
+        app.resumeExamFocus()
         examWindow?.makeKeyAndOrderFront(nil)
     }
 
@@ -223,6 +241,7 @@ struct ExamView: View {
             } else if isSharing(runtime.block) {
                 runtime.block = nil
             }
+            app.reportProctoring(report)
             if !expired, !submitting {
                 do {
                     if try await app.examSessionStillOpen() == false {
@@ -278,7 +297,9 @@ struct ExamView: View {
         guard !submitting else { return }
         submitting = true
         Task {
-            guard await app.submitExam(html: controller.htmlSnapshot(),
+            controller.recountWords()
+            let html = await controller.htmlSnapshotOffMain()
+            guard await app.submitExam(html: html,
                                        wordCount: controller.wordCount) else {
                 submitting = false
                 runtime.saveState = .failed
@@ -353,6 +374,10 @@ struct ExamView: View {
             RichTextEditor(controller: controller, isEditable: !expired,
                            spellcheckEnabled: assignment.spellcheckEnabled,
                            onEdit: { scheduleSave(); app.markWriting() })
+                .accessibilityLabel("Essay")
+                .accessibilityHint(expired
+                    ? "Time is up. The essay can no longer be edited."
+                    : "Write your response to the prompt.")
                 .background(Color.white)
                 .padding(.horizontal, Theme.Space.xl)
             footerBar
@@ -369,6 +394,7 @@ struct ExamView: View {
                     .font(Theme.serif(20, .semibold))
                     .foregroundStyle(Theme.inkSoft)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
             }
             Spacer()
             countdown
@@ -380,7 +406,7 @@ struct ExamView: View {
 
     @ViewBuilder private var countdown: some View {
         if let deadline {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
+            TimelineView(.periodic(from: countdownAnchor, by: 1)) { context in
                 let remaining = max(0, Int(deadline.timeIntervalSince(context.date)))
                 Label {
                     Text(String(format: "%d:%02d", remaining / 60, remaining % 60))
@@ -393,6 +419,10 @@ struct ExamView: View {
                 .padding(.horizontal, 12).padding(.vertical, 6)
                 .background((remaining < 300 ? Theme.warn : Theme.accent).opacity(0.10), in: Capsule())
                 .help("Time remaining")
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Time remaining")
+                .accessibilityValue("\(remaining / 60) minutes, \(remaining % 60) seconds")
+                .accessibilityAddTraits(.updatesFrequently)
             }
         }
     }
@@ -410,6 +440,7 @@ struct ExamView: View {
             .buttonStyle(.borderless)
             .keyboardShortcut("r", modifiers: [.command, .shift])
             .help(referencesVisible ? "Hide references, write only (⌘⇧R)" : "Show references (⌘⇧R)")
+            .accessibilityLabel(referencesVisible ? "Hide references" : "Show references")
             .linkPointer()
         }
         .padding(.horizontal, Theme.Space.xl)
@@ -430,6 +461,13 @@ struct ExamView: View {
         .font(.system(size: 12, weight: .medium, design: .rounded))
         .monospacedDigit()
         .help("Word count")
+        .accessibilityLabel("Word count")
+        .accessibilityValue({
+            if let limit = wordLimit {
+                return "\(wordCount) of \(limit) words"
+            }
+            return "\(wordCount) words"
+        }())
     }
 
     private var footerBar: some View {
@@ -503,7 +541,8 @@ struct ExamView: View {
     /// Debounce (0.8s) then persist. A failed save retries every 4s until a
     /// newer edit reschedules it (Electron parity); the label tells the truth.
     private func scheduleSave() {
-        runtime.saveState = .saving
+        guard draftReady || !lockdown else { return }
+        if runtime.saveState != .saving { runtime.saveState = .saving }
         saveGeneration += 1
         let gen = saveGeneration
         saveDebounce?.cancel()
@@ -515,10 +554,17 @@ struct ExamView: View {
     }
 
     private func persistNow(generation: Int) async {
-        let ok = await app.autosaveEssay(html: controller.htmlSnapshot(),
-                                         wordCount: controller.wordCount)
+        controller.recountWords()
+        let html = await controller.htmlSnapshotOffMain()
+        guard generation == saveGeneration else { return }
+        if html == lastSavedHTML {
+            runtime.saveState = .saved
+            return
+        }
+        let ok = await app.autosaveEssay(html: html, wordCount: controller.wordCount)
         guard generation == saveGeneration else { return }   // a newer edit owns the pipeline
         if ok {
+            lastSavedHTML = html
             runtime.saveState = .saved
         } else {
             runtime.saveState = .failed

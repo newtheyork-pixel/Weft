@@ -148,22 +148,24 @@ ditto -c -k --keepParent "$APP" "$ZIP"   # the stapled app, into $UPDATES only
 # generate_appcast scans $UPDATES (zip only — the DMG is NOT here, so it can't
 # be mistaken for an enclosure), EdDSA-signs each archive with the key in the
 # keychain, and writes appcast.xml with enclosure URLs at the tag's assets.
-# Capture stderr: if the zip's SUPublicEDKey does not match the keychain
-# EdDSA key, Sparkle still writes a signed appcast that installed clients
-# will refuse. Abort rather than publish a feed nobody can install.
+# Do not hide stdout/stderr: generate_appcast may wait on a Keychain prompt.
+# If the zip's SUPublicEDKey does not match the keychain EdDSA key, Sparkle can
+# still write an unsigned appcast that installed clients refuse. Abort.
 APPCAST_LOG="$(mktemp)"
 set +e
 generate_appcast "$UPDATES" \
   --download-url-prefix "https://github.com/$RELEASES_REPO/releases/download/$TAG/" \
-  >"$APPCAST_LOG" 2>&1
-APPCAST_RC=$?
+  2>&1 | tee "$APPCAST_LOG"
+APPCAST_RC=${PIPESTATUS[0]}
 set -e
 if grep -q "does not match key EdDSA" "$APPCAST_LOG"; then
-  cat "$APPCAST_LOG" >&2
   fail "Sparkle EdDSA key mismatch" "SUPublicEDKey in the app does not match the keychain. Update Info.plist (generate_keys -p) and rebuild; do not publish this feed."
 fi
-[ "$APPCAST_RC" -eq 0 ] || { cat "$APPCAST_LOG" >&2; fail "generate_appcast failed"; }
+[ "$APPCAST_RC" -eq 0 ] || fail "generate_appcast failed"
 [ -f "$UPDATES/appcast.xml" ] || fail "generate_appcast wrote no appcast.xml" "Check that the EdDSA private key in the login keychain matches SUPublicEDKey in Info.plist."
+if ! grep -q 'sparkle:edSignature=' "$UPDATES/appcast.xml"; then
+  fail "appcast.xml has no EdDSA signature" "generate_appcast wrote a feed Sparkle will reject. Allow Keychain access for generate_appcast and re-run."
+fi
 HAVE_APPCAST=1
 ok "appcast.xml signed"
 

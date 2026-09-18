@@ -132,8 +132,10 @@ struct WeftTopBar: View {
                 Divider()
                 if app.canChooseView {
                     Button("Switch view") { app.switchView() }
+                        .disabled(ExamGate.inProgress)
                 }
                 Button("Sign out") { app.signOut() }
+                    .disabled(ExamGate.inProgress)
             } else {
                 Text("Previewing without signing in")
                 Divider()

@@ -127,9 +127,10 @@ final class ProctoringEngine {
     /// - Parameter teacherIP: the teacher's public IP to compare against, or
     ///   nil to skip the network-equality check (treated as a pass).
     func runChecks(teacherIP: String?) async -> ProctoringReport {
-        // Kick off the (slow, network) public-IP fetch concurrently with the
-        // local probes so the sweep is bounded by the network call, not serial.
-        async let publicIPTask = fetchPublicIP()
+        // Native never compares IPs (launch stores teacherIP: nil). Don't
+        // wait up to 8s on api.ipify.org for a value nobody reads.
+        let needIP = teacherIP.map { !$0.isEmpty } ?? false
+        async let publicIPTask: String? = needIP ? fetchPublicIP() : nil
 
         let displays = detectDisplayCount()
         let screenPermission = detectScreenRecordingPermission()
@@ -257,18 +258,18 @@ final class ProctoringEngine {
         AppPattern(name: "AirDroid", needles: ["airdroid"], remote: true),
 
         // ── Conferencing apps that can screen-share ────────────────────────
-        AppPattern(name: "Zoom", needles: ["us.zoom", "zoom.us", "zoom"], remote: false),
+        AppPattern(name: "Zoom", needles: ["us.zoom", "zoom.us"], remote: false),
         AppPattern(name: "Microsoft Teams", needles: ["com.microsoft.teams", "msteams", "ms-teams", "microsoft teams"], remote: false),
         AppPattern(name: "Cisco Webex", needles: ["webex", "webexmta"], remote: false),
         AppPattern(name: "Discord", needles: ["discord"], remote: false),
-        AppPattern(name: "Slack", needles: ["com.tinyspeck.slackmacgap", "slack"], remote: false),
+        AppPattern(name: "Slack", needles: ["com.tinyspeck.slackmacgap"], remote: false),
         AppPattern(name: "Skype", needles: ["skype"], remote: false),
         AppPattern(name: "BlueJeans", needles: ["bluejeans"], remote: false),
         AppPattern(name: "GoToMeeting", needles: ["gotomeeting", "g2mlauncher"], remote: false),
         AppPattern(name: "Jitsi", needles: ["jitsi"], remote: false),
 
         // ── Screen recording / streaming ───────────────────────────────────
-        AppPattern(name: "OBS Studio", needles: ["com.obsproject.obs-studio", "obs studio", "obs"], remote: false),
+        AppPattern(name: "OBS Studio", needles: ["com.obsproject.obs-studio", "obs studio"], remote: false),
         AppPattern(name: "Streamlabs Desktop", needles: ["streamlabs"], remote: false),
         AppPattern(name: "XSplit", needles: ["xsplit"], remote: false),
         AppPattern(name: "Camtasia", needles: ["camtasia"], remote: false),
@@ -296,18 +297,15 @@ final class ProctoringEngine {
         var seen = Set<String>()
 
         for runningApp in NSWorkspace.shared.runningApplications {
-            // Build a single lowercased haystack from bundle id + localized name
-            // + executable URL path so a needle hits whichever identifier exists.
-            var hayParts: [String] = []
-            if let bid = runningApp.bundleIdentifier { hayParts.append(bid) }
-            if let n = runningApp.localizedName { hayParts.append(n) }
-            if let url = runningApp.executableURL { hayParts.append(url.path) }
-            if let url = runningApp.bundleURL { hayParts.append(url.lastPathComponent) }
-            let hay = hayParts.joined(separator: " ").lowercased()
-            if hay.isEmpty { continue }
+            // Bundle id + localized name only. Executable paths turn short
+            // needles ("obs") into false hits (Obsidian, any path containing
+            // "zoom"). Match bundle ids as prefixes; short needles as tokens.
+            let bid = runningApp.bundleIdentifier?.lowercased() ?? ""
+            let nm = runningApp.localizedName?.lowercased() ?? ""
+            if bid.isEmpty && nm.isEmpty { continue }
 
             for pattern in appPatterns {
-                guard pattern.needles.contains(where: { hay.contains($0) }) else { continue }
+                guard pattern.needles.contains(where: { Self.needle($0, hitsBundle: bid, name: nm) }) else { continue }
                 if seen.insert(pattern.name).inserted {
                     matched.append(pattern.name)
                     if pattern.remote { matchedRemote.append(pattern.name) }
@@ -329,6 +327,20 @@ final class ProctoringEngine {
         #else
         return AppScanResult(active: false, remoteActive: false, remoteReason: nil, detectedApps: [])
         #endif
+    }
+
+    /// Bundle-id prefix or a name token. Needles shorter than 5 characters only
+    /// match a whole token so "obs" cannot fire on Obsidian.
+    private static func needle(_ needle: String, hitsBundle bid: String, name: String) -> Bool {
+        if !bid.isEmpty {
+            if bid == needle || bid.hasPrefix(needle + ".") || bid.hasPrefix(needle) { return true }
+        }
+        if needle.count >= 5 {
+            return bid.contains(needle) || name.contains(needle)
+        }
+        guard !name.isEmpty else { return false }
+        return name.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .contains { $0 == needle[...] }
     }
 
     // MARK: VM detection — sysctl + IOPlatformExpertDevice

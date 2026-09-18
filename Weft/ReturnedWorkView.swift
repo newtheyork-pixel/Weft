@@ -494,7 +494,8 @@ extension ReturnedWorkView {
     /// Cheap HTML → paragraphs: turn block-level closers into line breaks, strip
     /// the remaining tags, decode the few common entities, and split into blocks.
     /// Internal so SubmittedWorkView can reuse the same parser without duplication.
-    nonisolated static func paragraphs(fromHTML html: String) -> [EssayParagraph] {
+    nonisolated static func paragraphs(fromHTML html: String,
+                                       comments: [ReturnedComment] = []) -> [EssayParagraph] {
         var s = html
         for tag in ["</p>", "<br>", "<br/>", "<br />", "</div>", "</h1>", "</h2>", "</h3>", "</li>"] {
             s = s.replacingOccurrences(of: tag, with: "\n", options: .caseInsensitive)
@@ -506,9 +507,41 @@ extension ReturnedWorkView {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         let paras = blocks.isEmpty ? [decoded.trimmingCharacters(in: .whitespacesAndNewlines)] : blocks
+        let anchors = comments.filter { !($0.quote ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         return paras
             .filter { !$0.isEmpty }
-            .map { EssayParagraph(runs: [EssayRun(text: $0, commentId: nil)]) }
+            .map { splitRuns($0, comments: anchors) }
+    }
+
+    /// Paint each margin quote as an accent run in the paragraph that contains it.
+    nonisolated static func splitRuns(_ text: String, comments: [ReturnedComment]) -> EssayParagraph {
+        var remaining = text
+        var runs: [EssayRun] = []
+        var used = Set<String>()
+        while !remaining.isEmpty {
+            var best: (range: Range<String.Index>, id: String)?
+            for c in comments where !used.contains(c.id) {
+                let quote = (c.quote ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !quote.isEmpty, let r = remaining.range(of: quote, options: .caseInsensitive)
+                else { continue }
+                if best == nil || r.lowerBound < best!.range.lowerBound {
+                    best = (r, c.id)
+                }
+            }
+            guard let hit = best else {
+                runs.append(EssayRun(text: remaining, commentId: nil))
+                break
+            }
+            if hit.range.lowerBound > remaining.startIndex {
+                runs.append(EssayRun(text: String(remaining[remaining.startIndex..<hit.range.lowerBound]),
+                                     commentId: nil))
+            }
+            runs.append(EssayRun(text: String(remaining[hit.range]), commentId: hit.id))
+            used.insert(hit.id)
+            remaining = String(remaining[hit.range.upperBound...])
+        }
+        if runs.isEmpty { runs = [EssayRun(text: text, commentId: nil)] }
+        return EssayParagraph(runs: runs)
     }
 
     nonisolated static func decodeEntities(_ s: String) -> String {
@@ -534,10 +567,12 @@ private extension ReturnedWorkView {
             releasedAt: item.releasedAt,
             points: item.points,
             pointsPossible: item.pointsPossible,
-            paragraphs: paragraphs(fromHTML: item.contentHtml),
+            paragraphs: paragraphs(fromHTML: item.contentHtml, comments: item.comments),
             feedback: item.feedback,
             comments: item.comments.map { c in
-                InlineComment(id: c.id, quote: c.quote ?? "", body: c.body)
+                let quote = c.quote ?? ""
+                return InlineComment(id: c.id, quote: quote, body: c.body,
+                                     orphaned: quote.isEmpty)
             }
         )
     }

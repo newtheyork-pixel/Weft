@@ -110,7 +110,6 @@ enum ReferenceDocumentLoader {
     ///
     /// On cancellation the download throws and this returns `.failed`; the
     /// caller checks `Task.isCancelled` and discards the result.
-    @MainActor
     static func load(file: ExamFile, from url: URL) async -> ReferenceDocument {
         guard file.renderable != .unsupported else { return .unsupported }
 
@@ -127,12 +126,15 @@ enum ReferenceDocumentLoader {
             return .failed
         }
 
+        return await Task.detached(priority: .userInitiated) {
+            decode(data: data, file: file)
+        }.value
+    }
+
+    nonisolated private static func decode(data: Data, file: ExamFile) -> ReferenceDocument {
         switch file.renderable {
         case .pdf:
             if let doc = PDFDocument(data: data) { return .pdf(doc) }
-            // Bytes that aren't a PDF at all were mislabelled by whoever
-            // uploaded them: a retry downloads the same thing. A truncated
-            // download of a real PDF is worth retrying.
             return data.starts(with: Array("%PDF".utf8)) ? .failed : .unsupported
         case .image:
             return imageDocument(from: data)
@@ -148,8 +150,7 @@ enum ReferenceDocumentLoader {
     /// exam panel must too. The decoded image is wrapped in a one-page PDF and
     /// handed to the same PDFKit surface as every other reference, which is what
     /// gives it fit-to-width, zoom and scrolling for free.
-    @MainActor
-    private static func imageDocument(from data: Data) -> ReferenceDocument {
+    nonisolated private static func imageDocument(from data: Data) -> ReferenceDocument {
         guard let image = NSImage(data: data),
               image.size.width > 0, image.size.height > 0,
               let page = PDFPage(image: image)
@@ -165,8 +166,7 @@ enum ReferenceDocumentLoader {
         return .pdf(doc)
     }
 
-    @MainActor
-    private static func textDocument(from data: Data, file: ExamFile) -> ReferenceDocument {
+    nonisolated private static func textDocument(from data: Data, file: ExamFile) -> ReferenceDocument {
         if file.renderable == .plainText {
             guard let text = String(data: data, encoding: .utf8)
                     ?? String(data: data, encoding: .isoLatin1)
@@ -201,7 +201,7 @@ enum ReferenceDocumentLoader {
         }
     }
 
-    private static func styled(_ text: String) -> NSAttributedString {
+    nonisolated private static func styled(_ text: String) -> NSAttributedString {
         let para = NSMutableParagraphStyle()
         para.lineSpacing = 3
         return NSAttributedString(string: text, attributes: [

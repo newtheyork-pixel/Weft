@@ -18,8 +18,12 @@ struct ExamReferencePanel: View {
     /// True while the teacher's real materials are still being fetched. Until
     /// that answer is back the panel must not claim there are none.
     let materialsLoading: Bool
+    /// True when the materials fetch failed. Distinct from "teacher attached none".
+    var materialsFailed: Bool = false
     let store: ReferenceTabStore
     var onHide: () -> Void
+    var onRetryMaterials: (() -> Void)? = nil
+    var onInsertQuote: ((String, String) -> Void)? = nil
 
     private let dividerThickness: CGFloat = 7
 
@@ -56,6 +60,18 @@ struct ExamReferencePanel: View {
     @ViewBuilder private var content: some View {
         if !store.materials.isEmpty {
             materialCanvas
+        } else if materialsFailed {
+            VStack(spacing: Theme.Space.md) {
+                messageCard(icon: "wifi.exclamationmark",
+                            title: "Couldn't load your reference materials.",
+                            detail: "Check the network and try again.")
+                if let onRetryMaterials {
+                    Button("Try again", action: onRetryMaterials)
+                        .buttonStyle(.bordered)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(white: 0.95))
         } else if materialsLoading || !files.isEmpty || !links.isEmpty {
             // The fetch is still out, or the store has materials to configure
             // and has simply not run its .task yet (which happens after the
@@ -87,6 +103,25 @@ struct ExamReferencePanel: View {
                 }
             }
             Spacer(minLength: 0)
+            if onInsertQuote != nil {
+                Button {
+                    Task {
+                        guard let quote = await store.captureQuote() else {
+                            store.post(notice: "Select text in the passage first.")
+                            return
+                        }
+                        onInsertQuote?(quote.text, quote.citation)
+                    }
+                } label: {
+                    Label("Quote", systemImage: "text.quote")
+                        .font(Theme.sans(12, .semibold))
+                }
+                .buttonStyle(.borderless)
+                .help("Insert the selected passage into your essay")
+                .accessibilityLabel("Quote from passage")
+                .accessibilityHint("Inserts the selected text from the reference into your essay")
+                .linkPointer()
+            }
             if store.materials.count > 1 {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) { store.toggleSplit() }
@@ -96,6 +131,7 @@ struct ExamReferencePanel: View {
                 .buttonStyle(.borderless)
                 .help(store.splitActive ? "Back to one pane"
                                         : "Split: pin this on top, browse another below")
+                .accessibilityLabel(store.splitActive ? "Back to one pane" : "Split reference panes")
                 .linkPointer()
             }
             Button(action: onHide) {
@@ -103,6 +139,7 @@ struct ExamReferencePanel: View {
             }
             .buttonStyle(.borderless)
             .help("Hide references, write only (⌘⇧R)")
+            .accessibilityLabel("Hide references")
             .linkPointer()
         }
         .padding(.horizontal, Theme.Space.md)
@@ -395,13 +432,15 @@ struct ExamReferencePanel: View {
 // re-created this whole subtree: the tab strip, the canvas geometry and an
 // updateNSView on every mounted document and web view. The panel depends only
 // on its materials and its store, so comparing those lets SwiftUI skip the
-// rebuild entirely (see the .equatable() at the call site). onHide is excluded
-// deliberately: it only toggles the caller's @State, whose storage is stable.
+// rebuild entirely (see the .equatable() at the call site). onHide and
+// onInsertQuote are excluded deliberately: they only close over the caller's
+// @State / controller, whose storage is stable.
 extension ExamReferencePanel: Equatable {
     static func == (a: ExamReferencePanel, b: ExamReferencePanel) -> Bool {
         a.store === b.store
             && a.signedIn == b.signedIn
             && a.materialsLoading == b.materialsLoading
+            && a.materialsFailed == b.materialsFailed
             && a.files == b.files
             && a.links == b.links
     }

@@ -40,9 +40,11 @@ private struct GeneralSettings: View {
                     }
                     if app.canChooseView {
                         Button("Switch view") { app.switchView() }
+                            .disabled(ExamGate.inProgress)
                             .linkPointer()
                     }
                     Button("Sign Out", role: .destructive) { app.signOut() }
+                        .disabled(ExamGate.inProgress)
                         .linkPointer()
                 }
             } else if app.role != nil {

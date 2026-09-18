@@ -70,8 +70,8 @@ final class AppState {
     /// Reentrancy guard: a double-clicked New draft would mint two clones with
     /// the same version number, one of them unreachable in the grouped UI.
     private var draftCloneInFlight = false
-    /// Reentrancy guard: launchSession suspends twice (public IP, server
-    /// insert) before liveSession is assigned, so a double-clicked Start
+    /// Reentrancy guard: launchSession suspends on the server insert
+    /// before liveSession is assigned, so a double-clicked Start
     /// could pass the `liveSession == nil` guard twice and mint two open
     /// server sessions — breaking the one-live-session invariant.
     private var launchInFlight = false
@@ -86,6 +86,9 @@ final class AppState {
     /// whose generation is stale returns instead of polling, so a restart can
     /// never leave two sweeps hitting the server every five seconds.
     private var rosterPollGeneration = 0
+    /// Student-home sweep so a live exam appears on enrolled Macs without a code.
+    private var homePollTask: Task<Void, Never>?
+    private var homePollGeneration = 0
     /// True once this attempt's `students` row has been moved to "writing", so
     /// the transition costs ONE update per exam and not one per keystroke.
     private var markedWriting = false
@@ -96,6 +99,10 @@ final class AppState {
     var assignments: [Assignment] = [.sample, .sample2]
     var teacherClasses: [ClassRoom] = [.sample, .sample2]
     var roster: [RosterStudent] = RosterStudent.sample
+    /// Live-exam writing pulse, keyed by students-row id. Never the essay.
+    var essayPulse: [String: EssayPulse] = EssayPulse.sample
+    /// An open exam the signed-in student can enter without typing a code.
+    var liveExamOffer: LiveExamOffer? = .sample
     var returnedWork: [ReturnedWorkItem] = []
 
     /// The Past-row essay being viewed read-only (nil = loading / none yet).
@@ -142,6 +149,20 @@ final class AppState {
     /// true: "your teacher didn't attach any materials" is a positive claim the
     /// app cannot make until the fetch has actually come back.
     var examMaterialsLoading = false
+    /// True when the last materials fetch threw. The panel must offer Retry,
+    /// not claim the teacher attached nothing.
+    var examMaterialsFailed = false
+    /// HTML of an in-progress draft to restore into ExamView. Consumed once.
+    var examDraftHTML: String?
+    /// Session code used to resolve the active exam (retry after a failed lookup).
+    var examResolveCode: String?
+    /// Last flags written to the students row, so the 5s monitor does not PATCH
+    /// identical values.
+    private var lastProctorFlags: (screen: Bool, remote: Bool, displays: Int, vm: Bool)?
+
+    /// Per-class work cache so the classes-list badges do not refetch every
+    /// assignment list just to count Active rows.
+    private var classWorkByClass: [String: [ClassWorkItem]] = [:]
 
     /// Materials shown in the exam reference panel: the student's own outline
     /// first (whenever the assignment allowed one: the panel renders PDFs,
@@ -185,6 +206,9 @@ final class AppState {
     /// dropMockData clears it the moment a real session begins.
     var liveSession: ExamSession? = ExamSession.sampleOpen
     var pickedAssignmentId: String?
+    /// Teacher: schedule the exam for a future bell instead of opening now.
+    var scheduleLaunch = false
+    var scheduledLaunchAt = Date().addingTimeInterval(3600)
 
     /// One row per assignment family: the LATEST draft of each version group.
     /// The Build list and the launch picker both present these.
@@ -213,6 +237,10 @@ final class AppState {
     /// Every outline uploaded for the session being graded (keyed by user_id;
     /// gradingRoster bridges that to a submission's students-row id).
     var gradingOutlines: [OutlineUpload] = []
+    /// Margin comments for the session being graded, keyed by submission id.
+    var gradingComments: [String: [EssayComment]] = [:]
+    /// Published device keys to wrap this exam's essay to (teacher + self).
+    var examRecipientKeys: [DevicePublicKey] = []
     /// Transient status for the roster "Invite students" action.
     var inviteStatus: String?
     // School-approved websites (from the published Google Sheet), for the editor.
@@ -240,30 +268,56 @@ final class AppState {
     /// on the sign-in route; once signed in it shows only the two views.
     func switchView() {
         guard canChooseView else { return }
+        guard !ExamGate.inProgress else {
+            errorMessage = "Finish the exam before switching views."
+            return
+        }
         errorMessage = nil
         route = .signIn
     }
 
     func enterTeacher() {
+        guard !ExamGate.inProgress else {
+            errorMessage = "Finish the exam before leaving it."
+            return
+        }
         role = .teacher
         if displayName.isEmpty { displayName = "Thomas Seirer" }
         teacherScreen = .home
         route = .teacher
-        if signedIn { resolvePendingDeepLink(); Task { await loadTeacherHome() } }
+        stopStudentHomePolling()
+        if signedIn { resolvePendingDeepLink(); Task { await loadTeacherHome(); await publishDeviceKey() } }
     }
 
     func enterStudent() {
+        guard !ExamGate.inProgress else {
+            errorMessage = "Finish the exam before leaving it."
+            return
+        }
         stopRosterPolling()   // the teacher monitor is off screen
         role = .student
         if displayName.isEmpty { displayName = "Ava Chen" }
         studentScreen = .home
         route = .student
-        if signedIn { resolvePendingDeepLink(); Task { await loadStudentHome() } }
+        startStudentHomePolling()
+        if signedIn {
+            resolvePendingDeepLink()
+            Task {
+                await publishDeviceKey()
+                await loadStudentHome()
+            }
+        }
     }
 
     func signOut() {
+        if ExamGate.inProgress {
+            errorMessage = "Submit or finish the exam before signing out."
+            return
+        }
+        ExamGate.inProgress = false
         supabase.signOut()
         stopRosterPolling()
+        stopStudentHomePolling()
         markedWriting = false
         role = nil
         accountRole = nil
@@ -295,6 +349,11 @@ final class AppState {
         examFiles = ExamFile.sample
         examLinks = ExamLink.sample
         examMaterialsLoading = false
+        examMaterialsFailed = false
+        examDraftHTML = nil
+        examResolveCode = nil
+        lastProctorFlags = nil
+        classWorkByClass = [:]
         // Teacher state back to defaults.
         teacherScreen = .home
         editingAssignment = nil
@@ -309,9 +368,13 @@ final class AppState {
         gradingTitle = ""
         classRoster = []; rosterClassId = nil; rosterClassName = ""
         gradingSubmissions = []; grades = [:]
+        gradingComments = [:]
+        examRecipientKeys = []
         teacherClasses = [.sample, .sample2]
         assignments = [.sample, .sample2]
         roster = RosterStudent.sample
+        essayPulse = EssayPulse.sample
+        liveExamOffer = .sample
         route = .signIn
     }
 
@@ -331,9 +394,18 @@ final class AppState {
         // leak their hosts into the locked browser's approved-host whitelist).
         examFiles = []
         examLinks = []
+        examMaterialsFailed = false
+        examDraftHTML = nil
+        examResolveCode = nil
+        lastProctorFlags = nil
+        classWorkByClass = [:]
         selectedClassId = nil
         activeAssignment = nil
         roster = []
+        essayPulse = [:]
+        liveExamOffer = nil
+        examRecipientKeys = []
+        gradingComments = [:]
         teacherClasses = []
         assignments = []
         pickedAssignmentId = nil
@@ -378,9 +450,11 @@ final class AppState {
                 // the sign-in route, which now shows only the chooser; any
                 // pending deep link replays when they pick a view.
                 route = .signIn
+                await publishDeviceKey()
             case .student:
                 studentScreen = .home
                 route = .student
+                await publishDeviceKey()
                 await loadStudentHome()
                 // Replay any deep link that arrived on the sign-in screen.
                 resolvePendingDeepLink()
@@ -440,6 +514,8 @@ final class AppState {
                 classOpenCounts[cid] = classWork.filter { $0.section == .active }.count
             }
             await loadOpenCounts(skipping: selectedClassId)
+            refreshLiveExamOffer()
+            startStudentHomePolling()
         } catch {
             errorMessage = describe(error)
         }
@@ -454,7 +530,9 @@ final class AppState {
             // account's rows over restored mock state / the new class.
             guard signedIn, selectedClassId == cid else { return }
             classWork = work
+            classWorkByClass[cid] = work
             await loadOutlineState()
+            refreshLiveExamOffer()
         } catch {
             errorMessage = describe(error)
         }
@@ -471,34 +549,36 @@ final class AppState {
     /// an error banner over the class home.
     func loadOutlineState() async {
         guard signedIn else { return }
-        for item in classWork {
-            guard item.section == .active, let sid = item.activeSessionId else { continue }
-            // list_class_work doesn't carry outline_allowed, so resolve it via
-            // the active session's test — once per session, then cached (a new
-            // launch is a new session id, so the next draft's flag is re-read;
-            // see outlineAllowedBySession).
-            if outlineAllowedBySession[sid] == nil, let code = item.activeCode {
-                let session = try? await supabase.lookupSession(code: code)
-                if let testId = session?.testId,
-                   let test = try? await supabase.getTest(id: testId) {
-                    // Signed out while suspended: signOut() restored the mock
-                    // state, so never write a real account's flag over it
-                    // (the loadTeacherHome pattern).
-                    guard signedIn else { return }
-                    outlineAllowedBySession[sid] = test.outlineAllowed
+        let items = classWork.filter { $0.section == .active && $0.activeSessionId != nil }
+        var sessionToTest: [String: String] = [:]
+        await withTaskGroup(of: (String, String?).self) { group in
+            for item in items {
+                guard let sid = item.activeSessionId,
+                      outlineAllowedBySession[sid] == nil,
+                      let code = item.activeCode else { continue }
+                group.addTask {
+                    let session = try? await SupabaseManager.shared.lookupSession(code: code)
+                    return (sid, session?.testId)
                 }
             }
-            guard outlineAllowedBySession[sid] == true else { continue }
-            do {
-                // A confirmed "no row" (nil) clears the cache — the student may
-                // have removed the outline on another device.
-                let mine = try await supabase.getMyOutline(sessionId: sid, userId: userId)
-                guard signedIn else { return }
-                myOutlines[sid] = mine
-            } catch {
-                // Failed fetch: keep whatever is cached rather than flickering
-                // a real outline away.
+            for await (sid, tid) in group {
+                if let tid { sessionToTest[sid] = tid }
             }
+        }
+        let testIds = Array(Set(sessionToTest.values))
+        if !testIds.isEmpty,
+           let allowed = try? await supabase.outlineAllowedByTestIds(testIds) {
+            for (sid, tid) in sessionToTest {
+                outlineAllowedBySession[sid] = allowed[tid] ?? false
+            }
+        }
+        let allowedSids = items.compactMap { item -> String? in
+            guard let sid = item.activeSessionId,
+                  outlineAllowedBySession[sid] == true else { return nil }
+            return sid
+        }
+        if let mine = try? await supabase.getMyOutlines(sessionIds: allowedSids, userId: userId) {
+            for row in mine { myOutlines[row.sessionId] = row }
         }
     }
 
@@ -531,8 +611,10 @@ final class AppState {
         // whenever the upload is then refused).
         let previousPath = myOutlines[sid]?.storagePath
         do {
-            let data = try Data(contentsOf: fileURL)
-            guard data.count <= Self.outlineMaxBytes else {
+            let data: Data
+            do {
+                data = try await Self.readPickedFile(fileURL, maxBytes: Self.outlineMaxBytes)
+            } catch is FileTooLarge {
                 errorMessage = "Outlines can be up to 10 MB. Choose a smaller file."
                 return
             }
@@ -656,16 +738,115 @@ final class AppState {
     func loadOpenCounts(skipping skipId: String? = nil) async {
         guard signedIn else { return }
         let classes = enrolledClasses
-        await withTaskGroup(of: (String, Int).self) { group in
+        await withTaskGroup(of: (String, [ClassWorkItem]).self) { group in
             for c in classes where c.id != skipId {
+                if let cached = classWorkByClass[c.id] {
+                    classOpenCounts[c.id] = cached.filter { $0.section == .active }.count
+                    continue
+                }
                 group.addTask {
                     let work: [ClassWorkItem] =
                         (try? await SupabaseManager.shared.listClassWork(classId: c.id)) ?? []
-                    return (c.id, work.filter { $0.section == .active }.count)
+                    return (c.id, work)
                 }
             }
-            for await (id, n) in group { classOpenCounts[id] = n }
+            for await (id, work) in group {
+                classWorkByClass[id] = work
+                classOpenCounts[id] = work.filter { $0.section == .active }.count
+            }
         }
+        refreshLiveExamOffer()
+    }
+
+    /// Pick the open assignment a signed-in Mac can enter without a code.
+    /// Prefers the class the student is looking at.
+    func refreshLiveExamOffer() {
+        guard signedIn else { return }
+        var offers: [LiveExamOffer] = []
+        for c in enrolledClasses {
+            let work = (c.id == selectedClassId) ? classWork : (classWorkByClass[c.id] ?? [])
+            if let item = work.first(where: { $0.section == .active && $0.activeCode != nil }) {
+                offers.append(LiveExamOffer(item: item, classId: c.id, className: c.name))
+            }
+        }
+        if let cid = selectedClassId, let match = offers.first(where: { $0.classId == cid }) {
+            liveExamOffer = match
+        } else {
+            liveExamOffer = offers.first
+        }
+    }
+
+    /// Begin the live exam from the home banner — no code, no class drill-in.
+    func enterLiveExam(_ offer: LiveExamOffer) {
+        if selectedClassId != offer.classId {
+            selectedClassId = offer.classId
+            classWork = classWorkByClass[offer.classId] ?? [offer.item]
+        }
+        startWriting(offer.item)
+    }
+
+    /// Quiet refresh of every class's work so a bell-time launch shows up on
+    /// enrolled Macs sitting on home. Does not flip isLoading (that would
+    /// flash the whole home every eight seconds).
+    func refreshStudentHomeQuiet() async {
+        guard signedIn, route == .student, !studentHomeInFlight else { return }
+        guard studentScreen != .exam, studentScreen != .checks else { return }
+        let classes = enrolledClasses
+        await withTaskGroup(of: (String, [ClassWorkItem]).self) { group in
+            for c in classes {
+                group.addTask {
+                    let work: [ClassWorkItem] =
+                        (try? await SupabaseManager.shared.listClassWork(classId: c.id)) ?? []
+                    return (c.id, work)
+                }
+            }
+            for await (id, work) in group {
+                guard signedIn else { return }
+                classWorkByClass[id] = work
+                classOpenCounts[id] = work.filter { $0.section == .active }.count
+                if selectedClassId == id { classWork = work }
+            }
+        }
+        refreshLiveExamOffer()
+    }
+
+    func startStudentHomePolling() {
+        guard signedIn, route == .student else { return }
+        homePollGeneration += 1
+        let generation = homePollGeneration
+        homePollTask?.cancel()
+        homePollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(8))
+                guard !Task.isCancelled, let self,
+                      generation == self.homePollGeneration,
+                      self.signedIn, self.route == .student,
+                      self.studentScreen != .exam, self.studentScreen != .checks
+                else { return }
+                await self.refreshStudentHomeQuiet()
+            }
+        }
+    }
+
+    func stopStudentHomePolling() {
+        homePollGeneration += 1
+        homePollTask?.cancel()
+        homePollTask = nil
+    }
+
+    /// Publish this Mac's agreement public key. Best-effort: a missing table
+    /// (migration not applied) just means essays stay plaintext.
+    func publishDeviceKey() async {
+        guard signedIn, let pub = WeftContentSeal.publishableKey(userId: userId) else { return }
+        try? await supabase.upsertDeviceKey(userId: userId, kid: pub.kid, publicX963: pub.publicX963)
+    }
+
+    /// Reveal sealed HTML when content_html is empty. Unreadable ciphertext
+    /// stays empty so the caller can show an honest sealed-paper state.
+    private func revealHTML(_ html: String, cipher: WeftEnvelope?) -> String {
+        if !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return html }
+        guard let cipher else { return html }
+        return WeftContentSeal.openHTML(cipher, userId: userId) ?? ""
     }
 
     /// Back from a class detail to the classes list.
@@ -687,10 +868,29 @@ final class AppState {
     }
 
     /// Pull the signed-in student's released (graded) work for ReturnedWorkView.
+    /// Score and comments come from the RPC; the paper is loaded separately
+    /// so the student portal never has to fetch it.
     func loadReturnedWork() async {
         guard signedIn else { return }
         do {
-            returnedWork = try await supabase.getMyReturnedWork()
+            var items = try await supabase.getMyReturnedWork()
+            if let bodies = try? await supabase.listOwnSubmissionBodies(ids: items.map(\.submissionId)) {
+                let byId = Dictionary(uniqueKeysWithValues: bodies.map { ($0.id, $0) })
+                for i in items.indices {
+                    guard let body = byId[items[i].submissionId] else { continue }
+                    if items[i].contentHtml.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        items[i].contentHtml = body.contentHtml
+                    }
+                    if items[i].contentCipher == nil {
+                        items[i].contentCipher = body.contentCipher
+                    }
+                }
+            }
+            returnedWork = items.map { item in
+                var copy = item
+                copy.contentHtml = revealHTML(item.contentHtml, cipher: item.contentCipher)
+                return copy
+            }
         } catch {
             errorMessage = describe(error)
         }
@@ -1010,20 +1210,18 @@ final class AppState {
         errorMessage = nil
         let name = fileURL.lastPathComponent
         // The picker's URL is security-scoped; harmless when not sandboxed.
-        let scoped = fileURL.startAccessingSecurityScopedResource()
-        defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
         let data: Data
-        do { data = try Data(contentsOf: fileURL) }
-        catch {
+        do {
+            data = try await Self.readPickedFile(fileURL, maxBytes: Self.referenceFileMaxBytes)
+        } catch is FileTooLarge {
+            errorMessage = "Reference files can be up to 50 MB. \(name) is larger than that."
+            return nil
+        } catch {
             errorMessage = "Couldn't read \(name). \(describe(error))"
             return nil
         }
         guard !data.isEmpty else {
             errorMessage = "\(name) is empty, so there is nothing for students to read."
-            return nil
-        }
-        guard data.count <= Self.referenceFileMaxBytes else {
-            errorMessage = "Reference files can be up to 50 MB. \(name) is larger than that."
             return nil
         }
         if !signedIn {
@@ -1185,7 +1383,9 @@ final class AppState {
             // never duplicate a ForEach identifier in the Sessions list.
             let s = ExamSession(id: "local-\(UUID().uuidString.prefix(6))",
                                 code: SupabaseManager.sessionCode(),
-                                testId: testId, classId: classId, status: "open", createdAt: Date())
+                                testId: testId, classId: classId, status: "open",
+                                createdAt: Date(),
+                                opensAt: scheduleLaunch ? scheduledLaunchAt : nil)
             liveSession = s
             roster = RosterStudent.sample
             previewSessions.insert(s, at: 0)
@@ -1194,10 +1394,11 @@ final class AppState {
         }
         isLoading = true
         defer { isLoading = false }
-        let ip = await ProctoringEngine().fetchPublicIP()
         do {
+            let opens = scheduleLaunch ? scheduledLaunchAt : nil
             liveSession = try await supabase.launchSession(testId: testId, classId: classId,
-                                                           teacherUserId: userId, teacherIP: ip)
+                                                           teacherUserId: userId, teacherIP: nil,
+                                                           opensAt: opens)
             await loadLiveRoster()
             startRosterPolling()           // students join AFTER the launch; the card must follow them
             await loadClassSessions()      // the new open session appears as history row 1; NO tab jump
@@ -1218,13 +1419,17 @@ final class AppState {
         guard signedIn, let sid = liveSession?.id else { return }
         do {
             let students = try await supabase.listSessionStudents(sessionId: sid)
-            // Signed out (or session swapped) mid-flight: don't clobber the
-            // just-restored mock roster with the old account's students.
+            let pulses = (try? await supabase.listSessionPulse(sessionId: sid)) ?? []
             guard signedIn, liveSession?.id == sid else { return }
-            // Only publish a change. AppState is observed, so re-assigning an
-            // identical roster every five seconds would re-render (and re-animate)
-            // the live card and the header count for the whole exam.
+            var byStudent: [String: EssayPulse] = [:]
+            for p in pulses {
+                if let existing = byStudent[p.studentId],
+                   let existingAt = existing.updatedAt, let nextAt = p.updatedAt,
+                   existingAt >= nextAt { continue }
+                byStudent[p.studentId] = p
+            }
             if roster != students { roster = students }
+            if essayPulse != byStudent { essayPulse = byStudent }
         } catch {
             guard signedIn, !quiet else { return }
             errorMessage = describe(error)
@@ -1371,6 +1576,7 @@ final class AppState {
         grades = [:]
         gradingRoster = []
         gradingOutlines = []
+        gradingComments = [:]
         gradesFresh = false
         teacherScreen = .grading
         // ReviewGradingView's .task owns the load (auto-cancelled with the
@@ -1391,6 +1597,7 @@ final class AppState {
             gradingSubmissions = []
             grades = [:]
             gradingOutlines = []
+            gradingComments = [:]
             return
         }
         errorMessage = nil
@@ -1402,12 +1609,23 @@ final class AppState {
             // refused/failed fetch never makes the essays themselves
             // unreachable (they're the point of this screen).
             let outlines = (try? await supabase.listSessionOutlines(sessionId: sid)) ?? []
+            let comments = (try? await supabase.listEssayComments(sessionId: sid)) ?? []
             // The teacher may have opened a DIFFERENT session while we loaded;
             // a stale payload must never overwrite it or set gradesFresh.
             guard gradingSession?.id == sid else { return }
-            gradingSubmissions = subs
+            gradingSubmissions = subs.map { sub in
+                var copy = sub
+                copy.contentHtml = revealHTML(sub.contentHtml ?? "", cipher: sub.contentCipher)
+                if copy.contentHtml?.isEmpty == true, sub.contentCipher != nil {
+                    copy.contentHtml = "<p>This essay is sealed to another Mac. Open Weft on the Mac that holds the class keys to read it.</p>"
+                }
+                return copy
+            }
             gradingRoster = ros
             gradingOutlines = outlines
+            var bySub: [String: [EssayComment]] = [:]
+            for c in comments { bySub[c.submissionId ?? "", default: []].append(c) }
+            gradingComments = bySub
             grades = Dictionary(uniqueKeysWithValues: g.map { ($0.submissionId, $0) })
             gradesFresh = true   // grades cache now reflects the DB for THIS session
         } catch {
@@ -1465,13 +1683,41 @@ final class AppState {
             try await supabase.upsertGrade(submissionId: submission.id, sessionId: sid, studentId: stid,
                                            points: points, pointsPossible: pointsPossible,
                                            feedback: feedback, releasedAt: releasedAt)
-            await loadGrading()
+            let releasedDate: Date? = releasedAt.flatMap { SupabaseDate.fractional.date(from: $0) }
+            grades[submission.id] = EssayGrade(submissionId: submission.id, points: points,
+                                               pointsPossible: pointsPossible, feedback: feedback,
+                                               releasedAt: releasedDate)
+            gradesFresh = true
             // Notify the student only on the first release (sharing for the first
             // time, off a known-fresh cache), never on re-saves of already-shared
             // work, and never with the score in the email.
             if share, existing == nil, wasFresh {
                 Task { await supabase.notify("grades_published", body: ["submission_id": submission.id]) }
             }
+            return true
+        } catch {
+            errorMessage = describe(error)
+            return false
+        }
+    }
+
+    /// Pin a margin note to a quote in the student's paper. Shared with the
+    /// student when the grade is released.
+    @discardableResult
+    func addEssayComment(submission: TeacherSubmission, quote: String, body: String) async -> Bool {
+        guard signedIn else { return false }
+        let q = quote.trimmingCharacters(in: .whitespacesAndNewlines)
+        let note = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty, !note.isEmpty,
+              let sessionId = submission.sessionId ?? gradingSession?.id,
+              let studentId = submission.studentId
+        else { return false }
+        do {
+            guard let row = try await supabase.createEssayComment(
+                submissionId: submission.id, sessionId: sessionId,
+                studentId: studentId, quote: q, body: note)
+            else { return false }
+            gradingComments[submission.id, default: []].append(row)
             return true
         } catch {
             errorMessage = describe(error)
@@ -1509,37 +1755,54 @@ final class AppState {
         activeSubmissionId = nil
         examDeadline = nil
         markedWriting = false
+        examDraftHTML = nil
+        examMaterialsFailed = false
+        examResolveCode = item.activeCode
         if signedIn, let code = item.activeCode {
             Task {
-                await resolveActiveExam(code: code)
-                await loadExamMaterials(code: code)
+                examMaterialsLoading = true
+                if let test = await resolveActiveExam(code: code) {
+                    await loadExamMaterials(from: test)
+                } else {
+                    examMaterialsLoading = false
+                }
             }
         }
         studentScreen = .checks
     }
 
-    /// Resolve the active session's test, then load its reference files + links.
-    /// Best-effort: on any failure we keep the sample materials.
-    func loadExamMaterials(code: String) async {
+    /// Load reference files + links for a test we already resolved. Avoids a
+    /// second lookupSession + getTest on the Begin path.
+    func loadExamMaterials(from test: Assignment) async {
         guard signedIn else { examMaterialsLoading = false; return }
-        // Cleared on every exit path (including the guards below), so the panel
-        // can never be left spinning.
         examMaterialsLoading = true
+        examMaterialsFailed = false
         defer { examMaterialsLoading = false }
         do {
-            guard let session = try await supabase.lookupSession(code: code),
-                  let testId = session.testId,
-                  let test = try await supabase.getTest(id: testId) else { return }
             let q = test.questions.first
             let files = try await supabase.listTestFiles(ids: q?.fileIds ?? [])
             let links = try await supabase.listTestURLs(ids: q?.urlIds ?? [])
-            // The real fetch is authoritative for a signed-in exam: assign it
-            // verbatim (the lists started empty for signed-in students), so a
-            // test with no files/links shows none rather than retaining samples.
             examFiles = files
             examLinks = links
         } catch {
-            // keep whatever was seeded; this is a non-blocking enhancement
+            examMaterialsFailed = true
+        }
+    }
+
+    func retryExamMaterials() async {
+        guard signedIn, let test = activeAssignment else { return }
+        await loadExamMaterials(from: test)
+    }
+
+    /// Re-run session lookup after Begin was blocked by a failed resolve.
+    func retryResolveActiveExam() async {
+        guard signedIn, let code = examResolveCode, !code.isEmpty else { return }
+        errorMessage = nil
+        examMaterialsLoading = true
+        if let test = await resolveActiveExam(code: code) {
+            await loadExamMaterials(from: test)
+        } else {
+            examMaterialsLoading = false
         }
     }
 
@@ -1548,37 +1811,51 @@ final class AppState {
     /// session is exposed ONLY after the real test is staged — autosave gates
     /// on `activeExamSession`, and a session paired with the placeholder
     /// question id would write a corrupt submission row.
-    func resolveActiveExam(code: String) async {
-        guard signedIn else { return }
-        // The materials fetch runs immediately after this resolve (the same
-        // Task), so raise the flag here: it covers the whole window in which a
-        // student could reach the exam with no materials yet, and
-        // loadExamMaterials always lowers it again.
-        examMaterialsLoading = true
+    @discardableResult
+    func resolveActiveExam(code: String) async -> Assignment? {
+        guard signedIn else { return nil }
         do {
             guard let session = try await supabase.lookupSession(code: code),
                   session.status == "open" else {
                 errorMessage = "This assignment isn't open anymore."
-                return
+                return nil
+            }
+            if let opens = session.opensAt, opens > Date() {
+                let when = opens.formatted(date: .abbreviated, time: .shortened)
+                errorMessage = "This exam opens at \(when)."
+                return nil
             }
             guard let testId = session.testId,
                   let test = try await supabase.getTest(id: testId) else {
                 errorMessage = "Couldn't load this assignment's prompt. Go back and try again."
-                return
+                return nil
             }
             activeAssignment = test
             activeExamSession = session
-            // Make the student's own outline available to the exam reference
-            // panel even on the deep-link path (where the class-home load that
-            // normally fills these didn't run). Best-effort, never blocks.
             outlineAllowedBySession[session.id] = test.outlineAllowed
             if test.outlineAllowed, myOutlines[session.id] == nil,
                let mine = try? await supabase.getMyOutline(sessionId: session.id, userId: userId) {
                 myOutlines[session.id] = mine
             }
+            await loadExamRecipientKeys(classId: session.classId)
+            return test
         } catch {
             errorMessage = describe(error)
+            return nil
         }
+    }
+
+    /// Teacher (and self) device keys to wrap this exam to. Empty teacher
+    /// keys means autosave stays plaintext so grading still works.
+    private func loadExamRecipientKeys(classId: String?) async {
+        examRecipientKeys = []
+        var ids = [userId]
+        if let cid = classId,
+           let tid = enrolledClasses.first(where: { $0.id == cid })?.teacherUserId,
+           !tid.isEmpty {
+            ids.append(tid)
+        }
+        examRecipientKeys = (try? await supabase.listDeviceKeys(userIds: ids)) ?? []
     }
 
     /// Begin button on the checks screen: register the students row (the
@@ -1627,10 +1904,36 @@ final class AppState {
                 return false
             }
             activeStudentId = sid
-            activeSubmissionId = nil
+            let remote: (id: String, html: String, cipher: WeftEnvelope?, updatedAt: Date?)?
+            if let qid = activeAssignment?.questions.first?.id {
+                remote = try? await supabase.getMyEssayDraft(sessionId: session.id,
+                                                             studentId: sid,
+                                                             questionId: qid)
+            } else {
+                remote = nil
+            }
+            let local = ExamDraftStore.load(userId: userId, sessionId: session.id)
+            if let remote { activeSubmissionId = remote.id } else { activeSubmissionId = nil }
+            switch (local, remote) {
+            case let (local?, remote?):
+                let revealed = revealHTML(remote.html, cipher: remote.cipher)
+                let remoteAt = remote.updatedAt ?? .distantPast
+                if local.updatedAt >= remoteAt || revealed.isEmpty {
+                    examDraftHTML = local.html
+                } else {
+                    examDraftHTML = revealed
+                }
+            case let (local?, nil):
+                examDraftHTML = local.html
+            case let (nil, remote?):
+                let revealed = revealHTML(remote.html, cipher: remote.cipher)
+                examDraftHTML = revealed.isEmpty ? nil : revealed
+            case (nil, nil):
+                examDraftHTML = nil
+            }
             examDeadline = Self.deadline(from: start,
                                          minutes: activeAssignment?.timeLimitMinutes)
-            markedWriting = false   // this attempt's row is back at "joined"
+            markedWriting = false
             errorMessage = nil
             enterExam()
             return true
@@ -1656,21 +1959,31 @@ final class AppState {
         }
     }
 
-    /// One durable save of the essay (debounced upstream). True = saved.
+    /// One durable save of the essay (debounced upstream). True = the work is
+    /// on this Mac (and on the server when the network answered). A wifi blip
+    /// must not look like data loss.
     func autosaveEssay(html: String, wordCount: Int) async -> Bool {
         guard signedIn else { return true }   // preview: nothing to persist
         guard let session = activeExamSession,
               let studentId = activeStudentId,
               let questionId = activeAssignment?.questions.first?.id else { return false }
+        let localOK = ExamDraftStore.save(userId: userId, sessionId: session.id,
+                                          html: html, wordCount: wordCount)
+        let cipher = WeftContentSeal.sealHTML(
+            html, userId: userId, published: examRecipientKeys,
+            aad: WeftContentSeal.aad(sessionId: session.id,
+                                    studentId: studentId,
+                                    questionId: questionId))
         do {
-            if let id = try await supabase.upsertEssaySubmission(
+            guard let id = try await supabase.upsertEssaySubmission(
                 sessionId: session.id, studentId: studentId, questionId: questionId,
-                contentHTML: html, wordCount: wordCount) {
-                activeSubmissionId = id
+                contentHTML: html, wordCount: wordCount, cipher: cipher) else {
+                return localOK
             }
+            activeSubmissionId = id
             return true
         } catch {
-            return false
+            return localOK
         }
     }
 
@@ -1680,11 +1993,13 @@ final class AppState {
     func submitExam(html: String, wordCount: Int) async -> Bool {
         if signedIn {
             guard await autosaveEssay(html: html, wordCount: wordCount) else { return false }
-            if let submissionId = activeSubmissionId {
-                _ = await supabase.submitEssay(submissionId: submissionId)   // best-effort lock
-            }
+            guard let submissionId = activeSubmissionId else { return false }
+            guard await supabase.submitEssay(submissionId: submissionId) else { return false }
             if let studentId = activeStudentId {
                 await supabase.updateStudentStatus(id: studentId, status: "submitted")
+            }
+            if let session = activeExamSession {
+                ExamDraftStore.remove(userId: userId, sessionId: session.id)
             }
         }
         activeStudentId = nil
@@ -1750,7 +2065,8 @@ final class AppState {
             let essay = try await supabase.getMySubmission(versionGroupId: versionGroupId)
             // A newer open owns the screen now; drop this stale result.
             guard versionGroupId == submittedVersionGroupId else { return }
-            if let essay {
+            if var essay {
+                essay.contentHtml = revealHTML(essay.contentHtml, cipher: essay.contentCipher)
                 submittedEssay = essay
             } else {
                 submittedEssayError = "Couldn't find your submitted essay."
@@ -1762,9 +2078,13 @@ final class AppState {
     }
 
     func goToJoin()  { studentScreen = .join }
-    func goToHome()  { studentScreen = .home }
+    func goToHome()  {
+        studentScreen = .home
+        if signedIn { startStudentHomePolling() }
+    }
     func enterExam() {
         ExamGate.inProgress = true   // block Sparkle update checks during the test
+        stopStudentHomePolling()
         studentScreen = .exam
     }
 
@@ -1783,8 +2103,39 @@ final class AppState {
         }
         activeAssignment = nil
         examDeadline = nil
+        examDraftHTML = nil
+        examResolveCode = nil
+        lastProctorFlags = nil
         studentScreen = .done
         if signedIn { Task { await loadClassWork() } }
+    }
+
+    /// Teacher-facing: the student left the exam window. Best-effort.
+    func noteExamFocusLoss() {
+        guard signedIn, let id = activeStudentId else { return }
+        Task { await supabase.updateStudentStatus(id: id, status: "left fullscreen") }
+    }
+
+    /// After Resume, put the roster back on "writing" if they had already typed.
+    func resumeExamFocus() {
+        guard signedIn, markedWriting, let id = activeStudentId else { return }
+        Task { await supabase.updateStudentStatus(id: id, status: "writing") }
+    }
+
+    /// Persist the latest detection flags so the live roster is not frozen at Begin.
+    func reportProctoring(_ report: ProctoringReport) {
+        guard signedIn, let id = activeStudentId else { return }
+        let next = (screen: report.screenCapture, remote: report.remote,
+                    displays: report.displays, vm: report.isVM)
+        if let last = lastProctorFlags, last == next { return }
+        lastProctorFlags = next
+        Task {
+            await supabase.updateProctoringFlags(id: id,
+                                                 screenCapture: report.screenCapture,
+                                                 remote: report.remote,
+                                                 displayCount: report.displays,
+                                                 isVM: report.isVM)
+        }
     }
 
     // MARK: - Teacher: invite students to a class
@@ -1890,13 +2241,25 @@ final class AppState {
     private func resolvePendingExam(code: String?) async {
         guard signedIn, let code, !code.isEmpty else { return }
         pendingExamCode = nil   // consume immediately
-        if let session = try? await supabase.lookupSession(code: code), let cid = session.classId {
+        do {
+            guard let session = try await supabase.lookupSession(code: code) else {
+                errorMessage = "That exam link isn't open anymore."
+                return
+            }
+            guard let cid = session.classId else {
+                errorMessage = "That exam isn't attached to a class, so it can't be opened from this link."
+                return
+            }
             selectedClassId = cid
-            classWork = []   // awaits its own loadClassWork next; stops class A's rows flashing under class B
+            classWork = []
             await loadClassWork()
             if let item = classWork.first(where: { $0.activeCode == code }) {
                 startWriting(item)
+            } else {
+                errorMessage = "Couldn't find that assignment on your class home."
             }
+        } catch {
+            errorMessage = describe(error)
         }
     }
 
@@ -1905,7 +2268,22 @@ final class AppState {
     private func describe(_ error: Error) -> String {
         (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
+
+    /// Read a security-scoped picker URL off the main actor after a cheap size
+    /// check, so a 50 MB attach cannot freeze the editor.
+    fileprivate static func readPickedFile(_ fileURL: URL, maxBytes: Int) async throws -> Data {
+        let scoped = fileURL.startAccessingSecurityScopedResource()
+        defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
+        let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if size > maxBytes { throw FileTooLarge() }
+        let url = fileURL
+        return try await Task.detached {
+            try Data(contentsOf: url)
+        }.value
+    }
 }
+
+private struct FileTooLarge: Error {}
 
 // MARK: - Editor attachment payload
 
