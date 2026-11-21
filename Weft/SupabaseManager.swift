@@ -28,8 +28,10 @@ import AppKit
 // MARK: - Configuration (mirrors renderer/supabase-config.js)
 
 enum SupabaseConfig {
-    static let url = URL(string: "https://elrrvicxsguqstqciodn.supabase.co")!
-    static let anonKey = "sb_publishable_pTH5Q3s2o2CbCdDb7aXuvw_HsGZedAs"
+    /// Self-hosted on the Weft NAS behind a Cloudflare Tunnel (since 0.3.8).
+    static let url = URL(string: "https://weft-api.optimizegrade.com")!
+    /// Public anon key (role "anon"); safe to ship, RLS does the gating.
+    static let anonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzk1MjIxMDQ1LCJleHAiOjE5NTI5MDEwNDV9.hLrX_x9xTApsJ66CkSlzApbMhIhddn-DQaoMCkYUQYI"
 
     /// Custom URL scheme the auth callback arrives on. Deliberately NOT `weft`:
     /// the Electron app also registers `weft://`, so a shared scheme lets macOS
