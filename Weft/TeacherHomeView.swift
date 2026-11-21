@@ -102,21 +102,16 @@ struct TeacherHomeView: View {
     @ViewBuilder private var lockCard: some View {
         if let code = app.myLockCode {
             VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                HStack(spacing: Theme.Space.sm) {
-                    Image(systemName: "lock.fill").foregroundStyle(Theme.accent)
-                    Text("Your lock code")
-                        .font(Theme.sans(13, .semibold))
-                        .foregroundStyle(Theme.ink)
-                    Spacer()
+                HStack(spacing: 6) {
+                    Image(systemName: "lock.fill")
+                    Text("Essays locked to you. Lock code")
                     Text(code)
-                        .font(.system(size: 15, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Theme.ink)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
                         .textSelection(.enabled)
                 }
-                Text("Student essays are locked so only you and the student can read them. Show this code at a class's first exam so students can check it. If you use a new Mac, students will be asked to check it again.")
-                    .font(Theme.sans(12))
-                    .foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
+                .font(Theme.sans(12))
+                .foregroundStyle(Theme.muted)
+                .help("Only you and the student can read an essay. If a student's Mac says your code changed, read them this code.")
                 ForEach(app.myOtherDeviceKeys, id: \.kid) { key in
                     HStack(alignment: .top, spacing: Theme.Space.sm) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warn)
@@ -132,8 +127,7 @@ struct TeacherHomeView: View {
                     .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
                 }
             }
-            .padding(Theme.Space.lg)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
