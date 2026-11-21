@@ -16,6 +16,7 @@ struct StudentChecksView: View {
     @State private var running = true
     @State private var beginBusy = false
     @State private var keyGuardTrusted = ExamKeyGuard.isTrusted
+    @State private var showBreath = false
 
     /// "What it checks" — grounded in runChecks()/monitorTick() and the in-exam
     /// loops. Honest, plain-language copy ported from renderTrustLabel().
@@ -46,6 +47,7 @@ struct StudentChecksView: View {
                     statusCard
                     keyGuardCard
                     nutritionLabel
+                    calmCard
                     enterButton
                 }
                 .padding(Theme.Space.xl)
@@ -54,12 +56,48 @@ struct StudentChecksView: View {
             }
         }
         .background(AmbientBackground())
+        .overlay {
+            if showBreath {
+                CalmBreathView(note: "The exam hasn't started, so take as long as you like.",
+                               doneTitle: "I'm ready") {
+                    showBreath = false
+                }
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: showBreath)
         .task {
             running = true
             if !ExamKeyGuard.isTrusted { ExamKeyGuard.requestTrust() }
             keyGuardTrusted = ExamKeyGuard.isTrusted
             report = await ProctoringEngine().runChecks(teacherIP: nil)
             running = false
+        }
+    }
+
+    // MARK: Calm start
+    /// Nerves before an exam are normal. Offer 30 seconds of slow breathing
+    /// before the clock starts; nothing is logged.
+    private var calmCard: some View {
+        GlassCard {
+            HStack(spacing: Theme.Space.md) {
+                Image(systemName: "wind")
+                    .font(.system(size: 18))
+                    .foregroundStyle(Theme.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Feeling nervous? That's normal.")
+                        .font(Theme.sans(14, .semibold))
+                        .foregroundStyle(Theme.inkSoft)
+                    Text("Take three slow breaths before you start. The clock hasn't started yet.")
+                        .font(Theme.sans(12.5))
+                        .foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Button("Breathe first") { showBreath = true }
+                    .buttonStyle(.glass)
+                    .linkPointer()
+            }
         }
     }
 

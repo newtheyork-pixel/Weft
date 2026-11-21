@@ -10,6 +10,7 @@ import SwiftUI
 /// Shared preference keys so views and Settings agree on the same storage.
 enum Prefs {
     static let confirmBeforeSubmit  = "weft.confirmBeforeSubmit"  // Bool
+    static let hideExamTimer        = "weft.hideExamTimer"        // Bool
 }
 
 struct SettingsView: View {

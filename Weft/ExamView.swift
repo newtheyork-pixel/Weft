@@ -86,6 +86,13 @@ struct ExamView: View {
     /// retry loop. This guard makes submit() single-flight.
     @State private var submitting = false
     @AppStorage(Prefs.confirmBeforeSubmit) private var confirmBeforeSubmit = true
+    /// The student chose to hide the clock. It comes back on its own for the
+    /// last five minutes, so hiding it can never catch anyone out.
+    @AppStorage(Prefs.hideExamTimer) private var hideTimer = false
+    /// The guided breath is covering the exam.
+    @State private var showBreath = false
+    /// Seconds left at which a hidden clock shows itself again.
+    private static let timerReturnsAt = 300
 
     private var assignment: Assignment { app.activeAssignment ?? .sample }
     private var prompt: String {
@@ -123,7 +130,21 @@ struct ExamView: View {
         }
         .background(Color(white: 0.97))
         .overlay(alignment: .bottomTrailing) { proctoringChip.padding(20) }
+        .overlay {
+            if showBreath {
+                CalmBreathView(note: "Your time keeps running and your work is saved. Your teacher doesn't see this.") {
+                    closeBreath()
+                }
+                .transition(.opacity)
+            }
+        }
         .overlay { blackout }
+        .animation(.easeOut(duration: 0.25), value: showBreath)
+        // Time's up (or the teacher ended the session): never leave the
+        // student behind the breathing guide while the exam closes.
+        .onChange(of: expired) { _, isExpired in
+            if isExpired { showBreath = false }
+        }
         .animation(.easeOut(duration: 0.2), value: runtime.block)
         .confirmationDialog("Submit your exam?", isPresented: $showSubmitConfirm, titleVisibility: .visible) {
             Button("Submit exam", role: .destructive) { submit() }
@@ -371,7 +392,9 @@ struct ExamView: View {
         VStack(spacing: 0) {
             header
             toolbarRow
-            RichTextEditor(controller: controller, isEditable: !expired,
+            // Locked while the breathing guide covers it, so nothing typed
+            // then can land in the essay unseen.
+            RichTextEditor(controller: controller, isEditable: !expired && !showBreath,
                            spellcheckEnabled: assignment.spellcheckEnabled,
                            onEdit: { scheduleSave(); app.markWriting() })
                 .accessibilityLabel("Essay")
@@ -397,31 +420,79 @@ struct ExamView: View {
                     .accessibilityAddTraits(.isHeader)
             }
             Spacer()
-            countdown
+            HStack(spacing: Theme.Space.sm) {
+                breatheButton
+                countdown
+            }
         }
         .padding(.horizontal, Theme.Space.xl)
         .padding(.top, Theme.Space.xl)
         .padding(.bottom, Theme.Space.md)
     }
 
+    private var breatheButton: some View {
+        Button(action: openBreath) {
+            Label("Breathe", systemImage: "wind")
+                .font(Theme.sans(13, .semibold))
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(Theme.accent.opacity(0.10), in: Capsule())
+                .foregroundStyle(Theme.accent)
+        }
+        .buttonStyle(.plain)
+        .disabled(expired || submitting)
+        .help("Take 30 seconds to breathe. Your time keeps running.")
+        .linkPointer()
+    }
+
+    private func openBreath() {
+        guard !expired, !submitting else { return }
+        // Typing must not land in the hidden editor behind the overlay.
+        let window = controller.textView?.window ?? examWindow
+        window?.makeFirstResponder(nil)
+        showBreath = true
+    }
+
+    private func closeBreath() {
+        showBreath = false
+        if let tv = controller.textView, !expired {
+            tv.window?.makeFirstResponder(tv)
+        }
+    }
+
     @ViewBuilder private var countdown: some View {
         if let deadline {
             TimelineView(.periodic(from: countdownAnchor, by: 1)) { context in
                 let remaining = max(0, Int(deadline.timeIntervalSince(context.date)))
-                Label {
-                    Text(String(format: "%d:%02d", remaining / 60, remaining % 60))
-                        .font(.system(size: 15, weight: .semibold, design: .monospaced))
-                        .monospacedDigit()
-                } icon: {
-                    Image(systemName: "clock")
+                let soon = remaining < Self.timerReturnsAt
+                Button {
+                    // In the last five minutes the clock always shows.
+                    if !soon { hideTimer.toggle() }
+                } label: {
+                    if hideTimer && !soon {
+                        Label("Show time", systemImage: "eye")
+                            .font(Theme.sans(13, .semibold))
+                            .foregroundStyle(Theme.muted)
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(Theme.muted.opacity(0.10), in: Capsule())
+                    } else {
+                        Label {
+                            Text(String(format: "%d:%02d", remaining / 60, remaining % 60))
+                                .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                                .monospacedDigit()
+                        } icon: {
+                            Image(systemName: "clock")
+                        }
+                        .foregroundStyle(soon ? Theme.warn : Theme.accent)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background((soon ? Theme.warn : Theme.accent).opacity(0.10), in: Capsule())
+                    }
                 }
-                .foregroundStyle(remaining < 300 ? Theme.warn : Theme.accent)
-                .padding(.horizontal, 12).padding(.vertical, 6)
-                .background((remaining < 300 ? Theme.warn : Theme.accent).opacity(0.10), in: Capsule())
-                .help("Time remaining")
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Time remaining")
-                .accessibilityValue("\(remaining / 60) minutes, \(remaining % 60) seconds")
+                .buttonStyle(.plain)
+                .help(soon ? "Time remaining"
+                      : hideTimer ? "Show the time. It also comes back by itself for the last 5 minutes."
+                                  : "Hide the time. It comes back by itself for the last 5 minutes.")
+                .accessibilityLabel(hideTimer && !soon ? "Time hidden. Show time" : "Time remaining")
+                .accessibilityValue(hideTimer && !soon ? "" : "\(remaining / 60) minutes, \(remaining % 60) seconds")
                 .accessibilityAddTraits(.updatesFrequently)
             }
         }
