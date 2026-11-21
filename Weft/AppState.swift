@@ -860,9 +860,11 @@ final class AppState {
     /// Publish this Mac's agreement public key, then list every key on the
     /// account so a teacher sees their lock code and any key they did not add.
     func publishDeviceKey() async {
-        guard signedIn, let pub = WeftContentSeal.publishableKey(userId: userId) else { return }
-        try? await supabase.upsertDeviceKey(userId: userId, kid: pub.kid, publicX963: pub.publicX963)
-        guard let listed = try? await supabase.listDeviceKeys(userIds: [userId]) else { return }
+        let me = userId
+        guard signedIn, let pub = WeftContentSeal.publishableKey(userId: me) else { return }
+        try? await supabase.upsertDeviceKey(userId: me, kid: pub.kid, publicX963: pub.publicX963)
+        guard let listed = try? await supabase.listDeviceKeys(userIds: [me]),
+              signedIn, userId == me else { return }
         let mine = listed.filter(WeftContentSeal.isGenuine)
         myLockCode = TeacherKeyPins.lockCode(kids: Set(mine.map(\.kid)))
         myOtherDeviceKeys = mine.filter { $0.kid != pub.kid }
@@ -1935,11 +1937,14 @@ final class AppState {
             examLockState = .unknownTeacher
             return
         }
+        let me = userId
         guard let listed = try? await supabase.listDeviceKeys(userIds: [tid]) else {
             // Network: keep whatever was there; Begin reports it.
             if examTeacherId != tid { examLockState = nil; examRecipientKeys = [] }
             return
         }
+        // Signed out or switched account while waiting: don't pin for them.
+        guard signedIn, userId == me else { return }
         // Only keys whose id really is the hash of the key. Otherwise the
         // server could show a pinned id next to a key of its own.
         let teacherKeys = listed.filter { $0.userId == tid && WeftContentSeal.isGenuine($0) }
@@ -1973,9 +1978,11 @@ final class AppState {
 
     /// The student read the teacher's code off the board and it matches the
     /// new code: trust the keys the server now lists for this teacher.
-    func confirmChangedTeacherLock() {
+    func confirmChangedTeacherLock(code: String) {
         guard let tid = examTeacherId, !examListedTeacherKeys.isEmpty else { return }
         let kids = Set(examListedTeacherKeys.map(\.kid))
+        // Only the set whose code the student actually compared.
+        guard TeacherKeyPins.lockCode(kids: kids) == code else { return }
         TeacherKeyPins.pin(kids, studentId: userId, teacherId: tid)
         examRecipientKeys = examListedTeacherKeys
         examLockState = .ready(code: TeacherKeyPins.lockCode(kids: kids))
@@ -1988,13 +1995,12 @@ final class AppState {
         errorMessage = nil
     }
 
-    /// True when the essay can be sealed to at least one trusted teacher key.
+    /// True when the essay can be sealed to the teacher's current keys. A
+    /// changed code blocks Begin until confirmed: sealing only to an old key
+    /// (say, the teacher's previous Mac) could leave essays nobody can grade.
     var examCanSeal: Bool {
-        switch examLockState {
-        case .ready: return true
-        case .changed(_, let stillReady): return stillReady
-        default: return false
-        }
+        if case .ready = examLockState { return true }
+        return false
     }
 
     /// Begin button on the checks screen: register the students row (the
@@ -2071,6 +2077,15 @@ final class AppState {
             case let (local?, remote?):
                 let revealed = revealHTML(remote.html, cipher: remote.cipher)
                 let remoteAt = remote.updatedAt ?? .distantPast
+                if revealed.isEmpty, remote.cipher != nil, remoteAt > local.updatedAt,
+                   !allowFreshOverUnreadable {
+                    // A newer copy written on another Mac that this Mac can't
+                    // open: don't let the older local copy overwrite it.
+                    examUnreadableDraft = true
+                    errorMessage = "Newer work for this exam was saved on another Mac and can't open here. Go back to that Mac if you can. Continuing here replaces it with the older copy on this Mac."
+                    activeStudentId = nil
+                    return false
+                }
                 if local.updatedAt >= remoteAt || revealed.isEmpty {
                     examDraftHTML = local.html
                 } else {

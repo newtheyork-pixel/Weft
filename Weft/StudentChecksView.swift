@@ -350,14 +350,14 @@ extension StudentChecksView {
             VStack(alignment: .leading, spacing: Theme.Space.sm) {
                 HStack(alignment: .top, spacing: Theme.Space.sm) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warn)
-                    Text("Your teacher's lock code changed to \(newCode). Ask your teacher to read their code from Weft. Only tap below if it matches.")
+                    Text("Your teacher's lock code changed to \(newCode). Ask your teacher to read their code from Weft. You can begin once you tap below, and only tap if it matches.")
                         .font(Theme.sans(12.5))
                         .foregroundStyle(Theme.inkSoft)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Button("The codes match") {
                     app.errorMessage = nil
-                    app.confirmChangedTeacherLock()
+                    app.confirmChangedTeacherLock(code: newCode)
                 }
                 .buttonStyle(.bordered)
             }

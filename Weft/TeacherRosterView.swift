@@ -20,7 +20,9 @@ struct TeacherRosterView: View {
                 VStack(alignment: .leading, spacing: Theme.Space.lg) {
                     header
                     if active.isEmpty { emptyState } else { rosterCard }
-                    inviteCard
+                    // Email invites need the `notify` server function, which the
+                    // self-hosted backend does not run. Teachers share the join code.
+                    // inviteCard
                 }
                 .padding(Theme.Space.xl)
                 .frame(maxWidth: 620)

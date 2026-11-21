@@ -113,7 +113,7 @@ struct TeacherHomeView: View {
                         .foregroundStyle(Theme.ink)
                         .textSelection(.enabled)
                 }
-                Text("Student essays are locked so only you and the student can read them. If a student is told your code changed, read this code to them.")
+                Text("Student essays are locked so only you and the student can read them. Show this code at a class's first exam so students can check it. If you use a new Mac, students will be asked to check it again.")
                     .font(Theme.sans(12))
                     .foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)

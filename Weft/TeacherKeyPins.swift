@@ -30,8 +30,8 @@ enum TeacherKeyPins {
         defaultsPrefix + studentId + "." + teacherId
     }
 
-    /// Short code for a set of keys, e.g. "K7Q4M-D9XTB" (10 characters,
-    /// ~49 bits: too many to grind a matching fake key for). Same keys, same code on
+    /// Code for a set of keys, e.g. "K7Q4-MD9X-TBR2-W8HN": 16 characters,
+    /// ~78 bits, so finding a fake key with the same code is out of reach. Same keys, same code on
     /// every Mac, so a teacher can read theirs aloud and students compare.
     static func lockCode(kids: Set<String>) -> String {
         guard !kids.isEmpty else { return "none" }
@@ -40,10 +40,16 @@ enum TeacherKeyPins {
         // Crockford-style alphabet: no 0/O or 1/I/L confusion when read aloud.
         let alphabet = Array("23456789ABCDEFGHJKMNPQRSTVWXYZ")
         var chars: [Character] = []
-        for i in 0..<10 { chars.append(alphabet[Int(digest[i]) % alphabet.count]) }
-        return String(chars[0..<5]) + "-" + String(chars[5..<10])
+        for i in 0..<16 { chars.append(alphabet[Int(digest[i]) % alphabet.count]) }
+        return stride(from: 0, to: 16, by: 4)
+            .map { String(chars[$0..<($0 + 4)]) }
+            .joined(separator: "-")
     }
 }
+
+// Trust on first use: the FIRST exam a student takes with a teacher pins
+// whatever keys the server lists then. Teachers can close that gap by showing
+// their lock code at the first exam so students compare it.
 
 /// Outcome of checking a teacher's published keys against this Mac's pins.
 enum ExamLockState: Equatable, Sendable {
@@ -54,8 +60,8 @@ enum ExamLockState: Equatable, Sendable {
     case noTeacherKey
     /// The server now lists teacher keys this Mac has not seen. They are
     /// ignored until the student confirms the new code with the teacher.
-    /// `stillReady` = at least one pinned key remains, so the exam can run
-    /// sealed to the known keys meanwhile.
+    /// Begin stays blocked until the student confirms the new code.
+    /// `stillReady` = at least one pinned key is still listed.
     case changed(newCode: String, stillReady: Bool)
     /// No teacher is known for this exam (no class), so it cannot be sealed.
     case unknownTeacher
