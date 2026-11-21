@@ -19,8 +19,8 @@ struct CalmBreathView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var start = Date()
     @State private var finished = false
-    /// Bumped by "One more round" to restart the timer task.
-    @State private var round = 0
+    /// How long "Well done" stays up before the guide closes by itself.
+    static let doneHold: Double = 1.5
     /// Listens for Escape while the guide is on screen.
     @State private var escMonitor: Any?
 
@@ -76,19 +76,9 @@ struct CalmBreathView: View {
                         .frame(maxWidth: 360)
                 }
 
-                HStack(spacing: Theme.Space.md) {
-                    if finished {
-                        Button("One more round") {
-                            start = Date()
-                            finished = false
-                            round += 1
-                        }
-                        .buttonStyle(.glass)
-                    }
-                    Button(doneTitle, action: onDone)
-                        .buttonStyle(.glassProminent)
-                        .tint(Theme.accent)
-                }
+                Button(doneTitle, action: onDone)
+                    .buttonStyle(.glassProminent)
+                    .tint(Theme.accent)
             }
             .padding(Theme.Space.xl)
         }
@@ -104,9 +94,19 @@ struct CalmBreathView: View {
             if let escMonitor { NSEvent.removeMonitor(escMonitor) }
             escMonitor = nil
         }
-        .task(id: round) {
-            try? await Task.sleep(for: .seconds(total))
-            if !Task.isCancelled { finished = true }
+        // After the last breath: show "Well done" briefly, then close by
+        // itself. Closing early cancels this task, so onDone runs once.
+        .task {
+            do {
+                // Tight tolerance: left to the system, a 30 s sleep can run
+                // over by more than a second.
+                try await Task.sleep(for: .seconds(total), tolerance: .milliseconds(20))
+                finished = true
+                try await Task.sleep(for: .seconds(Self.doneHold), tolerance: .milliseconds(20))
+                onDone()
+            } catch {
+                // Cancelled: the student closed it first.
+            }
         }
     }
 
