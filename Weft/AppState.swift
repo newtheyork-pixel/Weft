@@ -239,25 +239,20 @@ final class AppState {
     var gradingOutlines: [OutlineUpload] = []
     /// Margin comments for the session being graded, keyed by submission id.
     var gradingComments: [String: [EssayComment]] = [:]
-    /// Device keys to wrap this exam's essay to: the teacher's PINNED keys
-    /// plus this student's own. Never a key the server added after pinning.
+    /// The teacher's essay key this exam's essay is sealed to (the
+    /// student's own key is added by sealHTML).
     var examRecipientKeys: [DevicePublicKey] = []
-    /// Whether this exam can be sealed, and the teacher's lock code.
+    /// Whether this exam can be sealed to the teacher.
     var examLockState: ExamLockState?
-    /// Teacher id + the keys the server listed for this exam (for confirming
-    /// a changed lock code).
-    private var examTeacherId: String?
-    private var examListedTeacherKeys: [DevicePublicKey] = []
+    /// Whether this Mac holds the signed-in person's essay key. nil = not
+    /// checked yet (or the check couldn't reach the server).
+    var essayKeyState: EssayKeyState?
     /// The server holds a sealed draft this Mac cannot open (written on
     /// another Mac). Begin stops until the student chooses to start a new
     /// copy, so the first autosave can't silently replace work the teacher
     /// could still read.
     var examUnreadableDraft = false
     private var allowFreshOverUnreadable = false
-    /// Teacher side: this Mac's lock code, and keys on the account that this
-    /// Mac did not publish (another Mac, or a key someone else added).
-    var myLockCode: String?
-    var myOtherDeviceKeys: [DevicePublicKey] = []
     /// Transient status for the roster "Invite students" action.
     var inviteStatus: String?
     // School-approved websites (from the published Google Sheet), for the editor.
@@ -303,7 +298,7 @@ final class AppState {
         teacherScreen = .home
         route = .teacher
         stopStudentHomePolling()
-        if signedIn { resolvePendingDeepLink(); Task { await loadTeacherHome(); await publishDeviceKey() } }
+        if signedIn { resolvePendingDeepLink(); Task { await loadTeacherHome(); await checkEssayKey() } }
     }
 
     func enterStudent() {
@@ -320,7 +315,7 @@ final class AppState {
         if signedIn {
             resolvePendingDeepLink()
             Task {
-                await publishDeviceKey()
+                await checkEssayKey()
                 await loadStudentHome()
             }
         }
@@ -387,9 +382,9 @@ final class AppState {
         gradingSubmissions = []; grades = [:]
         gradingComments = [:]
         examRecipientKeys = []
-        examLockState = nil; examTeacherId = nil; examListedTeacherKeys = []
+        examLockState = nil
         examUnreadableDraft = false; allowFreshOverUnreadable = false
-        myLockCode = nil; myOtherDeviceKeys = []
+        essayKeyState = nil
         teacherClasses = [.sample, .sample2]
         assignments = [.sample, .sample2]
         roster = RosterStudent.sample
@@ -425,9 +420,9 @@ final class AppState {
         essayPulse = [:]
         liveExamOffer = nil
         examRecipientKeys = []
-        examLockState = nil; examTeacherId = nil; examListedTeacherKeys = []
+        examLockState = nil
         examUnreadableDraft = false; allowFreshOverUnreadable = false
-        myLockCode = nil; myOtherDeviceKeys = []
+        essayKeyState = nil
         gradingComments = [:]
         teacherClasses = []
         assignments = []
@@ -473,11 +468,11 @@ final class AppState {
                 // the sign-in route, which now shows only the chooser; any
                 // pending deep link replays when they pick a view.
                 route = .signIn
-                await publishDeviceKey()
+                await checkEssayKey()
             case .student:
                 studentScreen = .home
                 route = .student
-                await publishDeviceKey()
+                await checkEssayKey()
                 await loadStudentHome()
                 // Replay any deep link that arrived on the sign-in screen.
                 resolvePendingDeepLink()
@@ -857,28 +852,92 @@ final class AppState {
         homePollTask = nil
     }
 
-    /// Publish this Mac's agreement public key, then list every key on the
-    /// account so a teacher sees their lock code and any key they did not add.
-    func publishDeviceKey() async {
+    // MARK: Essay password
+
+    /// Work out whether this Mac holds the signed-in person's essay key.
+    /// The server keeps one public key per person; this Mac's copy is only
+    /// good if it matches that key (a reset on another Mac replaces it).
+    func checkEssayKey() async {
         let me = userId
-        guard signedIn, let pub = WeftContentSeal.publishableKey(userId: me) else { return }
-        try? await supabase.upsertDeviceKey(userId: me, kid: pub.kid, publicX963: pub.publicX963)
-        guard let listed = try? await supabase.listDeviceKeys(userIds: [me]),
-              signedIn, userId == me else { return }
-        let mine = listed.filter(WeftContentSeal.isGenuine)
-        myLockCode = TeacherKeyPins.lockCode(kids: Set(mine.map(\.kid)))
-        myOtherDeviceKeys = mine.filter { $0.kid != pub.kid }
+        guard signedIn, !me.isEmpty else { return }
+        guard let listed = try? await supabase.listDeviceKeys(userIds: [me]) else { return }
+        guard signedIn, userId == me else { return }
+        let published = listed.first { $0.userId == me && WeftContentSeal.isGenuine($0) }
+        if let local = WeftContentSeal.publishableKey(userId: me) {
+            if published?.kid == local.kid { essayKeyState = .ready; return }
+            if published == nil {
+                // Saved here but never reached the server: publish it now.
+                if (try? await supabase.upsertDeviceKey(userId: me, kid: local.kid,
+                                                         publicX963: local.publicX963)) != nil,
+                   signedIn, userId == me {
+                    essayKeyState = .ready
+                }
+                return
+            }
+            // Never yank the key out from under a running exam.
+            if ExamGate.inProgress { return }
+            // The password was changed on another Mac: this copy is stale.
+            WeftContentSeal.forgetKey(userId: me)
+        }
+        essayKeyState = published == nil ? .needsSetup : .needsUnlock
     }
 
-    /// Teacher: delete a key on the account that this Mac did not publish.
-    func removeDeviceKey(kid: String) async {
-        guard signedIn else { return }
-        do {
-            try await supabase.deleteDeviceKey(userId: userId, kid: kid)
-        } catch {
-            errorMessage = describe(error)
+    /// First time: pick the essay password. nil = done, else the problem.
+    func setEssayPassword(_ password: String) async -> String? {
+        await saveNewEssayKey(password)
+    }
+
+    /// Forgot it: start over with a new password. Essays locked with the
+    /// old one can't be opened by this person anymore.
+    func resetEssayPassword(_ password: String) async -> String? {
+        await saveNewEssayKey(password)
+    }
+
+    private func saveNewEssayKey(_ password: String) async -> String? {
+        guard password.count >= WeftContentSeal.minPasswordLength else {
+            return "Use at least \(WeftContentSeal.minPasswordLength) characters."
         }
-        await publishDeviceKey()
+        let me = userId
+        guard signedIn, !me.isEmpty else { return "Sign in first." }
+        let key = await Task.detached(priority: .userInitiated) {
+            WeftContentSeal.deriveKey(password: password, userId: me)
+        }.value
+        guard let key else { return "Couldn't make your key. Try again." }
+        let pub = WeftContentSeal.publicRecord(of: key, userId: me)
+        do {
+            try await supabase.upsertDeviceKey(userId: me, kid: pub.kid, publicX963: pub.publicX963)
+        } catch {
+            return describe(error)
+        }
+        guard signedIn, userId == me else { return "Signed out." }
+        guard WeftContentSeal.saveKey(key, userId: me) else {
+            return "Couldn't save your key on this Mac."
+        }
+        essayKeyState = .ready
+        return nil
+    }
+
+    /// Type the essay password on this Mac. nil = unlocked, else the problem.
+    func unlockEssays(_ password: String) async -> String? {
+        let me = userId
+        guard signedIn, !me.isEmpty else { return "Sign in first." }
+        let key = await Task.detached(priority: .userInitiated) {
+            WeftContentSeal.deriveKey(password: password, userId: me)
+        }.value
+        guard let key else { return "Couldn't make your key. Try again." }
+        let pub = WeftContentSeal.publicRecord(of: key, userId: me)
+        let listed: [DevicePublicKey]
+        do { listed = try await supabase.listDeviceKeys(userIds: [me]) }
+        catch { return describe(error) }
+        guard signedIn, userId == me else { return "Signed out." }
+        guard listed.contains(where: { $0.userId == me && $0.kid == pub.kid }) else {
+            return "That's not your essay password."
+        }
+        guard WeftContentSeal.saveKey(key, userId: me) else {
+            return "Couldn't save your key on this Mac."
+        }
+        essayKeyState = .ready
+        return nil
     }
 
     /// Reveal sealed HTML when content_html is empty. Unreadable ciphertext
@@ -1831,8 +1890,6 @@ final class AppState {
         examMaterialsFailed = false
         examLockState = nil
         examRecipientKeys = []
-        examTeacherId = nil
-        examListedTeacherKeys = []
         examUnreadableDraft = false
         allowFreshOverUnreadable = false
         examResolveCode = item.activeCode
@@ -1925,67 +1982,24 @@ final class AppState {
         }
     }
 
-    /// Work out who this exam's essay is sealed to. Essays are never sent
-    /// unsealed, so with no usable teacher key the exam cannot start. State
-    /// is assigned only at the end, so a reload never blanks the keys of an
-    /// exam that is already running.
+    /// Work out who this exam's essay is sealed to: the teacher's one essay
+    /// key. Essays are never sent unsealed, so with no teacher key the exam
+    /// cannot start. On a network error the previous state is kept, so a
+    /// reload never blanks the key of an exam that is already running.
     private func loadExamRecipientKeys(classId: String?) async {
         guard let cid = classId,
               let tid = enrolledClasses.first(where: { $0.id == cid })?.teacherUserId,
               !tid.isEmpty else {
-            examRecipientKeys = []; examTeacherId = nil; examListedTeacherKeys = []
+            examRecipientKeys = []
             examLockState = .unknownTeacher
             return
         }
         let me = userId
-        guard let listed = try? await supabase.listDeviceKeys(userIds: [tid]) else {
-            // Network: keep whatever was there; Begin reports it.
-            if examTeacherId != tid { examLockState = nil; examRecipientKeys = [] }
-            return
-        }
-        // Signed out or switched account while waiting: don't pin for them.
+        guard let listed = try? await supabase.listDeviceKeys(userIds: [tid]) else { return }
         guard signedIn, userId == me else { return }
-        // Only keys whose id really is the hash of the key. Otherwise the
-        // server could show a pinned id next to a key of its own.
         let teacherKeys = listed.filter { $0.userId == tid && WeftContentSeal.isGenuine($0) }
-        examTeacherId = tid
-        examListedTeacherKeys = teacherKeys
-        guard !teacherKeys.isEmpty else {
-            examRecipientKeys = []
-            examLockState = .noTeacherKey
-            return
-        }
-        let listedKids = Set(teacherKeys.map(\.kid))
-        var pins = TeacherKeyPins.pinned(studentId: userId, teacherId: tid)
-        if pins.isEmpty || listedKids.isStrictSubset(of: pins) {
-            // First sight, or the teacher removed a key: pin exactly what is
-            // listed, so a removed key can't be slipped back in later.
-            pins = listedKids
-            TeacherKeyPins.pin(pins, studentId: userId, teacherId: tid)
-        }
-        let trusted = teacherKeys.filter { pins.contains($0.kid) }
-        // Only the teacher's pinned keys. This Mac's own key is added by
-        // sealHTML; keys the server lists under the student's id are never
-        // used, since nobody could notice one being added.
-        examRecipientKeys = trusted
-        if listedKids.isSubset(of: pins) {
-            examLockState = .ready(code: TeacherKeyPins.lockCode(kids: Set(trusted.map(\.kid))))
-        } else {
-            examLockState = .changed(newCode: TeacherKeyPins.lockCode(kids: listedKids),
-                                     stillReady: !trusted.isEmpty)
-        }
-    }
-
-    /// The student read the teacher's code off the board and it matches the
-    /// new code: trust the keys the server now lists for this teacher.
-    func confirmChangedTeacherLock(code: String) {
-        guard let tid = examTeacherId, !examListedTeacherKeys.isEmpty else { return }
-        let kids = Set(examListedTeacherKeys.map(\.kid))
-        // Only the set whose code the student actually compared.
-        guard TeacherKeyPins.lockCode(kids: kids) == code else { return }
-        TeacherKeyPins.pin(kids, studentId: userId, teacherId: tid)
-        examRecipientKeys = examListedTeacherKeys
-        examLockState = .ready(code: TeacherKeyPins.lockCode(kids: kids))
+        examRecipientKeys = teacherKeys
+        examLockState = teacherKeys.isEmpty ? .noTeacherKey : .ready
     }
 
     /// The student chose to start a new copy over a draft this Mac can't open.
@@ -1995,12 +2009,9 @@ final class AppState {
         errorMessage = nil
     }
 
-    /// True when the essay can be sealed to the teacher's current keys. A
-    /// changed code blocks Begin until confirmed: sealing only to an old key
-    /// (say, the teacher's previous Mac) could leave essays nobody can grade.
+    /// True when the essay can be sealed to the teacher and to the student.
     var examCanSeal: Bool {
-        if case .ready = examLockState { return true }
-        return false
+        examLockState == .ready && essayKeyState == .ready
     }
 
     /// Begin button on the checks screen: register the students row (the
@@ -2013,13 +2024,16 @@ final class AppState {
             errorMessage = "Couldn't reach this assignment's session. Go back and try again."
             return false
         }
+        if essayKeyState != .ready { await checkEssayKey() }
         await loadExamRecipientKeys(classId: session.classId)
         guard examCanSeal else {
             switch examLockState {
             case .noTeacherKey:
-                errorMessage = "Your teacher needs to open Weft on their Mac once before this exam can start. Ask them, then try again."
-            case .changed:
-                errorMessage = "Your teacher's lock code changed. Check the new code with your teacher before you begin."
+                errorMessage = "Your teacher needs to set their essay password in Weft before this exam can start. Ask them, then try again."
+            case .ready where essayKeyState == nil:
+                errorMessage = "Couldn't reach Weft to check your essay password. Check your connection and try again."
+            case .ready:
+                errorMessage = "Enter your essay password first."
             case .unknownTeacher:
                 errorMessage = "This exam isn't linked to a class, so your work can't be locked to your teacher."
             default:

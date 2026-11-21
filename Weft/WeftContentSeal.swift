@@ -1,17 +1,22 @@
 //
 //  WeftContentSeal.swift
-//  Weft — seal an essay to the teacher's (and the student's) device keys so
+//  Weft — seal an essay to the teacher's (and the student's) essay keys so
 //  the server stores ciphertext, not the writing. Suite matches the dormant
-//  WeftCrypto package: P256-HKDF-SHA256-AES256GCM. The private key lives in
-//  iCloud Keychain when the Mac syncs, this-device otherwise.
+//  WeftCrypto package: P256-HKDF-SHA256-AES256GCM.
 //
-//  Essays are never sent unsealed: with no trusted teacher key the exam
-//  does not start (see TeacherKeyPins / AppState.loadExamRecipientKeys).
+//  Each person has ONE essay key, rebuilt from their essay password
+//  (PBKDF2-SHA256, salted with their user id). The password never leaves
+//  the Mac. The private key is kept in this Mac's keychain only (never
+//  iCloud), so the password is typed once per Mac.
+//
+//  Essays are never sent unsealed: with no teacher key the exam does not
+//  start (see AppState.loadExamRecipientKeys).
 //
 
 import Foundation
 import CryptoKit
 import Security
+import CommonCrypto
 
 // MARK: - Wire types (byte-compatible with packages/WeftCrypto Envelope)
 
@@ -73,16 +78,79 @@ enum WeftContentSeal {
     private static let wrapLabel = Data("weft-dek-wrap/v1".utf8)
     private static let wrapAAD = Data("weft-wrap/v1".utf8)
     private static let envelopeVersion = 1
-    private static let keychainService = "app.weft.device-agreement"
+    private static let keychainService = "app.weft.essay-key"
+    /// Pre-password keys (one per Mac, some iCloud-synced). Removed on sight.
+    private static let oldKeychainService = "app.weft.device-agreement"
 
-    // MARK: Device key
+    /// Shortest essay password accepted.
+    static let minPasswordLength = 12
+    /// PBKDF2 rounds: makes each guess at a password slow.
+    private static let pbkdf2Rounds: UInt32 = 2_000_000
 
-    /// The caller's agreement public key, creating one if this Mac has none.
+    // MARK: Essay key
+
+    /// The caller's public key, or nil if this Mac doesn't hold their key yet.
     static func publishableKey(userId: String) -> DevicePublicKey? {
         guard let priv = privateKey(for: userId) else { return nil }
+        return publicRecord(of: priv, userId: userId)
+    }
+
+    static func publicRecord(of priv: P256.KeyAgreement.PrivateKey, userId: String) -> DevicePublicKey {
         let x963 = priv.publicKey.x963Representation
         return DevicePublicKey(userId: userId, kid: kid(forX963: x963),
                                publicX963: x963.base64EncodedString())
+    }
+
+    /// Rebuild the essay key from the password. Slow on purpose (~0.3 s), so
+    /// call it off the main thread. Same password + same user = same key.
+    static func deriveKey(password: String, userId: String) -> P256.KeyAgreement.PrivateKey? {
+        let pw = Array(password.utf8)
+        let salt = Array("weft-essay-key/v1|\(userId.lowercased())".utf8)
+        var seed = [UInt8](repeating: 0, count: 32)
+        let rc = CCKeyDerivationPBKDF(CCPBKDFAlgorithm(kCCPBKDF2),
+                                      password, pw.count,
+                                      salt, salt.count,
+                                      CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                                      pbkdf2Rounds, &seed, seed.count)
+        guard rc == kCCSuccess else { return nil }
+        // Turn the seed into a valid P-256 scalar. Almost always the first
+        // try works; the counter covers the ~2^-32 chance it doesn't.
+        let ikm = SymmetricKey(data: seed)
+        for counter in 0..<16 {
+            let raw = HKDF<SHA256>.deriveKey(inputKeyMaterial: ikm,
+                                             info: Data("weft-essay-key/p256/\(counter)".utf8),
+                                             outputByteCount: 32)
+            let bytes = raw.withUnsafeBytes { Data($0) }
+            if let key = try? P256.KeyAgreement.PrivateKey(rawRepresentation: bytes) { return key }
+        }
+        return nil
+    }
+
+    /// Keep the key on this Mac (keychain, this device only, never iCloud).
+    @discardableResult
+    static func saveKey(_ key: P256.KeyAgreement.PrivateKey, userId: String) -> Bool {
+        forgetKey(userId: userId)
+        let add: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: userId,
+            kSecValueData as String: key.rawRepresentation,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        ]
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+    }
+
+    /// Drop this Mac's copy of the key (and any pre-password key).
+    static func forgetKey(userId: String) {
+        for service in [keychainService, oldKeychainService] {
+            let q: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: userId,
+                kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+            ]
+            SecItemDelete(q as CFDictionary)
+        }
     }
 
     static func localRecipient(userId: String) -> P256.KeyAgreement.PublicKey? {
@@ -197,8 +265,7 @@ enum WeftContentSeal {
         return String(data: data, encoding: .utf8)
     }
 
-    /// Seal to the given (already trusted) teacher keys plus this Mac's own
-    /// key. No teacher key, no envelope: the caller must not send anything.
+    /// Seal to the given teacher keys plus the writer's own essay key. No teacher key, no envelope: the caller must not send anything.
     static func sealHTML(_ html: String, userId: String,
                          teacherKeys: [DevicePublicKey], aad: String) -> WeftEnvelope? {
         var pubs = publicKeys(from: teacherKeys.filter(isGenuine))
@@ -213,8 +280,8 @@ enum WeftContentSeal {
     }
 
     /// True when the key id really is SHA-256 of the key and the key is a
-    /// valid P-256 point. Pins and lock codes are over ids, so an id that
-    /// doesn't match its key must never be used.
+    /// valid P-256 point. Wraps are matched by id, so an id that doesn't
+    /// match its key must never be used.
     static func isGenuine(_ device: DevicePublicKey) -> Bool {
         guard let data = Data(base64Encoded: device.publicX963),
               (try? P256.KeyAgreement.PublicKey(x963Representation: data)) != nil
@@ -254,19 +321,11 @@ enum WeftContentSeal {
     }
 
     private static func privateKey(for userId: String) -> P256.KeyAgreement.PrivateKey? {
-        if let existing = readKey(account: userId) { return existing }
-        let created = P256.KeyAgreement.PrivateKey()
-        guard storeKey(created, account: userId) else { return nil }
-        return created
-    }
-
-    private static func readKey(account: String) -> P256.KeyAgreement.PrivateKey? {
+        guard !userId.isEmpty else { return nil }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: account,
-            // Find the key whether it was stored iCloud-synced or this-device.
-            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+            kSecAttrAccount as String: userId,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
@@ -276,27 +335,5 @@ enum WeftContentSeal {
               let key = try? P256.KeyAgreement.PrivateKey(rawRepresentation: data)
         else { return nil }
         return key
-    }
-
-    /// Prefer iCloud Keychain so a second Mac can grade; fall back to this device.
-    @discardableResult
-    private static func storeKey(_ key: P256.KeyAgreement.PrivateKey, account: String) -> Bool {
-        let data = key.rawRepresentation
-        if addKey(data, account: account, sync: true) { return true }
-        return addKey(data, account: account, sync: false)
-    }
-
-    private static func addKey(_ data: Data, account: String, sync: Bool) -> Bool {
-        var add: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
-        ]
-        if sync { add[kSecAttrSynchronizable as String] = kCFBooleanTrue }
-        let status = SecItemAdd(add as CFDictionary, nil)
-        if status == errSecDuplicateItem { return readKey(account: account) != nil }
-        return status == errSecSuccess
     }
 }

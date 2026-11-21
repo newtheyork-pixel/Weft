@@ -335,36 +335,15 @@ struct StudentChecksView: View {
 }
 
 extension StudentChecksView {
-    /// Who the essay is locked to. A changed code waits for the student to
-    /// check it with the teacher; the old keys still work meanwhile.
+    /// One quiet line once the essay can be locked to the teacher.
     @ViewBuilder var lockStatus: some View {
-        switch app.examLockState {
-        case .ready(let code):
+        if app.examCanSeal {
             HStack(spacing: Theme.Space.xs) {
                 Image(systemName: "lock.fill").font(.system(size: 11))
-                Text("Your essay is locked so only you and your teacher can read it. Lock code \(code)")
+                Text("Your essay is locked so only you and your teacher can read it.")
                     .font(Theme.sans(12))
             }
             .foregroundStyle(Theme.muted)
-        case .changed(let newCode, _):
-            VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                HStack(alignment: .top, spacing: Theme.Space.sm) {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warn)
-                    Text("Your teacher's lock code changed to \(newCode). Ask your teacher to read their code from Weft. You can begin once you tap below, and only tap if it matches.")
-                        .font(Theme.sans(12.5))
-                        .foregroundStyle(Theme.inkSoft)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Button("The codes match") {
-                    app.errorMessage = nil
-                    app.confirmChangedTeacherLock(code: newCode)
-                }
-                .buttonStyle(.bordered)
-            }
-            .padding(Theme.Space.md)
-            .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
-        default:
-            EmptyView()
         }
     }
 }

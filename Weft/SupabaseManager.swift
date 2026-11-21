@@ -770,6 +770,7 @@ final class SupabaseManager: @unchecked Sendable {
         ])
     }
 
+    /// One essay key per person: this replaces any earlier one.
     func upsertDeviceKey(userId: String, kid: String, publicX963: String) async throws {
         struct Payload: Encodable {
             let user_id: String
@@ -778,22 +779,7 @@ final class SupabaseManager: @unchecked Sendable {
         }
         let _: [DevicePublicKey] = try await upsert("user_device_keys",
             values: Payload(user_id: userId, kid: kid, public_x963: publicX963),
-            onConflict: "user_id,kid")
-    }
-
-    /// The kid is base64, and a raw "+" in a query string reads as a space
-    /// on the server, so the filter is percent-encoded by hand.
-    func deleteDeviceKey(userId: String, kid: String) async throws {
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
-        let encKid = kid.addingPercentEncoding(withAllowedCharacters: allowed) ?? kid
-        var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("rest/v1/user_device_keys"),
-                                  resolvingAgainstBaseURL: false)!
-        comps.percentEncodedQuery = "user_id=eq.\(userId)&kid=eq.\(encKid)"
-        var req = URLRequest(url: comps.url!)
-        req.httpMethod = "DELETE"
-        for (k, v) in await headers(contentJSON: false) { req.setValue(v, forHTTPHeaderField: k) }
-        _ = try await perform(req)
+            onConflict: "user_id")
     }
 
     func listGrades(submissionIds: [String]) async throws -> [EssayGrade] {

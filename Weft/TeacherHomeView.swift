@@ -32,7 +32,6 @@ struct TeacherHomeView: View {
                         if app.teacherClasses.isEmpty { classesEmpty } else { classCards }
                         newClassButton
                         libraryCard
-                        lockCard
                     } else {
                         classDetail
                     }
@@ -95,41 +94,6 @@ struct TeacherHomeView: View {
     }
 
     // MARK: Level 1: your classes + the Library
-
-    /// Essays are sealed to the keys on this account. The code lets students
-    /// check they are sealing to this teacher; any key this Mac did not add
-    /// is listed so a key slipped in on the server cannot go unnoticed.
-    @ViewBuilder private var lockCard: some View {
-        if let code = app.myLockCode {
-            VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                HStack(spacing: 6) {
-                    Image(systemName: "lock.fill")
-                    Text("Essays locked to you. Lock code")
-                    Text(code)
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-                .font(Theme.sans(12))
-                .foregroundStyle(Theme.muted)
-                .help("Only you and the student can read an essay. If a student's Mac says your code changed, read them this code.")
-                ForEach(app.myOtherDeviceKeys, id: \.kid) { key in
-                    HStack(alignment: .top, spacing: Theme.Space.sm) {
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warn)
-                        Text("Another key can open your students' essays\(key.createdAt.map { " (added \($0.prefix(10)))" } ?? ""). Keep it only if it's your other Mac.")
-                            .font(Theme.sans(12))
-                            .foregroundStyle(Theme.inkSoft)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 0)
-                        Button("Remove") { Task { await app.removeDeviceKey(kid: key.kid) } }
-                            .buttonStyle(.bordered)
-                    }
-                    .padding(Theme.Space.sm)
-                    .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .center)
-        }
-    }
 
     private var introHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
