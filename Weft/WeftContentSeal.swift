@@ -5,8 +5,8 @@
 //  WeftCrypto package: P256-HKDF-SHA256-AES256GCM. The private key lives in
 //  iCloud Keychain when the Mac syncs, this-device otherwise.
 //
-//  If the teacher has not published a key yet, autosave stays plaintext so a
-//  class is never locked out of grading.
+//  Essays are never sent unsealed: with no trusted teacher key the exam
+//  does not start (see TeacherKeyPins / AppState.loadExamRecipientKeys).
 //
 
 import Foundation
@@ -47,11 +47,15 @@ struct DevicePublicKey: Codable, Hashable, Sendable {
     var userId: String?
     var kid: String
     var publicX963: String
+    /// When the key was published (shown to a teacher for a key they did
+    /// not add). Server-stamped text, displayed as-is.
+    var createdAt: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case userId = "user_id"
         case kid
         case publicX963 = "public_x963"
+        case createdAt = "created_at"
     }
 }
 
@@ -153,19 +157,29 @@ enum WeftContentSeal {
                                 authenticating: Data(env.content.aad.utf8))
     }
 
+    /// Seal to the given (already trusted) teacher keys plus this Mac's own
+    /// key. No teacher key, no envelope: the caller must not send anything.
     static func sealHTML(_ html: String, userId: String,
-                         published: [DevicePublicKey], aad: String) -> WeftEnvelope? {
-        let teacherKeys = published.filter { $0.userId != nil && $0.userId != userId }
-        guard !teacherKeys.isEmpty, let data = html.data(using: .utf8) else { return nil }
-        var pubs = publicKeys(from: published)
+                         teacherKeys: [DevicePublicKey], aad: String) -> WeftEnvelope? {
+        var pubs = publicKeys(from: teacherKeys.filter(isGenuine))
+        guard !pubs.isEmpty, let data = html.data(using: .utf8) else { return nil }
         if let selfKey = localRecipient(userId: userId) {
             let raw = selfKey.x963Representation
             if !pubs.contains(where: { $0.x963Representation == raw }) {
                 pubs.append(selfKey)
             }
         }
-        guard !pubs.isEmpty else { return nil }
         return try? seal(plaintext: data, aad: aad, recipients: pubs)
+    }
+
+    /// True when the key id really is SHA-256 of the key and the key is a
+    /// valid P-256 point. Pins and lock codes are over ids, so an id that
+    /// doesn't match its key must never be used.
+    static func isGenuine(_ device: DevicePublicKey) -> Bool {
+        guard let data = Data(base64Encoded: device.publicX963),
+              (try? P256.KeyAgreement.PublicKey(x963Representation: data)) != nil
+        else { return false }
+        return kid(forX963: data) == device.kid
     }
 
     static func publicKeys(from devices: [DevicePublicKey]) -> [P256.KeyAgreement.PublicKey] {
@@ -211,6 +225,8 @@ enum WeftContentSeal {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: account,
+            // Find the key whether it was stored iCloud-synced or this-device.
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]

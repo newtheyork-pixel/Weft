@@ -759,7 +759,7 @@ final class SupabaseManager: @unchecked Sendable {
         let ids = userIds.filter { !$0.isEmpty }
         guard !ids.isEmpty else { return [] }
         return try await rows("user_device_keys", query: [
-            URLQueryItem(name: "select", value: "user_id,kid,public_x963"),
+            URLQueryItem(name: "select", value: "user_id,kid,public_x963,created_at"),
             URLQueryItem(name: "user_id", value: "in.(\(ids.joined(separator: ",")))"),
         ])
     }
@@ -773,6 +773,21 @@ final class SupabaseManager: @unchecked Sendable {
         let _: [DevicePublicKey] = try await upsert("user_device_keys",
             values: Payload(user_id: userId, kid: kid, public_x963: publicX963),
             onConflict: "user_id,kid")
+    }
+
+    /// The kid is base64, and a raw "+" in a query string reads as a space
+    /// on the server, so the filter is percent-encoded by hand.
+    func deleteDeviceKey(userId: String, kid: String) async throws {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        let encKid = kid.addingPercentEncoding(withAllowedCharacters: allowed) ?? kid
+        var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("rest/v1/user_device_keys"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.percentEncodedQuery = "user_id=eq.\(userId)&kid=eq.\(encKid)"
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "DELETE"
+        for (k, v) in await headers(contentJSON: false) { req.setValue(v, forHTTPHeaderField: k) }
+        _ = try await perform(req)
     }
 
     func listGrades(submissionIds: [String]) async throws -> [EssayGrade] {
@@ -1137,40 +1152,20 @@ final class SupabaseManager: @unchecked Sendable {
     /// the row id for the submit lock. updated_at is client-stamped: the table
     /// has no server now() trigger (Electron does the same).
     ///
-    /// `cipher` is the sealed envelope when the teacher has published a device
-    /// key. The HTML sent alongside is empty in that case so the server does
-    /// not hold the writing. If the ciphertext column is not deployed yet the
-    /// write falls back to plaintext so the hour is never lost.
+    /// Only the sealed envelope is sent. content_html is always empty, and the
+    /// database refuses anything else, so the server never holds the writing.
     func upsertEssaySubmission(sessionId: String, studentId: String, questionId: String,
-                               contentHTML: String, wordCount: Int,
-                               cipher: WeftEnvelope? = nil) async throws -> String? {
-        struct Plain: Encodable {
-            let session_id: String; let student_id: String; let question_id: String
-            let content_html: String; let word_count: Int; let updated_at: String
-        }
+                               wordCount: Int, cipher: WeftEnvelope) async throws -> String? {
         struct Sealed: Encodable {
             let session_id: String; let student_id: String; let question_id: String
             let content_html: String; let content_cipher: WeftEnvelope
             let word_count: Int; let updated_at: String
         }
-        let stamped = Self.nowISO()
-        if let cipher {
-            do {
-                let rows: [StudentRowID] = try await upsert("essay_submissions",
-                    values: Sealed(session_id: sessionId, student_id: studentId,
-                                   question_id: questionId, content_html: "",
-                                   content_cipher: cipher, word_count: wordCount,
-                                   updated_at: stamped),
-                    onConflict: "session_id,student_id,question_id")
-                return rows.first?.id
-            } catch {
-                // Column missing or RLS: keep the writing as plaintext.
-            }
-        }
         let rows: [StudentRowID] = try await upsert("essay_submissions",
-            values: Plain(session_id: sessionId, student_id: studentId,
-                          question_id: questionId, content_html: contentHTML,
-                          word_count: wordCount, updated_at: stamped),
+            values: Sealed(session_id: sessionId, student_id: studentId,
+                           question_id: questionId, content_html: "",
+                           content_cipher: cipher, word_count: wordCount,
+                           updated_at: Self.nowISO()),
             onConflict: "session_id,student_id,question_id")
         return rows.first?.id
     }
