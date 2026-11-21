@@ -32,6 +32,7 @@ struct TeacherHomeView: View {
                         if app.teacherClasses.isEmpty { classesEmpty } else { classCards }
                         newClassButton
                         libraryCard
+                        lockCard
                     } else {
                         classDetail
                     }
@@ -94,6 +95,47 @@ struct TeacherHomeView: View {
     }
 
     // MARK: Level 1: your classes + the Library
+
+    /// Essays are sealed to the keys on this account. The code lets students
+    /// check they are sealing to this teacher; any key this Mac did not add
+    /// is listed so a key slipped in on the server cannot go unnoticed.
+    @ViewBuilder private var lockCard: some View {
+        if let code = app.myLockCode {
+            VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                HStack(spacing: Theme.Space.sm) {
+                    Image(systemName: "lock.fill").foregroundStyle(Theme.accent)
+                    Text("Your lock code")
+                        .font(Theme.sans(13, .semibold))
+                        .foregroundStyle(Theme.ink)
+                    Spacer()
+                    Text(code)
+                        .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.ink)
+                        .textSelection(.enabled)
+                }
+                Text("Student essays are locked so only you and the student can read them. Show this code at a class's first exam so students can check it. If you use a new Mac, students will be asked to check it again.")
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(app.myOtherDeviceKeys, id: \.kid) { key in
+                    HStack(alignment: .top, spacing: Theme.Space.sm) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warn)
+                        Text("Another key can open your students' essays\(key.createdAt.map { " (added \($0.prefix(10)))" } ?? ""). Keep it only if it's your other Mac.")
+                            .font(Theme.sans(12))
+                            .foregroundStyle(Theme.inkSoft)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                        Button("Remove") { Task { await app.removeDeviceKey(kid: key.kid) } }
+                            .buttonStyle(.bordered)
+                    }
+                    .padding(Theme.Space.sm)
+                    .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                }
+            }
+            .padding(Theme.Space.lg)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+        }
+    }
 
     private var introHeader: some View {
         VStack(alignment: .leading, spacing: 6) {

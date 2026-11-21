@@ -239,8 +239,25 @@ final class AppState {
     var gradingOutlines: [OutlineUpload] = []
     /// Margin comments for the session being graded, keyed by submission id.
     var gradingComments: [String: [EssayComment]] = [:]
-    /// Published device keys to wrap this exam's essay to (teacher + self).
+    /// Device keys to wrap this exam's essay to: the teacher's PINNED keys
+    /// plus this student's own. Never a key the server added after pinning.
     var examRecipientKeys: [DevicePublicKey] = []
+    /// Whether this exam can be sealed, and the teacher's lock code.
+    var examLockState: ExamLockState?
+    /// Teacher id + the keys the server listed for this exam (for confirming
+    /// a changed lock code).
+    private var examTeacherId: String?
+    private var examListedTeacherKeys: [DevicePublicKey] = []
+    /// The server holds a sealed draft this Mac cannot open (written on
+    /// another Mac). Begin stops until the student chooses to start a new
+    /// copy, so the first autosave can't silently replace work the teacher
+    /// could still read.
+    var examUnreadableDraft = false
+    private var allowFreshOverUnreadable = false
+    /// Teacher side: this Mac's lock code, and keys on the account that this
+    /// Mac did not publish (another Mac, or a key someone else added).
+    var myLockCode: String?
+    var myOtherDeviceKeys: [DevicePublicKey] = []
     /// Transient status for the roster "Invite students" action.
     var inviteStatus: String?
     // School-approved websites (from the published Google Sheet), for the editor.
@@ -370,6 +387,9 @@ final class AppState {
         gradingSubmissions = []; grades = [:]
         gradingComments = [:]
         examRecipientKeys = []
+        examLockState = nil; examTeacherId = nil; examListedTeacherKeys = []
+        examUnreadableDraft = false; allowFreshOverUnreadable = false
+        myLockCode = nil; myOtherDeviceKeys = []
         teacherClasses = [.sample, .sample2]
         assignments = [.sample, .sample2]
         roster = RosterStudent.sample
@@ -405,6 +425,9 @@ final class AppState {
         essayPulse = [:]
         liveExamOffer = nil
         examRecipientKeys = []
+        examLockState = nil; examTeacherId = nil; examListedTeacherKeys = []
+        examUnreadableDraft = false; allowFreshOverUnreadable = false
+        myLockCode = nil; myOtherDeviceKeys = []
         gradingComments = [:]
         teacherClasses = []
         assignments = []
@@ -834,11 +857,28 @@ final class AppState {
         homePollTask = nil
     }
 
-    /// Publish this Mac's agreement public key. Best-effort: a missing table
-    /// (migration not applied) just means essays stay plaintext.
+    /// Publish this Mac's agreement public key, then list every key on the
+    /// account so a teacher sees their lock code and any key they did not add.
     func publishDeviceKey() async {
-        guard signedIn, let pub = WeftContentSeal.publishableKey(userId: userId) else { return }
-        try? await supabase.upsertDeviceKey(userId: userId, kid: pub.kid, publicX963: pub.publicX963)
+        let me = userId
+        guard signedIn, let pub = WeftContentSeal.publishableKey(userId: me) else { return }
+        try? await supabase.upsertDeviceKey(userId: me, kid: pub.kid, publicX963: pub.publicX963)
+        guard let listed = try? await supabase.listDeviceKeys(userIds: [me]),
+              signedIn, userId == me else { return }
+        let mine = listed.filter(WeftContentSeal.isGenuine)
+        myLockCode = TeacherKeyPins.lockCode(kids: Set(mine.map(\.kid)))
+        myOtherDeviceKeys = mine.filter { $0.kid != pub.kid }
+    }
+
+    /// Teacher: delete a key on the account that this Mac did not publish.
+    func removeDeviceKey(kid: String) async {
+        guard signedIn else { return }
+        do {
+            try await supabase.deleteDeviceKey(userId: userId, kid: kid)
+        } catch {
+            errorMessage = describe(error)
+        }
+        await publishDeviceKey()
     }
 
     /// Reveal sealed HTML when content_html is empty. Unreadable ciphertext
@@ -889,6 +929,15 @@ final class AppState {
             returnedWork = items.map { item in
                 var copy = item
                 copy.contentHtml = revealHTML(item.contentHtml, cipher: item.contentCipher)
+                if let essay = item.contentCipher {
+                    let aad = WeftContentSeal.quoteAAD(submissionId: item.submissionId)
+                    for i in copy.comments.indices {
+                        guard (copy.comments[i].quote ?? "").isEmpty,
+                              let qc = copy.comments[i].quoteCipher else { continue }
+                        copy.comments[i].quote = WeftContentSeal.openText(
+                            qc, underEssay: essay, userId: userId, aad: aad)
+                    }
+                }
                 return copy
             }
         } catch {
@@ -1623,8 +1672,18 @@ final class AppState {
             }
             gradingRoster = ros
             gradingOutlines = outlines
+            let cipherBySub = Dictionary(subs.compactMap { s in s.contentCipher.map { (s.id, $0) } },
+                                         uniquingKeysWith: { a, _ in a })
             var bySub: [String: [EssayComment]] = [:]
-            for c in comments { bySub[c.submissionId ?? "", default: []].append(c) }
+            for var c in comments {
+                let sid = c.submissionId ?? ""
+                if c.quote.isEmpty, let qc = c.quoteCipher, let essay = cipherBySub[sid] {
+                    c.quote = WeftContentSeal.openText(
+                        qc, underEssay: essay, userId: userId,
+                        aad: WeftContentSeal.quoteAAD(submissionId: sid)) ?? ""
+                }
+                bySub[sid, default: []].append(c)
+            }
             gradingComments = bySub
             grades = Dictionary(uniqueKeysWithValues: g.map { ($0.submissionId, $0) })
             gradesFresh = true   // grades cache now reflects the DB for THIS session
@@ -1712,11 +1771,24 @@ final class AppState {
               let sessionId = submission.sessionId ?? gradingSession?.id,
               let studentId = submission.studentId
         else { return false }
+        // The quote is the student's own words, so it is sealed with the
+        // essay's key (teacher + student only). No key, no comment: a readable
+        // quote is never sent.
+        guard let essay = submission.contentCipher,
+              let sealed = WeftContentSeal.sealText(
+                q, underEssay: essay, userId: userId,
+                aad: WeftContentSeal.quoteAAD(submissionId: submission.id))
+        else {
+            errorMessage = "This essay is locked to another Mac, so a quote can't be locked to it here."
+            return false
+        }
         do {
-            guard let row = try await supabase.createEssayComment(
+            guard var row = try await supabase.createEssayComment(
                 submissionId: submission.id, sessionId: sessionId,
-                studentId: studentId, quote: q, body: note)
+                studentId: studentId, quoteLength: q.utf16.count,
+                quoteCipher: sealed, body: note)
             else { return false }
+            row.quote = q
             gradingComments[submission.id, default: []].append(row)
             return true
         } catch {
@@ -1757,6 +1829,12 @@ final class AppState {
         markedWriting = false
         examDraftHTML = nil
         examMaterialsFailed = false
+        examLockState = nil
+        examRecipientKeys = []
+        examTeacherId = nil
+        examListedTeacherKeys = []
+        examUnreadableDraft = false
+        allowFreshOverUnreadable = false
         examResolveCode = item.activeCode
         if signedIn, let code = item.activeCode {
             Task {
@@ -1830,6 +1908,9 @@ final class AppState {
                 errorMessage = "Couldn't load this assignment's prompt. Go back and try again."
                 return nil
             }
+            // Lock state first: exposing the session enables Begin, and Begin
+            // must never run on a previous exam's keys.
+            await loadExamRecipientKeys(classId: session.classId)
             activeAssignment = test
             activeExamSession = session
             outlineAllowedBySession[session.id] = test.outlineAllowed
@@ -1837,7 +1918,6 @@ final class AppState {
                let mine = try? await supabase.getMyOutline(sessionId: session.id, userId: userId) {
                 myOutlines[session.id] = mine
             }
-            await loadExamRecipientKeys(classId: session.classId)
             return test
         } catch {
             errorMessage = describe(error)
@@ -1845,17 +1925,82 @@ final class AppState {
         }
     }
 
-    /// Teacher (and self) device keys to wrap this exam to. Empty teacher
-    /// keys means autosave stays plaintext so grading still works.
+    /// Work out who this exam's essay is sealed to. Essays are never sent
+    /// unsealed, so with no usable teacher key the exam cannot start. State
+    /// is assigned only at the end, so a reload never blanks the keys of an
+    /// exam that is already running.
     private func loadExamRecipientKeys(classId: String?) async {
-        examRecipientKeys = []
-        var ids = [userId]
-        if let cid = classId,
-           let tid = enrolledClasses.first(where: { $0.id == cid })?.teacherUserId,
-           !tid.isEmpty {
-            ids.append(tid)
+        guard let cid = classId,
+              let tid = enrolledClasses.first(where: { $0.id == cid })?.teacherUserId,
+              !tid.isEmpty else {
+            examRecipientKeys = []; examTeacherId = nil; examListedTeacherKeys = []
+            examLockState = .unknownTeacher
+            return
         }
-        examRecipientKeys = (try? await supabase.listDeviceKeys(userIds: ids)) ?? []
+        let me = userId
+        guard let listed = try? await supabase.listDeviceKeys(userIds: [tid]) else {
+            // Network: keep whatever was there; Begin reports it.
+            if examTeacherId != tid { examLockState = nil; examRecipientKeys = [] }
+            return
+        }
+        // Signed out or switched account while waiting: don't pin for them.
+        guard signedIn, userId == me else { return }
+        // Only keys whose id really is the hash of the key. Otherwise the
+        // server could show a pinned id next to a key of its own.
+        let teacherKeys = listed.filter { $0.userId == tid && WeftContentSeal.isGenuine($0) }
+        examTeacherId = tid
+        examListedTeacherKeys = teacherKeys
+        guard !teacherKeys.isEmpty else {
+            examRecipientKeys = []
+            examLockState = .noTeacherKey
+            return
+        }
+        let listedKids = Set(teacherKeys.map(\.kid))
+        var pins = TeacherKeyPins.pinned(studentId: userId, teacherId: tid)
+        if pins.isEmpty || listedKids.isStrictSubset(of: pins) {
+            // First sight, or the teacher removed a key: pin exactly what is
+            // listed, so a removed key can't be slipped back in later.
+            pins = listedKids
+            TeacherKeyPins.pin(pins, studentId: userId, teacherId: tid)
+        }
+        let trusted = teacherKeys.filter { pins.contains($0.kid) }
+        // Only the teacher's pinned keys. This Mac's own key is added by
+        // sealHTML; keys the server lists under the student's id are never
+        // used, since nobody could notice one being added.
+        examRecipientKeys = trusted
+        if listedKids.isSubset(of: pins) {
+            examLockState = .ready(code: TeacherKeyPins.lockCode(kids: Set(trusted.map(\.kid))))
+        } else {
+            examLockState = .changed(newCode: TeacherKeyPins.lockCode(kids: listedKids),
+                                     stillReady: !trusted.isEmpty)
+        }
+    }
+
+    /// The student read the teacher's code off the board and it matches the
+    /// new code: trust the keys the server now lists for this teacher.
+    func confirmChangedTeacherLock(code: String) {
+        guard let tid = examTeacherId, !examListedTeacherKeys.isEmpty else { return }
+        let kids = Set(examListedTeacherKeys.map(\.kid))
+        // Only the set whose code the student actually compared.
+        guard TeacherKeyPins.lockCode(kids: kids) == code else { return }
+        TeacherKeyPins.pin(kids, studentId: userId, teacherId: tid)
+        examRecipientKeys = examListedTeacherKeys
+        examLockState = .ready(code: TeacherKeyPins.lockCode(kids: kids))
+    }
+
+    /// The student chose to start a new copy over a draft this Mac can't open.
+    func startFreshOverUnreadableDraft() {
+        allowFreshOverUnreadable = true
+        examUnreadableDraft = false
+        errorMessage = nil
+    }
+
+    /// True when the essay can be sealed to the teacher's current keys. A
+    /// changed code blocks Begin until confirmed: sealing only to an old key
+    /// (say, the teacher's previous Mac) could leave essays nobody can grade.
+    var examCanSeal: Bool {
+        if case .ready = examLockState { return true }
+        return false
     }
 
     /// Begin button on the checks screen: register the students row (the
@@ -1866,6 +2011,20 @@ final class AppState {
         guard signedIn else { enterExam(); return true }   // preview path
         guard let session = activeExamSession else {
             errorMessage = "Couldn't reach this assignment's session. Go back and try again."
+            return false
+        }
+        await loadExamRecipientKeys(classId: session.classId)
+        guard examCanSeal else {
+            switch examLockState {
+            case .noTeacherKey:
+                errorMessage = "Your teacher needs to open Weft on their Mac once before this exam can start. Ask them, then try again."
+            case .changed:
+                errorMessage = "Your teacher's lock code changed. Check the new code with your teacher before you begin."
+            case .unknownTeacher:
+                errorMessage = "This exam isn't linked to a class, so your work can't be locked to your teacher."
+            default:
+                errorMessage = "Couldn't check your teacher's lock. Check your connection and try again."
+            }
             return false
         }
         do {
@@ -1918,6 +2077,15 @@ final class AppState {
             case let (local?, remote?):
                 let revealed = revealHTML(remote.html, cipher: remote.cipher)
                 let remoteAt = remote.updatedAt ?? .distantPast
+                if revealed.isEmpty, remote.cipher != nil, remoteAt > local.updatedAt,
+                   !allowFreshOverUnreadable {
+                    // A newer copy written on another Mac that this Mac can't
+                    // open: don't let the older local copy overwrite it.
+                    examUnreadableDraft = true
+                    errorMessage = "Newer work for this exam was saved on another Mac and can't open here. Go back to that Mac if you can. Continuing here replaces it with the older copy on this Mac."
+                    activeStudentId = nil
+                    return false
+                }
                 if local.updatedAt >= remoteAt || revealed.isEmpty {
                     examDraftHTML = local.html
                 } else {
@@ -1927,9 +2095,20 @@ final class AppState {
                 examDraftHTML = local.html
             case let (nil, remote?):
                 let revealed = revealHTML(remote.html, cipher: remote.cipher)
+                if revealed.isEmpty, remote.cipher != nil, !allowFreshOverUnreadable {
+                    examUnreadableDraft = true
+                    errorMessage = "Your saved work for this exam is locked to the Mac you wrote it on, so it can't open here. Go back to that Mac if you can. Starting a new copy here replaces it."
+                    activeStudentId = nil
+                    return false
+                }
                 examDraftHTML = revealed.isEmpty ? nil : revealed
             case (nil, nil):
                 examDraftHTML = nil
+            }
+            guard examCanSeal, !examRecipientKeys.isEmpty else {
+                activeStudentId = nil
+                errorMessage = "Couldn't check your teacher's lock. Check your connection and try again."
+                return false
             }
             examDeadline = Self.deadline(from: start,
                                          minutes: activeAssignment?.timeLimitMinutes)
@@ -1963,36 +2142,54 @@ final class AppState {
     /// on this Mac (and on the server when the network answered). A wifi blip
     /// must not look like data loss.
     func autosaveEssay(html: String, wordCount: Int) async -> Bool {
-        guard signedIn else { return true }   // preview: nothing to persist
+        let result = await saveEssay(html: html, wordCount: wordCount)
+        return result.local || result.uploaded
+    }
+
+    /// Save locally, then upload the sealed copy. `uploaded` is true only when
+    /// the server accepted THIS text, which is what submit must require.
+    private func saveEssay(html: String, wordCount: Int) async -> (local: Bool, uploaded: Bool) {
+        guard signedIn else { return (true, true) }   // preview: nothing to persist
         guard let session = activeExamSession,
               let studentId = activeStudentId,
-              let questionId = activeAssignment?.questions.first?.id else { return false }
+              let questionId = activeAssignment?.questions.first?.id else { return (false, false) }
         let localOK = ExamDraftStore.save(userId: userId, sessionId: session.id,
                                           html: html, wordCount: wordCount)
-        let cipher = WeftContentSeal.sealHTML(
-            html, userId: userId, published: examRecipientKeys,
-            aad: WeftContentSeal.aad(sessionId: session.id,
-                                    studentId: studentId,
-                                    questionId: questionId))
+        let aad = WeftContentSeal.aad(sessionId: session.id, studentId: studentId,
+                                      questionId: questionId)
+        // Sealed or not sent: the server never receives the writing in the
+        // clear. If sealing fails, reload the teacher's keys once and retry.
+        var cipher = WeftContentSeal.sealHTML(html, userId: userId,
+                                              teacherKeys: examRecipientKeys, aad: aad)
+        if cipher == nil {
+            await loadExamRecipientKeys(classId: session.classId)
+            if examCanSeal {
+                cipher = WeftContentSeal.sealHTML(html, userId: userId,
+                                                  teacherKeys: examRecipientKeys, aad: aad)
+            }
+        }
+        guard let cipher else { return (localOK, false) }
         do {
             guard let id = try await supabase.upsertEssaySubmission(
                 sessionId: session.id, studentId: studentId, questionId: questionId,
-                contentHTML: html, wordCount: wordCount, cipher: cipher) else {
-                return localOK
+                wordCount: wordCount, cipher: cipher) else {
+                return (localOK, false)
             }
             activeSubmissionId = id
-            return true
+            return (localOK, true)
         } catch {
-            return localOK
+            return (localOK, false)
         }
     }
 
-    /// Final flush + DB lock + status. False = the flush failed and the
-    /// caller must NOT exit the exam (the work would be lost). Does NOT
-    /// route; the exam view orchestrates kiosk exit + finishExam on success.
+    /// Final flush + DB lock + status. False = the final text did not reach
+    /// the server, so the caller must NOT exit the exam (the work would be
+    /// lost, or an older copy would be locked in). Does NOT route; the exam
+    /// view orchestrates kiosk exit + finishExam on success.
     func submitExam(html: String, wordCount: Int) async -> Bool {
         if signedIn {
-            guard await autosaveEssay(html: html, wordCount: wordCount) else { return false }
+            let saved = await saveEssay(html: html, wordCount: wordCount)
+            guard saved.uploaded else { return false }
             guard let submissionId = activeSubmissionId else { return false }
             guard await supabase.submitEssay(submissionId: submissionId) else { return false }
             if let studentId = activeStudentId {
@@ -2007,6 +2204,7 @@ final class AppState {
         activeExamSession = nil
         examDeadline = nil
         markedWriting = false
+        allowFreshOverUnreadable = false
         return true
     }
 

@@ -298,6 +298,8 @@ struct StudentChecksView: View {
             .animation(.easeOut(duration: 0.2), value: beginBusy)
             .animation(.easeOut(duration: 0.2), value: sessionPending)
 
+            lockStatus
+
             if let error = app.errorMessage {
                 HStack(alignment: .top, spacing: Theme.Space.sm) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -312,6 +314,9 @@ struct StudentChecksView: View {
                             Task { await app.retryResolveActiveExam() }
                         }
                         .buttonStyle(.bordered)
+                    } else if app.examUnreadableDraft {
+                        Button("Start a new copy") { app.startFreshOverUnreadableDraft() }
+                            .buttonStyle(.bordered)
                     }
                 }
                 .padding(Theme.Space.md)
@@ -326,6 +331,41 @@ struct StudentChecksView: View {
                 .linkPointer()
         }
         .padding(.top, Theme.Space.xs)
+    }
+}
+
+extension StudentChecksView {
+    /// Who the essay is locked to. A changed code waits for the student to
+    /// check it with the teacher; the old keys still work meanwhile.
+    @ViewBuilder var lockStatus: some View {
+        switch app.examLockState {
+        case .ready(let code):
+            HStack(spacing: Theme.Space.xs) {
+                Image(systemName: "lock.fill").font(.system(size: 11))
+                Text("Your essay is locked so only you and your teacher can read it. Lock code \(code)")
+                    .font(Theme.sans(12))
+            }
+            .foregroundStyle(Theme.muted)
+        case .changed(let newCode, _):
+            VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                HStack(alignment: .top, spacing: Theme.Space.sm) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warn)
+                    Text("Your teacher's lock code changed to \(newCode). Ask your teacher to read their code from Weft. You can begin once you tap below, and only tap if it matches.")
+                        .font(Theme.sans(12.5))
+                        .foregroundStyle(Theme.inkSoft)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Button("The codes match") {
+                    app.errorMessage = nil
+                    app.confirmChangedTeacherLock(code: newCode)
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(Theme.Space.md)
+            .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+        default:
+            EmptyView()
+        }
     }
 }
 

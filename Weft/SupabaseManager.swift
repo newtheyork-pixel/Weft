@@ -28,8 +28,10 @@ import AppKit
 // MARK: - Configuration (mirrors renderer/supabase-config.js)
 
 enum SupabaseConfig {
-    static let url = URL(string: "https://elrrvicxsguqstqciodn.supabase.co")!
-    static let anonKey = "sb_publishable_pTH5Q3s2o2CbCdDb7aXuvw_HsGZedAs"
+    /// Self-hosted on the Weft NAS behind a Cloudflare Tunnel (since 0.3.8).
+    static let url = URL(string: "https://weft-api.optimizegrade.com")!
+    /// Public anon key (role "anon"); safe to ship, RLS does the gating.
+    static let anonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzk1MjIxMDQ1LCJleHAiOjE5NTI5MDEwNDV9.hLrX_x9xTApsJ66CkSlzApbMhIhddn-DQaoMCkYUQYI"
 
     /// Custom URL scheme the auth callback arrives on. Deliberately NOT `weft`:
     /// the Electron app also registers `weft://`, so a shared scheme lets macOS
@@ -732,26 +734,30 @@ final class SupabaseManager: @unchecked Sendable {
     func listEssayComments(sessionId: String) async throws -> [EssayComment] {
         try await rows("essay_comments", query: [
             URLQueryItem(name: "select",
-                         value: "id,submission_id,session_id,student_id,range_start,range_end,quote,body,visibility"),
+                         value: "id,submission_id,session_id,student_id,range_start,range_end,quote,quote_cipher,body,visibility"),
             URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
             URLQueryItem(name: "order", value: "created_at.asc"),
         ])
     }
 
     @discardableResult
+    /// The quote is sent only sealed (`quoteCipher`); `quoteLength` keeps the
+    /// range columns meaningful without the text.
     func createEssayComment(submissionId: String, sessionId: String, studentId: String,
-                            quote: String, body: String) async throws -> EssayComment? {
+                            quoteLength: Int, quoteCipher: WeftSealedText,
+                            body: String) async throws -> EssayComment? {
         struct Payload: Encodable {
             let submission_id: String; let session_id: String; let student_id: String
             let range_start: Int; let range_end: Int
-            let quote: String; let body: String; let visibility: String
+            let quote: String; let quote_cipher: WeftSealedText
+            let body: String; let visibility: String
         }
-        let utf = quote.utf16.count
-        let end = max(utf, 1)
+        let end = max(quoteLength, 1)
         let rows: [EssayComment] = try await insert("essay_comments",
             values: Payload(submission_id: submissionId, session_id: sessionId,
                             student_id: studentId, range_start: 0, range_end: end,
-                            quote: quote, body: body, visibility: "shared"))
+                            quote: "", quote_cipher: quoteCipher,
+                            body: body, visibility: "shared"))
         return rows.first
     }
 
@@ -759,7 +765,7 @@ final class SupabaseManager: @unchecked Sendable {
         let ids = userIds.filter { !$0.isEmpty }
         guard !ids.isEmpty else { return [] }
         return try await rows("user_device_keys", query: [
-            URLQueryItem(name: "select", value: "user_id,kid,public_x963"),
+            URLQueryItem(name: "select", value: "user_id,kid,public_x963,created_at"),
             URLQueryItem(name: "user_id", value: "in.(\(ids.joined(separator: ",")))"),
         ])
     }
@@ -773,6 +779,21 @@ final class SupabaseManager: @unchecked Sendable {
         let _: [DevicePublicKey] = try await upsert("user_device_keys",
             values: Payload(user_id: userId, kid: kid, public_x963: publicX963),
             onConflict: "user_id,kid")
+    }
+
+    /// The kid is base64, and a raw "+" in a query string reads as a space
+    /// on the server, so the filter is percent-encoded by hand.
+    func deleteDeviceKey(userId: String, kid: String) async throws {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        let encKid = kid.addingPercentEncoding(withAllowedCharacters: allowed) ?? kid
+        var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("rest/v1/user_device_keys"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.percentEncodedQuery = "user_id=eq.\(userId)&kid=eq.\(encKid)"
+        var req = URLRequest(url: comps.url!)
+        req.httpMethod = "DELETE"
+        for (k, v) in await headers(contentJSON: false) { req.setValue(v, forHTTPHeaderField: k) }
+        _ = try await perform(req)
     }
 
     func listGrades(submissionIds: [String]) async throws -> [EssayGrade] {
@@ -1137,40 +1158,20 @@ final class SupabaseManager: @unchecked Sendable {
     /// the row id for the submit lock. updated_at is client-stamped: the table
     /// has no server now() trigger (Electron does the same).
     ///
-    /// `cipher` is the sealed envelope when the teacher has published a device
-    /// key. The HTML sent alongside is empty in that case so the server does
-    /// not hold the writing. If the ciphertext column is not deployed yet the
-    /// write falls back to plaintext so the hour is never lost.
+    /// Only the sealed envelope is sent. content_html is always empty, and the
+    /// database refuses anything else, so the server never holds the writing.
     func upsertEssaySubmission(sessionId: String, studentId: String, questionId: String,
-                               contentHTML: String, wordCount: Int,
-                               cipher: WeftEnvelope? = nil) async throws -> String? {
-        struct Plain: Encodable {
-            let session_id: String; let student_id: String; let question_id: String
-            let content_html: String; let word_count: Int; let updated_at: String
-        }
+                               wordCount: Int, cipher: WeftEnvelope) async throws -> String? {
         struct Sealed: Encodable {
             let session_id: String; let student_id: String; let question_id: String
             let content_html: String; let content_cipher: WeftEnvelope
             let word_count: Int; let updated_at: String
         }
-        let stamped = Self.nowISO()
-        if let cipher {
-            do {
-                let rows: [StudentRowID] = try await upsert("essay_submissions",
-                    values: Sealed(session_id: sessionId, student_id: studentId,
-                                   question_id: questionId, content_html: "",
-                                   content_cipher: cipher, word_count: wordCount,
-                                   updated_at: stamped),
-                    onConflict: "session_id,student_id,question_id")
-                return rows.first?.id
-            } catch {
-                // Column missing or RLS: keep the writing as plaintext.
-            }
-        }
         let rows: [StudentRowID] = try await upsert("essay_submissions",
-            values: Plain(session_id: sessionId, student_id: studentId,
-                          question_id: questionId, content_html: contentHTML,
-                          word_count: wordCount, updated_at: stamped),
+            values: Sealed(session_id: sessionId, student_id: studentId,
+                           question_id: questionId, content_html: "",
+                           content_cipher: cipher, word_count: wordCount,
+                           updated_at: Self.nowISO()),
             onConflict: "session_id,student_id,question_id")
         return rows.first?.id
     }
@@ -1759,6 +1760,7 @@ struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
     var rangeStart: Int?
     var rangeEnd: Int?
     var quote: String?
+    var quoteCipher: WeftSealedText?
     var body: String
     var visibility: String?
     var createdAt: Date?
@@ -1769,6 +1771,7 @@ struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
         case rangeStart = "range_start"
         case rangeEnd = "range_end"
         case quote
+        case quoteCipher = "quote_cipher"
         case body
         case visibility
         case createdAt = "created_at"
@@ -1781,6 +1784,7 @@ struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
         rangeStart = try? c.decode(Int.self, forKey: .rangeStart)
         rangeEnd = try? c.decode(Int.self, forKey: .rangeEnd)
         quote = try? c.decode(String.self, forKey: .quote)
+        quoteCipher = try? c.decode(WeftSealedText.self, forKey: .quoteCipher)
         body = (try? c.decode(String.self, forKey: .body)) ?? ""
         visibility = try? c.decode(String.self, forKey: .visibility)
         createdAt = try? c.decode(Date.self, forKey: .createdAt)
