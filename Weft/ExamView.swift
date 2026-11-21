@@ -459,41 +459,49 @@ struct ExamView: View {
         }
     }
 
+    /// Two-line clock: time left (ticking, fixed-width digits) over the real
+    /// end time. Hiding it hides only the countdown; the end time stays, so
+    /// students still know when the exam ends without watching seconds.
     @ViewBuilder private var countdown: some View {
         if let deadline {
             TimelineView(.periodic(from: countdownAnchor, by: 1)) { context in
                 let remaining = max(0, Int(deadline.timeIntervalSince(context.date)))
                 let soon = remaining < Self.timerReturnsAt
+                let hidden = hideTimer && !soon
+                let tint = soon ? Theme.warn : hidden ? Theme.muted : Theme.accent
                 Button {
                     // In the last five minutes the clock always shows.
                     if !soon { hideTimer.toggle() }
                 } label: {
-                    if hideTimer && !soon {
-                        Label("Show time", systemImage: "eye")
-                            .font(Theme.sans(13, .semibold))
-                            .foregroundStyle(Theme.muted)
-                            .padding(.horizontal, 12).padding(.vertical, 6)
-                            .background(Theme.muted.opacity(0.10), in: Capsule())
-                    } else {
-                        Label {
-                            Text(String(format: "%d:%02d", remaining / 60, remaining % 60))
-                                .font(.system(size: 15, weight: .semibold, design: .monospaced))
-                                .monospacedDigit()
-                        } icon: {
-                            Image(systemName: "clock")
+                    VStack(alignment: .leading, spacing: 1) {
+                        if hidden {
+                            Label("Show time", systemImage: "eye")
+                                .font(Theme.sans(13, .semibold))
+                        } else {
+                            Label {
+                                Text(ExamClock.leftText(remaining: remaining))
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .monospacedDigit()
+                            } icon: {
+                                Image(systemName: "clock")
+                            }
                         }
-                        .foregroundStyle(soon ? Theme.warn : Theme.accent)
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background((soon ? Theme.warn : Theme.accent).opacity(0.10), in: Capsule())
+                        Text(ExamClock.endsText(deadline: deadline))
+                            .font(Theme.sans(11.5))
+                            .foregroundStyle(soon ? Theme.warn : Theme.muted)
+                            .padding(.leading, 22)
                     }
+                    .foregroundStyle(tint)
+                    .fixedSize()
+                    .padding(.horizontal, 12).padding(.vertical, 5)
+                    .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .help(soon ? "Time remaining"
-                      : hideTimer ? "Show the time. It also comes back by itself for the last 5 minutes."
-                                  : "Hide the time. It comes back by itself for the last 5 minutes.")
-                .accessibilityLabel(hideTimer && !soon ? "Time hidden. Show time" : "Time remaining")
-                .accessibilityValue(hideTimer && !soon ? "" : "\(remaining / 60) minutes, \(remaining % 60) seconds")
-                .accessibilityAddTraits(.updatesFrequently)
+                      : hidden ? "Show the time left. It also comes back by itself for the last 5 minutes."
+                               : "Hide the time left. It comes back by itself for the last 5 minutes.")
+                .accessibilityLabel(ExamClock.spokenText(remaining: remaining, deadline: deadline,
+                                                         hidden: hidden))
             }
         }
     }
