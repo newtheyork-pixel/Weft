@@ -642,9 +642,12 @@ struct EssayComment: Identifiable, Codable, Hashable, Sendable {
     var studentId: String?
     var rangeStart: Int
     var rangeEnd: Int
+    /// Readable only on this Mac after opening `quoteCipher`; the server
+    /// always holds "".
     var quote: String
     var body: String
     var visibility: String?
+    var quoteCipher: WeftSealedText?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -654,6 +657,7 @@ struct EssayComment: Identifiable, Codable, Hashable, Sendable {
         case rangeStart = "range_start"
         case rangeEnd = "range_end"
         case quote, body, visibility
+        case quoteCipher = "quote_cipher"
     }
 }
 

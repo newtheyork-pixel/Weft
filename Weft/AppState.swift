@@ -927,6 +927,15 @@ final class AppState {
             returnedWork = items.map { item in
                 var copy = item
                 copy.contentHtml = revealHTML(item.contentHtml, cipher: item.contentCipher)
+                if let essay = item.contentCipher {
+                    let aad = WeftContentSeal.quoteAAD(submissionId: item.submissionId)
+                    for i in copy.comments.indices {
+                        guard (copy.comments[i].quote ?? "").isEmpty,
+                              let qc = copy.comments[i].quoteCipher else { continue }
+                        copy.comments[i].quote = WeftContentSeal.openText(
+                            qc, underEssay: essay, userId: userId, aad: aad)
+                    }
+                }
                 return copy
             }
         } catch {
@@ -1661,8 +1670,18 @@ final class AppState {
             }
             gradingRoster = ros
             gradingOutlines = outlines
+            let cipherBySub = Dictionary(subs.compactMap { s in s.contentCipher.map { (s.id, $0) } },
+                                         uniquingKeysWith: { a, _ in a })
             var bySub: [String: [EssayComment]] = [:]
-            for c in comments { bySub[c.submissionId ?? "", default: []].append(c) }
+            for var c in comments {
+                let sid = c.submissionId ?? ""
+                if c.quote.isEmpty, let qc = c.quoteCipher, let essay = cipherBySub[sid] {
+                    c.quote = WeftContentSeal.openText(
+                        qc, underEssay: essay, userId: userId,
+                        aad: WeftContentSeal.quoteAAD(submissionId: sid)) ?? ""
+                }
+                bySub[sid, default: []].append(c)
+            }
             gradingComments = bySub
             grades = Dictionary(uniqueKeysWithValues: g.map { ($0.submissionId, $0) })
             gradesFresh = true   // grades cache now reflects the DB for THIS session
@@ -1750,11 +1769,24 @@ final class AppState {
               let sessionId = submission.sessionId ?? gradingSession?.id,
               let studentId = submission.studentId
         else { return false }
+        // The quote is the student's own words, so it is sealed with the
+        // essay's key (teacher + student only). No key, no comment: a readable
+        // quote is never sent.
+        guard let essay = submission.contentCipher,
+              let sealed = WeftContentSeal.sealText(
+                q, underEssay: essay, userId: userId,
+                aad: WeftContentSeal.quoteAAD(submissionId: submission.id))
+        else {
+            errorMessage = "This essay is locked to another Mac, so a quote can't be locked to it here."
+            return false
+        }
         do {
-            guard let row = try await supabase.createEssayComment(
+            guard var row = try await supabase.createEssayComment(
                 submissionId: submission.id, sessionId: sessionId,
-                studentId: studentId, quote: q, body: note)
+                studentId: studentId, quoteLength: q.utf16.count,
+                quoteCipher: sealed, body: note)
             else { return false }
+            row.quote = q
             gradingComments[submission.id, default: []].append(row)
             return true
         } catch {

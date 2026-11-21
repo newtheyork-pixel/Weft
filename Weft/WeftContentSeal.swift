@@ -28,6 +28,13 @@ struct WeftEnvelopeContent: Codable, Hashable, Sendable {
     var ct: String
 }
 
+/// Short text (a comment quote) sealed with an essay's content key.
+struct WeftSealedText: Codable, Hashable, Sendable {
+    var v: Int
+    var nonce: String
+    var ct: String
+}
+
 struct WeftEnvelopeWrap: Codable, Hashable, Sendable {
     var recipientKid: String
     var ephPub: String
@@ -123,7 +130,8 @@ enum WeftContentSeal {
         return WeftEnvelope(v: envelopeVersion, suite: suite, content: content, wraps: wraps)
     }
 
-    static func open(envelope env: WeftEnvelope, userId: String) throws -> Data {
+    /// Unwrap this Mac's copy of the envelope's content key.
+    static func openDEK(envelope env: WeftEnvelope, userId: String) throws -> SymmetricKey {
         guard let privateKey = privateKey(for: userId) else { throw SealError.noDeviceKey }
         let recipPubRaw = privateKey.publicKey.x963Representation
         let myKid = kid(forX963: recipPubRaw)
@@ -143,8 +151,11 @@ enum WeftContentSeal {
         let wtag = wrapped.suffix(16)
         let wsb = try AES.GCM.SealedBox(nonce: try AES.GCM.Nonce(data: wNonce),
                                         ciphertext: wct, tag: wtag)
-        let dek = try AES.GCM.open(wsb, using: kek, authenticating: wrapAAD)
+        return SymmetricKey(data: try AES.GCM.open(wsb, using: kek, authenticating: wrapAAD))
+    }
 
+    static func open(envelope env: WeftEnvelope, userId: String) throws -> Data {
+        let dek = try openDEK(envelope: env, userId: userId)
         guard let cNonce = Data(base64Encoded: env.content.nonce),
               let cBytes = Data(base64Encoded: env.content.ct),
               cBytes.count >= 16
@@ -153,8 +164,37 @@ enum WeftContentSeal {
         let ctag = cBytes.suffix(16)
         let csb = try AES.GCM.SealedBox(nonce: try AES.GCM.Nonce(data: cNonce),
                                         ciphertext: cct, tag: ctag)
-        return try AES.GCM.open(csb, using: SymmetricKey(data: dek),
-                                authenticating: Data(env.content.aad.utf8))
+        return try AES.GCM.open(csb, using: dek, authenticating: Data(env.content.aad.utf8))
+    }
+
+    // MARK: Text sealed under an essay's content key (comment quotes)
+
+    /// AAD binding a sealed quote to its essay, so it can't be moved to another.
+    static func quoteAAD(submissionId: String) -> String { "comment-quote|\(submissionId)|v1" }
+
+    /// Seal short text with the content key of an essay this Mac can open.
+    /// Whoever can open the essay (teacher, student) can open this; nobody else.
+    static func sealText(_ text: String, underEssay env: WeftEnvelope, userId: String,
+                         aad: String) -> WeftSealedText? {
+        guard let dek = try? openDEK(envelope: env, userId: userId),
+              let box = try? AES.GCM.seal(Data(text.utf8), using: dek, nonce: AES.GCM.Nonce(),
+                                          authenticating: Data(aad.utf8))
+        else { return nil }
+        return WeftSealedText(v: 1, nonce: Data(box.nonce).base64EncodedString(),
+                              ct: (box.ciphertext + box.tag).base64EncodedString())
+    }
+
+    static func openText(_ sealed: WeftSealedText, underEssay env: WeftEnvelope,
+                         userId: String, aad: String) -> String? {
+        guard let dek = try? openDEK(envelope: env, userId: userId),
+              let nonce = Data(base64Encoded: sealed.nonce),
+              let bytes = Data(base64Encoded: sealed.ct), bytes.count >= 16,
+              let box = try? AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: nonce),
+                                               ciphertext: bytes.prefix(bytes.count - 16),
+                                               tag: bytes.suffix(16)),
+              let data = try? AES.GCM.open(box, using: dek, authenticating: Data(aad.utf8))
+        else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// Seal to the given (already trusted) teacher keys plus this Mac's own

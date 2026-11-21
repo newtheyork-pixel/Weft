@@ -734,26 +734,30 @@ final class SupabaseManager: @unchecked Sendable {
     func listEssayComments(sessionId: String) async throws -> [EssayComment] {
         try await rows("essay_comments", query: [
             URLQueryItem(name: "select",
-                         value: "id,submission_id,session_id,student_id,range_start,range_end,quote,body,visibility"),
+                         value: "id,submission_id,session_id,student_id,range_start,range_end,quote,quote_cipher,body,visibility"),
             URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
             URLQueryItem(name: "order", value: "created_at.asc"),
         ])
     }
 
     @discardableResult
+    /// The quote is sent only sealed (`quoteCipher`); `quoteLength` keeps the
+    /// range columns meaningful without the text.
     func createEssayComment(submissionId: String, sessionId: String, studentId: String,
-                            quote: String, body: String) async throws -> EssayComment? {
+                            quoteLength: Int, quoteCipher: WeftSealedText,
+                            body: String) async throws -> EssayComment? {
         struct Payload: Encodable {
             let submission_id: String; let session_id: String; let student_id: String
             let range_start: Int; let range_end: Int
-            let quote: String; let body: String; let visibility: String
+            let quote: String; let quote_cipher: WeftSealedText
+            let body: String; let visibility: String
         }
-        let utf = quote.utf16.count
-        let end = max(utf, 1)
+        let end = max(quoteLength, 1)
         let rows: [EssayComment] = try await insert("essay_comments",
             values: Payload(submission_id: submissionId, session_id: sessionId,
                             student_id: studentId, range_start: 0, range_end: end,
-                            quote: quote, body: body, visibility: "shared"))
+                            quote: "", quote_cipher: quoteCipher,
+                            body: body, visibility: "shared"))
         return rows.first
     }
 
@@ -1756,6 +1760,7 @@ struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
     var rangeStart: Int?
     var rangeEnd: Int?
     var quote: String?
+    var quoteCipher: WeftSealedText?
     var body: String
     var visibility: String?
     var createdAt: Date?
@@ -1766,6 +1771,7 @@ struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
         case rangeStart = "range_start"
         case rangeEnd = "range_end"
         case quote
+        case quoteCipher = "quote_cipher"
         case body
         case visibility
         case createdAt = "created_at"
@@ -1778,6 +1784,7 @@ struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
         rangeStart = try? c.decode(Int.self, forKey: .rangeStart)
         rangeEnd = try? c.decode(Int.self, forKey: .rangeEnd)
         quote = try? c.decode(String.self, forKey: .quote)
+        quoteCipher = try? c.decode(WeftSealedText.self, forKey: .quoteCipher)
         body = (try? c.decode(String.self, forKey: .body)) ?? ""
         visibility = try? c.decode(String.self, forKey: .visibility)
         createdAt = try? c.decode(Date.self, forKey: .createdAt)
