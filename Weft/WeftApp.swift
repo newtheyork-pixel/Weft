@@ -90,13 +90,25 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            switch app.route {
-            case .signIn:  SignInView()
-            case .teacher: TeacherFlowView()
-            case .student: StudentFlowView()
+            if needsEssayPassword {
+                EssayPasswordView()
+            } else {
+                switch app.route {
+                case .signIn:  SignInView()
+                case .teacher: TeacherFlowView()
+                case .student: StudentFlowView()
+                }
             }
         }
         .animation(.smooth(duration: 0.28), value: app.route)
+        .animation(.smooth(duration: 0.28), value: needsEssayPassword)
+    }
+
+    /// Signed in but this Mac doesn't hold the essay key yet. Never shown
+    /// over a running exam.
+    private var needsEssayPassword: Bool {
+        guard app.signedIn, !ExamGate.inProgress, app.route != .signIn || app.role != nil else { return false }
+        return app.essayKeyState == .needsSetup || app.essayKeyState == .needsUnlock
     }
 }
 
