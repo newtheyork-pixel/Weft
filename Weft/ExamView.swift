@@ -93,6 +93,8 @@ struct ExamView: View {
     @State private var showBreath = false
     /// Seconds left at which a hidden clock shows itself again.
     private static let timerReturnsAt = 300
+    /// Narrowest the writing column may get (see body).
+    private static let editorMinWidth: CGFloat = 720
 
     private var assignment: Assignment { app.activeAssignment ?? .sample }
     private var prompt: String {
@@ -102,8 +104,11 @@ struct ExamView: View {
 
     var body: some View {
         HSplitView {
+            // Wide enough for the formatting bar, word count and clock: any
+            // narrower and the column's content overflows past the window
+            // edges (Back and Submit were clipped, "Body" wrapped).
             editorColumn
-                .frame(minWidth: 380)
+                .frame(minWidth: Self.editorMinWidth)
             if referencesVisible {
                 ExamReferencePanel(
                     files: app.examReferenceFiles,
@@ -509,6 +514,7 @@ struct ExamView: View {
     private var toolbarRow: some View {
         HStack(spacing: Theme.Space.md) {
             RichTextToolbar(controller: controller)
+                .fixedSize()
             Spacer()
             wordCountView
             Button {
