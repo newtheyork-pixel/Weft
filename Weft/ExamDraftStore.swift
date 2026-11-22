@@ -60,8 +60,28 @@ nonisolated enum ExamDraftStore {
     }
 
     static func remove(userId: String, sessionId: String) {
+        UserDefaults.standard.removeObject(forKey: uploadedKey(userId: userId, sessionId: sessionId))
         guard let url = try? fileURL(userId: userId, sessionId: sessionId) else { return }
         try? FileManager.default.removeItem(at: url)
+    }
+
+    // MARK: - Last upload from this Mac
+
+    // The server copy is sealed to the teacher only, so this Mac can't read
+    // it back. Remembering the nonce of the last copy it uploaded tells "the
+    // same work I already have" apart from "newer work from another Mac".
+    // The nonce is random and says nothing about the essay.
+
+    static func rememberUploaded(nonce: String, userId: String, sessionId: String) {
+        UserDefaults.standard.set(nonce, forKey: uploadedKey(userId: userId, sessionId: sessionId))
+    }
+
+    static func lastUploadedNonce(userId: String, sessionId: String) -> String? {
+        UserDefaults.standard.string(forKey: uploadedKey(userId: userId, sessionId: sessionId))
+    }
+
+    private static func uploadedKey(userId: String, sessionId: String) -> String {
+        "weft.lastUploadedNonce.\(userId).\(sessionId)"
     }
 
     // MARK: - Disk

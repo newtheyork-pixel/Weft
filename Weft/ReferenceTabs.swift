@@ -61,6 +61,8 @@ enum ReferenceDocument: @unchecked Sendable {
     /// A file type the exam panel cannot show at all. No retry is offered,
     /// because none could ever succeed.
     case unsupported
+    /// A sealed file (the outline) this Mac's essay key can't open. No retry.
+    case unreadable
     /// The download failed. Try again is worth having.
     case failed
 
