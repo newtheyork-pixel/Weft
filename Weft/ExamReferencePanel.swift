@@ -432,13 +432,13 @@ struct ExamReferencePanel: View {
 
 // MARK: - Equatable: keystrokes must not rebuild the panel
 
-// ExamView.body is invalidated on every keystroke (the autosave label), which
-// re-created this whole subtree: the tab strip, the canvas geometry and an
-// updateNSView on every mounted document and web view. The panel depends only
-// on its materials and its store, so comparing those lets SwiftUI skip the
-// rebuild entirely (see the .equatable() at the call site). onHide and
-// onInsertQuote are excluded deliberately: they only close over the caller's
-// @State / controller, whose storage is stable.
+// The save label and the word count used to be read in ExamView.body, so a
+// keystroke rebuilt this whole subtree: the tab strip, the canvas geometry
+// and an updateNSView on every mounted document and web view. Those reads
+// moved into their own views. Equatable stays so any other ExamView refresh
+// (blackout, breath, expiry) still skips the panel. onHide and onInsertQuote
+// are excluded deliberately: they only close over the caller's @State /
+// controller, whose storage is stable.
 extension ExamReferencePanel: Equatable {
     static func == (a: ExamReferencePanel, b: ExamReferencePanel) -> Bool {
         a.store === b.store

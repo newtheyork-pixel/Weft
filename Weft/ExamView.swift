@@ -155,7 +155,8 @@ struct ExamView: View {
             Button("Submit exam", role: .destructive) { submit() }
             Button("Keep writing", role: .cancel) { }
         } message: {
-            Text("You wrote \(wordCount) word\(wordCount == 1 ? "" : "s"). Once you submit, the exam ends and monitoring stops. You can't keep writing after this.")
+            // Own view so the live count does not track on ExamView.body.
+            SubmitCountMessage(controller: controller)
         }
         .onWindow { window in
             guard lockdown, let window, examWindow !== window else { return }
@@ -323,10 +324,9 @@ struct ExamView: View {
         guard !submitting else { return }
         submitting = true
         Task {
-            controller.recountWords()
-            let html = await controller.htmlSnapshotOffMain()
-            guard await app.submitExam(html: html,
-                                       wordCount: controller.wordCount) else {
+            let snap = await controller.htmlAndWordCountOffMain()
+            guard await app.submitExam(html: snap.html,
+                                       wordCount: snap.wordCount) else {
                 submitting = false
                 runtime.saveState = .failed
                 // Past the hard deadline nothing else would ever fire (the
@@ -516,7 +516,12 @@ struct ExamView: View {
             RichTextToolbar(controller: controller)
                 .fixedSize()
             Spacer()
-            wordCountView
+            // Own view: a word-count publish must not rebuild this column.
+            WordCountLabel(controller: controller, limit: wordLimit) { newCount in
+                if overLimitMessage != nil, newCount <= (wordLimit ?? Int.max) {
+                    overLimitMessage = nil
+                }
+            }
             Button {
                 toggleReferences()
             } label: {
@@ -530,29 +535,6 @@ struct ExamView: View {
         }
         .padding(.horizontal, Theme.Space.xl)
         .padding(.vertical, Theme.Space.sm)
-    }
-
-    private var wordCountView: some View {
-        Group {
-            if let limit = wordLimit {
-                let over = wordCount > limit
-                Text("\(wordCount) / \(limit) words")
-                    .foregroundStyle(over ? Theme.warn : Theme.muted)
-            } else {
-                Text("\(wordCount) words")
-                    .foregroundStyle(Theme.muted)
-            }
-        }
-        .font(.system(size: 12, weight: .medium, design: .rounded))
-        .monospacedDigit()
-        .help("Word count")
-        .accessibilityLabel("Word count")
-        .accessibilityValue({
-            if let limit = wordLimit {
-                return "\(wordCount) of \(limit) words"
-            }
-            return "\(wordCount) words"
-        }())
     }
 
     private var footerBar: some View {
@@ -585,7 +567,8 @@ struct ExamView: View {
                 .disabled(lockdown && submitting)
                 .linkPointer()
                 Spacer()
-                saveStateView
+                // Own view: flipping "Saving…" must not rebuild the editor.
+                SaveLabel(runtime: runtime)
                 Spacer()
                 Button("Submit") { requestSubmit() }
                     .buttonStyle(.glassProminent).tint(Theme.accent)
@@ -596,35 +579,13 @@ struct ExamView: View {
             .padding(Theme.Space.xl)
         }
         .animation(.easeOut(duration: 0.18), value: overLimitMessage)
-        .onChange(of: wordCount) { _, newCount in
-            // Auto-clear the over-limit message once the student has shortened
-            // their essay to at or below the limit so it doesn't linger.
-            if overLimitMessage != nil, newCount <= (wordLimit ?? Int.max) {
-                overLimitMessage = nil
-            }
-        }
-    }
-
-    private var saveStateView: some View {
-        HStack(spacing: 6) {
-            if runtime.saveState == .saving {
-                ProgressView().controlSize(.small).scaleEffect(0.7)
-                Text("Saving…")
-            } else if runtime.saveState == .failed {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warn)
-                Text("Save failed, retrying…")
-            } else {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.good)
-                Text("All saved")
-            }
-        }
-        .font(Theme.sans(12.5))
-        .foregroundStyle(Theme.muted)
     }
 
     // MARK: Autosave
     /// Debounce (0.8s) then persist. A failed save retries every 4s until a
     /// newer edit reschedules it (Electron parity); the label tells the truth.
+    /// The "Saving…" flip is observed only by `SaveLabel`, so this write does
+    /// not rebuild the text view.
     private func scheduleSave() {
         guard draftReady || !lockdown else { return }
         if runtime.saveState != .saving { runtime.saveState = .saving }
@@ -639,17 +600,18 @@ struct ExamView: View {
     }
 
     private func persistNow(generation: Int) async {
-        controller.recountWords()
-        let html = await controller.htmlSnapshotOffMain()
+        // Count and HTML run off the main actor. The copy still happens here,
+        // on the pause, not on the keystroke.
+        let snap = await controller.htmlAndWordCountOffMain()
         guard generation == saveGeneration else { return }
-        if html == lastSavedHTML {
+        if snap.html == lastSavedHTML {
             runtime.saveState = .saved
             return
         }
-        let ok = await app.autosaveEssay(html: html, wordCount: controller.wordCount)
+        let ok = await app.autosaveEssay(html: snap.html, wordCount: snap.wordCount)
         guard generation == saveGeneration else { return }   // a newer edit owns the pipeline
         if ok {
-            lastSavedHTML = html
+            lastSavedHTML = snap.html
             runtime.saveState = .saved
         } else {
             runtime.saveState = .failed
@@ -673,6 +635,73 @@ struct ExamView: View {
         .background(.regularMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(Color.black.opacity(0.08)))
         .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+    }
+}
+
+/// Word count label. Separate view so publishing `controller.wordCount` does
+/// not invalidate `ExamView` (and, through it, the text view).
+private struct WordCountLabel: View {
+    var controller: RichTextController
+    var limit: Int?
+    var onCount: (Int) -> Void
+
+    var body: some View {
+        let count = controller.wordCount
+        Group {
+            if let limit {
+                let over = count > limit
+                Text("\(count) / \(limit) words")
+                    .foregroundStyle(over ? Theme.warn : Theme.muted)
+            } else {
+                Text("\(count) words")
+                    .foregroundStyle(Theme.muted)
+            }
+        }
+        .font(.system(size: 12, weight: .medium, design: .rounded))
+        .monospacedDigit()
+        .help("Word count")
+        .accessibilityLabel("Word count")
+        .accessibilityValue({
+            if let limit {
+                return "\(count) of \(limit) words"
+            }
+            return "\(count) words"
+        }())
+        .onChange(of: count) { _, newCount in onCount(newCount) }
+    }
+}
+
+/// Save-state footer. Separate view so the keystroke that flips "Saving…"
+/// redraws this label and nothing above it.
+private struct SaveLabel: View {
+    var runtime: ExamRuntime
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if runtime.saveState == .saving {
+                ProgressView().controlSize(.small).scaleEffect(0.7)
+                Text("Saving…")
+            } else if runtime.saveState == .failed {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warn)
+                Text("Save failed, retrying…")
+            } else {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.good)
+                Text("All saved")
+            }
+        }
+        .font(Theme.sans(12.5))
+        .foregroundStyle(Theme.muted)
+    }
+}
+
+/// Live word count inside the submit confirmation. Own view so the dialog
+/// text tracking `wordCount` does not land on `ExamView.body`.
+private struct SubmitCountMessage: View {
+    var controller: RichTextController
+
+    var body: some View {
+        let count = controller.wordCount
+        Text("You wrote \(count) word\(count == 1 ? "" : "s"). Once you submit, the exam ends and monitoring stops. You can't keep writing after this.")
     }
 }
 

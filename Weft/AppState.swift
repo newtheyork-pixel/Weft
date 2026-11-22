@@ -2384,24 +2384,38 @@ final class AppState {
         guard let session = activeExamSession,
               let studentId = activeStudentId,
               let questionId = activeAssignment?.questions.first?.id else { return (false, false) }
-        let localOK = ExamDraftStore.save(userId: userId, sessionId: session.id,
-                                          html: html, wordCount: wordCount)
-        let aad = WeftContentSeal.aad(sessionId: session.id, studentId: studentId,
+        let userId = userId
+        let sessionId = session.id
+        let aad = WeftContentSeal.aad(sessionId: sessionId, studentId: studentId,
                                       questionId: questionId)
-        // Sealed or not sent: the server never receives the writing in the
-        // clear. If sealing fails, reload the teacher's keys once and retry.
-        // Teacher only: the student reads it once it is returned (SAT-24).
-        var cipher = WeftContentSeal.sealHTML(html, userId: userId,
-                                              teacherKeys: examRecipientKeys, aad: aad,
-                                              includeSelf: false)
-        if cipher == nil {
+        let teacherKeys = examRecipientKeys
+        // Local AES-GCM plus a P-256 wrap per teacher used to run here, on the
+        // main actor, so the keystroke after a pause waited on them. Both are
+        // safe off the main actor (the enums are nonisolated). Sealed or not
+        // sent: the server never receives the writing in the clear.
+        var sealed = await Task.detached(priority: .utility) {
+            let local = ExamDraftStore.save(userId: userId, sessionId: sessionId,
+                                            html: html, wordCount: wordCount)
+            // Teacher only: the student reads it once it is returned (SAT-24).
+            let cipher = WeftContentSeal.sealHTML(html, userId: userId,
+                                                  teacherKeys: teacherKeys, aad: aad,
+                                                  includeSelf: false)
+            return (local: local, cipher: cipher)
+        }.value
+        if sealed.cipher == nil {
             await loadExamRecipientKeys(classId: session.classId)
             if examCanSeal {
-                cipher = WeftContentSeal.sealHTML(html, userId: userId,
-                                                  teacherKeys: examRecipientKeys, aad: aad,
-                                                  includeSelf: false)
+                let keys = examRecipientKeys
+                let cipher = await Task.detached(priority: .utility) {
+                    WeftContentSeal.sealHTML(html, userId: userId,
+                                            teacherKeys: keys, aad: aad,
+                                            includeSelf: false)
+                }.value
+                sealed = (local: sealed.local, cipher: cipher)
             }
         }
+        let localOK = sealed.local
+        let cipher = sealed.cipher
         guard let cipher else { return (localOK, false) }
         do {
             guard let id = try await supabase.upsertEssaySubmission(

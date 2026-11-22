@@ -130,6 +130,28 @@ enum RichTextHTML {
         return out
     }
 
+    /// Words in `text`. Whitespace-separated, list markers excluded — the same
+    /// rule as the live editor. Safe off the main actor on an immutable copy,
+    /// same as `html(from:)`, so a recount never walks the essay on the caret.
+    nonisolated static func wordCount(in text: NSAttributedString) -> Int {
+        let ns = text.string as NSString
+        var count = 0
+        ns.enumerateSubstrings(
+            in: NSRange(location: 0, length: ns.length),
+            options: [.byParagraphs, .substringNotRequired]
+        ) { _, pRange, _, _ in
+            guard pRange.length > 0 else { return }
+            var paragraph = ns.substring(with: pRange)
+            if let style = text.attribute(.paragraphStyle, at: pRange.location, effectiveRange: nil) as? NSParagraphStyle,
+               !style.textLists.isEmpty,
+               let prefix = markerPrefixLength(of: paragraph) {
+                paragraph = (paragraph as NSString).substring(from: prefix)
+            }
+            count += paragraph.split(whereSeparator: \.isWhitespace).count
+        }
+        return count
+    }
+
     /// UTF-16 length of a leading "\t<marker>\t" run, or nil. (Duplicated from
     /// RichTextController so this file stays dependency-free.)
     private static func markerPrefixLength(of paragraph: String) -> Int? {
