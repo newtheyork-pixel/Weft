@@ -765,20 +765,22 @@ final class SupabaseManager: @unchecked Sendable {
         let ids = userIds.filter { !$0.isEmpty }
         guard !ids.isEmpty else { return [] }
         return try await rows("user_device_keys", query: [
-            URLQueryItem(name: "select", value: "user_id,kid,public_x963,created_at"),
+            URLQueryItem(name: "select", value: "user_id,kid,public_x963,created_at,kind"),
             URLQueryItem(name: "user_id", value: "in.(\(ids.joined(separator: ",")))"),
         ])
     }
 
     /// One essay key per person: this replaces any earlier one.
-    func upsertDeviceKey(userId: String, kid: String, publicX963: String) async throws {
+    func upsertDeviceKey(userId: String, kid: String, publicX963: String,
+                         kind: String = "password") async throws {
         struct Payload: Encodable {
             let user_id: String
             let kid: String
             let public_x963: String
+            let kind: String
         }
         let _: [DevicePublicKey] = try await upsert("user_device_keys",
-            values: Payload(user_id: userId, kid: kid, public_x963: publicX963),
+            values: Payload(user_id: userId, kid: kid, public_x963: publicX963, kind: kind),
             onConflict: "user_id")
     }
 

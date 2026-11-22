@@ -62,12 +62,19 @@ struct DevicePublicKey: Codable, Hashable, Sendable {
     /// When the key was published (shown to a teacher for a key they did
     /// not add). Server-stamped text, displayed as-is.
     var createdAt: String? = nil
+    /// "password" (a teacher's essay password) or "student" (rebuilt by the
+    /// server from its secret, SAT-24). Never seal to a "student" key as a
+    /// teacher: the server could open it.
+    var kind: String? = nil
+
+    var isStudentKind: Bool { kind == "student" }
 
     enum CodingKeys: String, CodingKey {
         case userId = "user_id"
         case kid
         case publicX963 = "public_x963"
         case createdAt = "created_at"
+        case kind
     }
 }
 
@@ -295,7 +302,7 @@ enum WeftContentSeal {
     /// only, so the student (whose key the server can rebuild) can't open it
     /// until it is returned.
     static func sealHTML(_ html: String, userId: String, teacherKeys: [DevicePublicKey],
-                         aad: String, includeSelf: Bool = true) -> WeftEnvelope? {
+                         aad: String, includeSelf: Bool) -> WeftEnvelope? {
         guard let data = html.data(using: .utf8) else { return nil }
         return sealData(data, userId: userId, teacherKeys: teacherKeys, aad: aad,
                         includeSelf: includeSelf)
@@ -315,7 +322,8 @@ enum WeftContentSeal {
     /// A sealed file as stored: the envelope as JSON.
     static func sealedFileBytes(_ data: Data, userId: String,
                                 teacherKeys: [DevicePublicKey], aad: String) -> Data? {
-        guard let env = sealData(data, userId: userId, teacherKeys: teacherKeys, aad: aad)
+        guard let env = sealData(data, userId: userId, teacherKeys: teacherKeys, aad: aad,
+                                 includeSelf: true)
         else { return nil }
         return try? JSONEncoder().encode(env)
     }
@@ -332,8 +340,9 @@ enum WeftContentSeal {
 
     /// Seal bytes to the teacher keys plus the writer's own key.
     static func sealData(_ data: Data, userId: String, teacherKeys: [DevicePublicKey],
-                         aad: String, includeSelf: Bool = true) -> WeftEnvelope? {
-        var pubs = publicKeys(from: teacherKeys.filter(isGenuine))
+                         aad: String, includeSelf: Bool) -> WeftEnvelope? {
+        // A server-rebuildable student key is never a teacher recipient.
+        var pubs = publicKeys(from: teacherKeys.filter { isGenuine($0) && !$0.isStudentKind })
         guard !pubs.isEmpty else { return nil }
         if includeSelf, let selfKey = localRecipient(userId: userId) {
             let raw = selfKey.x963Representation
