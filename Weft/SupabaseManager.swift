@@ -782,6 +782,44 @@ final class SupabaseManager: @unchecked Sendable {
             onConflict: "user_id")
     }
 
+    /// The 32-byte seed the caller's student essay key is rebuilt from
+    /// (SAT-24). Only ever returns the signed-in caller's own seed.
+    func getMyStudentKeySeed() async throws -> Data {
+        let b64: String = try await rpc("get_my_student_key_seed")
+        guard let seed = Data(base64Encoded: b64), seed.count == 32 else {
+            throw SupabaseError.decoding("Bad student key seed")
+        }
+        return seed
+    }
+
+    /// The student's own wraps for returned essays (released grades only, by
+    /// RLS), keyed by submission id.
+    func listMyReturnWraps(submissionIds: [String]) async throws -> [String: WeftEnvelopeWrap] {
+        guard !submissionIds.isEmpty else { return [:] }
+        struct Row: Decodable {
+            let submission_id: String
+            let student_wrap: WeftEnvelopeWrap?
+        }
+        let found: [Row] = try await rows("essay_grades", query: [
+            URLQueryItem(name: "select", value: "submission_id,student_wrap"),
+            URLQueryItem(name: "submission_id", value: "in.(\(submissionIds.joined(separator: ",")))"),
+            URLQueryItem(name: "released_at", value: "not.is.null"),
+        ])
+        var out: [String: WeftEnvelopeWrap] = [:]
+        for r in found { if let w = r.student_wrap { out[r.submission_id] = w } }
+        return out
+    }
+
+    /// The auth user behind a `students` row (teacher side, own sessions).
+    func studentUserId(studentId: String) async throws -> String? {
+        struct Row: Decodable { let user_id: String? }
+        let found: [Row] = try await rows("students", query: [
+            URLQueryItem(name: "select", value: "user_id"),
+            URLQueryItem(name: "id", value: "eq.\(studentId)"),
+        ])
+        return found.first?.user_id ?? nil
+    }
+
     func listGrades(submissionIds: [String]) async throws -> [EssayGrade] {
         guard !submissionIds.isEmpty else { return [] }
         let inList = "in.(" + submissionIds.joined(separator: ",") + ")"
@@ -982,16 +1020,19 @@ final class SupabaseManager: @unchecked Sendable {
     /// value to store (the caller decides whether to keep/clear the share time).
     func upsertGrade(submissionId: String, sessionId: String, studentId: String,
                      points: Double?, pointsPossible: Double, feedback: String,
-                     releasedAt: String?) async throws {
+                     releasedAt: String?, studentWrap: WeftEnvelopeWrap? = nil) async throws {
         struct Payload: Encodable {
             let submission_id: String; let session_id: String; let student_id: String
             let points: Double?; let points_possible: Double
             let feedback: String; let released_at: String?
+            /// Omitted when nil (synthesized encodeIfPresent), so a save
+            /// without a new wrap never erases the one already stored.
+            let student_wrap: WeftEnvelopeWrap?
         }
         let _: [EssayGrade] = try await upsert("essay_grades",
             values: Payload(submission_id: submissionId, session_id: sessionId, student_id: studentId,
                             points: points, points_possible: pointsPossible, feedback: feedback,
-                            released_at: releasedAt),
+                            released_at: releasedAt, student_wrap: studentWrap),
             onConflict: "submission_id", returning: false)
     }
 

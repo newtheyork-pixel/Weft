@@ -650,7 +650,9 @@ final class AppState {
             if essayKeyState != .ready { await checkEssayKey() }
             guard essayKeyState == .ready,
                   WeftContentSeal.localRecipient(userId: userId) != nil else {
-                errorMessage = "Enter your essay password first, then add your outline."
+                errorMessage = accountRole == .student
+                    ? "Couldn't set up your Weft key. Check your connection and try again."
+                    : "Enter your essay password first, then add your outline."
                 return
             }
             guard let teacherKeys = await outlineTeacherKeys(code: item.activeCode) else {
@@ -797,6 +799,16 @@ final class AppState {
         _ = value.withCString { ptr in
             setxattr(url.path, "com.apple.quarantine", ptr, strlen(ptr), 0, 0)
         }
+    }
+
+    /// The student's wrap for a returned essay: this Mac (the teacher's) opens
+    /// the essay key and wraps it for the student's published key.
+    private func returnWrap(envelope env: WeftEnvelope, studentId: String) async -> WeftEnvelopeWrap? {
+        guard let uid = try? await supabase.studentUserId(studentId: studentId),
+              let keys = try? await supabase.listDeviceKeys(userIds: [uid]),
+              let key = keys.first(where: { $0.userId == uid && WeftContentSeal.isGenuine($0) })
+        else { return nil }
+        return WeftContentSeal.extraWrap(for: key, envelope: env, userId: userId)
     }
 
     /// Keys of the teacher of the class this session belongs to (the same
@@ -985,6 +997,7 @@ final class AppState {
     func checkEssayKey() async {
         let me = userId
         guard signedIn, !me.isEmpty else { return }
+        if accountRole == .student { await ensureStudentKey(); return }
         guard let listed = try? await supabase.listDeviceKeys(userIds: [me]) else { return }
         guard signedIn, userId == me else { return }
         let published = listed.first { $0.userId == me && WeftContentSeal.isGenuine($0) }
@@ -1005,6 +1018,30 @@ final class AppState {
             WeftContentSeal.forgetKey(userId: me)
         }
         essayKeyState = published == nil ? .needsSetup : .needsUnlock
+    }
+
+    /// Students have no essay password (SAT-24): their key is rebuilt from a
+    /// seed the server gives only to them, so Google sign-in is enough on any
+    /// Mac. Publishes the public half if the server doesn't have it yet. On a
+    /// network error the state stays unknown (never a password screen).
+    private func ensureStudentKey() async {
+        let me = userId
+        guard let seed = try? await supabase.getMyStudentKeySeed(),
+              let key = WeftContentSeal.studentKey(fromSeed: seed)
+        else { return }
+        guard signedIn, userId == me else { return }
+        let pub = WeftContentSeal.publicRecord(of: key, userId: me)
+        if WeftContentSeal.publishableKey(userId: me)?.kid != pub.kid {
+            guard WeftContentSeal.saveKey(key, userId: me) else { return }
+        }
+        if let listed = try? await supabase.listDeviceKeys(userIds: [me]),
+           !listed.contains(where: { $0.userId == me && $0.kid == pub.kid }) {
+            guard (try? await supabase.upsertDeviceKey(userId: me, kid: pub.kid,
+                                                         publicX963: pub.publicX963)) != nil
+            else { return }
+        }
+        guard signedIn, userId == me else { return }
+        essayKeyState = .ready
     }
 
     /// First time: pick the essay password. nil = done, else the problem.
@@ -1108,6 +1145,17 @@ final class AppState {
                     if items[i].contentCipher == nil {
                         items[i].contentCipher = body.contentCipher
                     }
+                }
+            }
+            // The essay was sealed to the teacher; on return the teacher's
+            // Mac added a wrap for this student's key (SAT-24).
+            if let wraps = try? await supabase.listMyReturnWraps(submissionIds: items.map(\.submissionId)) {
+                for i in items.indices {
+                    guard let w = wraps[items[i].submissionId], var env = items[i].contentCipher,
+                          !env.wraps.contains(where: { $0.recipientKid == w.recipientKid })
+                    else { continue }
+                    env.wraps.append(w)
+                    items[i].contentCipher = env
                 }
             }
             returnedWork = items.map { item in
@@ -1922,10 +1970,22 @@ final class AppState {
         } else {
             releasedAt = existing.map { SupabaseDate.fractional.string(from: $0) }
         }
+        // Returned: let the student open the essay (SAT-24). Best effort: the
+        // grade still saves if the student has no key yet.
+        var studentWrap: WeftEnvelopeWrap?
+        var wrapProblem = false
+        if releasedAt != nil, let env = submission.contentCipher {
+            studentWrap = await returnWrap(envelope: env, studentId: stid)
+            wrapProblem = studentWrap == nil
+        }
         do {
             try await supabase.upsertGrade(submissionId: submission.id, sessionId: sid, studentId: stid,
                                            points: points, pointsPossible: pointsPossible,
-                                           feedback: feedback, releasedAt: releasedAt)
+                                           feedback: feedback, releasedAt: releasedAt,
+                                           studentWrap: studentWrap)
+            if wrapProblem {
+                errorMessage = "Saved. The student can't open the essay itself yet: they need to sign in to Weft once, then share again."
+            }
             let releasedDate: Date? = releasedAt.flatMap { SupabaseDate.fractional.date(from: $0) }
             grades[submission.id] = EssayGrade(submissionId: submission.id, points: points,
                                                pointsPossible: pointsPossible, feedback: feedback,
@@ -2158,7 +2218,9 @@ final class AppState {
             case .ready where essayKeyState == nil:
                 errorMessage = "Couldn't reach Weft to check your essay password. Check your connection and try again."
             case .ready:
-                errorMessage = "Enter your essay password first."
+                errorMessage = accountRole == .student
+                    ? "Couldn't set up your Weft key. Check your connection and try again."
+                    : "Enter your essay password first."
             case .unknownTeacher:
                 errorMessage = "This exam isn't linked to a class, so your work can't be locked to your teacher."
             default:
@@ -2224,7 +2286,7 @@ final class AppState {
                     // A newer copy written on another Mac that this Mac can't
                     // open: don't let the older local copy overwrite it.
                     examUnreadableDraft = true
-                    errorMessage = "Newer work for this exam was saved on another Mac and can't open here. Go back to that Mac if you can. Continuing here replaces it with the older copy on this Mac."
+                    errorMessage = "Newer work for this exam was saved on another Mac. It's locked for your teacher, so it can't open here. Go back to that Mac if you can. Continuing here replaces it with the older copy on this Mac."
                     activeStudentId = nil
                     return false
                 }
@@ -2239,7 +2301,7 @@ final class AppState {
                 let revealed = revealHTML(remote.html, cipher: remote.cipher)
                 if revealed.isEmpty, remote.cipher != nil, !allowFreshOverUnreadable {
                     examUnreadableDraft = true
-                    errorMessage = "Your saved work for this exam is locked to the Mac you wrote it on, so it can't open here. Go back to that Mac if you can. Starting a new copy here replaces it."
+                    errorMessage = "Your saved work for this exam is locked for your teacher, so it can only continue on the Mac you started on. Go back to that Mac if you can. Starting a new copy here replaces it."
                     activeStudentId = nil
                     return false
                 }
@@ -2301,13 +2363,16 @@ final class AppState {
                                       questionId: questionId)
         // Sealed or not sent: the server never receives the writing in the
         // clear. If sealing fails, reload the teacher's keys once and retry.
+        // Teacher only: the student reads it once it is returned (SAT-24).
         var cipher = WeftContentSeal.sealHTML(html, userId: userId,
-                                              teacherKeys: examRecipientKeys, aad: aad)
+                                              teacherKeys: examRecipientKeys, aad: aad,
+                                              includeSelf: false)
         if cipher == nil {
             await loadExamRecipientKeys(classId: session.classId)
             if examCanSeal {
                 cipher = WeftContentSeal.sealHTML(html, userId: userId,
-                                                  teacherKeys: examRecipientKeys, aad: aad)
+                                                  teacherKeys: examRecipientKeys, aad: aad,
+                                                  includeSelf: false)
             }
         }
         guard let cipher else { return (localOK, false) }
@@ -2407,6 +2472,9 @@ final class AppState {
             guard versionGroupId == submittedVersionGroupId else { return }
             if var essay {
                 essay.contentHtml = revealHTML(essay.contentHtml, cipher: essay.contentCipher)
+                if essay.contentHtml.isEmpty, essay.contentCipher != nil {
+                    essay.contentHtml = "<p><em>Your teacher has your essay. You can read it here, or under Returned work, once it's returned.</em></p>"
+                }
                 submittedEssay = essay
             } else {
                 submittedEssayError = "Couldn't find your submitted essay."
