@@ -126,8 +126,18 @@ enum ReferenceDocumentLoader {
             return .failed
         }
 
+        var bytes = data
+        if let uid = file.sealedForUserId, let aad = file.sealedAAD {
+            // A sealed file this Mac can't open won't open on a retry either.
+            // (Runs on the main actor: tens of ms for a 10 MB outline, once per exam.)
+            guard let plain = WeftContentSeal.openSealedFile(data, userId: uid,
+                                                             expectedAAD: aad)
+            else { return .unreadable }
+            bytes = plain
+        }
+        let payload = bytes
         return await Task.detached(priority: .userInitiated) {
-            decode(data: data, file: file)
+            decode(data: payload, file: file)
         }.value
     }
 

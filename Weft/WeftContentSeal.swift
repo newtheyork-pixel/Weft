@@ -268,8 +268,44 @@ enum WeftContentSeal {
     /// Seal to the given teacher keys plus the writer's own essay key. No teacher key, no envelope: the caller must not send anything.
     static func sealHTML(_ html: String, userId: String,
                          teacherKeys: [DevicePublicKey], aad: String) -> WeftEnvelope? {
+        guard let data = html.data(using: .utf8) else { return nil }
+        return sealData(data, userId: userId, teacherKeys: teacherKeys, aad: aad)
+    }
+
+    // MARK: Outline files
+
+    /// Storage names of sealed outlines end with this; the database and the
+    /// bucket refuse any other name.
+    static let sealedFileSuffix = ".weft"
+
+    /// AAD binding a sealed outline to its session and student.
+    static func outlineAAD(sessionId: String, userId: String) -> String {
+        "outline|\(sessionId)|\(userId.lowercased())|v1"
+    }
+
+    /// A sealed file as stored: the envelope as JSON.
+    static func sealedFileBytes(_ data: Data, userId: String,
+                                teacherKeys: [DevicePublicKey], aad: String) -> Data? {
+        guard let env = sealData(data, userId: userId, teacherKeys: teacherKeys, aad: aad)
+        else { return nil }
+        return try? JSONEncoder().encode(env)
+    }
+
+    /// Open stored sealed-file bytes with this Mac's key, or nil if it can't.
+    /// The envelope's AAD must equal `expectedAAD`, so a file can't be swapped
+    /// in from another session or student.
+    static func openSealedFile(_ stored: Data, userId: String, expectedAAD: String) -> Data? {
+        guard let env = try? JSONDecoder().decode(WeftEnvelope.self, from: stored),
+              env.content.aad == expectedAAD
+        else { return nil }
+        return try? open(envelope: env, userId: userId)
+    }
+
+    /// Seal bytes to the teacher keys plus the writer's own key.
+    static func sealData(_ data: Data, userId: String,
+                         teacherKeys: [DevicePublicKey], aad: String) -> WeftEnvelope? {
         var pubs = publicKeys(from: teacherKeys.filter(isGenuine))
-        guard !pubs.isEmpty, let data = html.data(using: .utf8) else { return nil }
+        guard !pubs.isEmpty else { return nil }
         if let selfKey = localRecipient(userId: userId) {
             let raw = selfKey.x963Representation
             if !pubs.contains(where: { $0.x963Representation == raw }) {
