@@ -292,6 +292,10 @@ struct ExamReferencePanel: View {
             messageCard(icon: "doc.questionmark",
                         title: "This file type cannot be shown during the exam.",
                         detail: "\(file.originalName). Ask your teacher for a PDF.")
+        case .unreadable:
+            messageCard(icon: "lock",
+                        title: "Your outline can't be opened on this Mac.",
+                        detail: "\(file.originalName) was locked with a different essay password.")
         case .failed:
             VStack(spacing: Theme.Space.md) {
                 Image(systemName: "exclamationmark.triangle")

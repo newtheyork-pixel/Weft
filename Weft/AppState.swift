@@ -179,7 +179,9 @@ final class AppState {
             mimeType: outline.mimeType,
             storagePath: outline.storagePath,
             bucket: "outlines",
-            isOutline: true)
+            isOutline: true,
+            sealedForUserId: userId,
+            sealedAAD: WeftContentSeal.outlineAAD(sessionId: sid, userId: outline.userId))
         return [outlineFile] + examFiles
     }
 
@@ -328,6 +330,9 @@ final class AppState {
         }
         ExamGate.inProgress = false
         supabase.signOut()
+        // Opened outlines are decrypted copies; don't leave them behind.
+        try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory
+            .appendingPathComponent("weft-outlines", isDirectory: true))
         stopRosterPolling()
         stopStudentHomePolling()
         markedWriting = false
@@ -628,6 +633,9 @@ final class AppState {
         // would leave the teacher's listed row pointing at destroyed bytes
         // whenever the upload is then refused).
         let previousPath = myOutlines[sid]?.storagePath
+        // Set once the sealed bytes are stored; removed again if no row
+        // ends up pointing at them (each upload has a fresh name).
+        var uploadedPath: String?
         do {
             let data: Data
             do {
@@ -637,8 +645,28 @@ final class AppState {
                 return
             }
             let mime = outlineMime(for: fileURL)
-            let path = "\(userId)/\(sid)/\(name)"
-            try await supabase.uploadOutlineFile(data: data, path: path, contentType: mime)
+            // Outlines are sealed like essays: to the teacher and to the
+            // student. No keys, nothing is sent.
+            if essayKeyState != .ready { await checkEssayKey() }
+            guard essayKeyState == .ready,
+                  WeftContentSeal.localRecipient(userId: userId) != nil else {
+                errorMessage = "Enter your essay password first, then add your outline."
+                return
+            }
+            guard let teacherKeys = await outlineTeacherKeys(code: item.activeCode) else {
+                errorMessage = "Couldn't reach Weft to lock your outline. Check your connection and try again."
+                return
+            }
+            guard let sealed = WeftContentSeal.sealedFileBytes(
+                data, userId: userId, teacherKeys: teacherKeys,
+                aad: WeftContentSeal.outlineAAD(sessionId: sid, userId: userId)) else {
+                errorMessage = "Your teacher needs to set their essay password in Weft before you can add an outline."
+                return
+            }
+            let path = "\(userId)/\(sid)/\(UUID().uuidString.lowercased())\(WeftContentSeal.sealedFileSuffix)"
+            try await supabase.uploadOutlineFile(data: sealed, path: path,
+                                                 contentType: "application/octet-stream")
+            uploadedPath = path
             let row = try await supabase.upsertOutline(
                 sessionId: sid, displayName: displayName, originalName: name,
                 mimeType: mime, sizeBytes: data.count, storagePath: path)
@@ -651,6 +679,7 @@ final class AppState {
             // destructive; otherwise treat it as the begin-writing lock, keep
             // the old row/bytes, and skip the old-object cleanup.
             guard let row, row.storagePath == path else {
+                await supabase.removeOutlineObject(path: path)
                 guard signedIn else { return }
                 outlineLockedSessionIds.insert(sid)
                 // Keep whatever is cached (the old, still-valid outline); never
@@ -669,6 +698,7 @@ final class AppState {
             guard signedIn else { return }
             myOutlines[sid] = row
         } catch {
+            if let orphan = uploadedPath { await supabase.removeOutlineObject(path: orphan) }
             // A post-signOut failure must not banner the sign-in screen.
             guard signedIn else { return }
             if isOutlineLock(error) { outlineLockedSessionIds.insert(sid) }
@@ -715,11 +745,106 @@ final class AppState {
         guard signedIn, !outline.storagePath.isEmpty else { return }
         do {
             let url = try await supabase.signedOutlineURL(path: outline.storagePath)
+            let (stored, response) = try await URLSession.shared.data(from: url)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                throw SupabaseError.badResponse(status: http.statusCode, body: "")
+            }
+            // Outlines are sealed: open on this Mac with the teacher's key.
+            let aad = WeftContentSeal.outlineAAD(sessionId: outline.sessionId,
+                                                 userId: outline.userId)
+            guard let plain = WeftContentSeal.openSealedFile(stored, userId: userId,
+                                                             expectedAAD: aad) else {
+                errorMessage = "This outline can't be opened on this Mac. It was locked to a different essay password."
+                return
+            }
+            // A private temp folder (only this user can read it; macOS clears
+            // old temp files on its own).
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("weft-outlines", isDirectory: true)
+                .appendingPathComponent(outline.id, isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+            // The student controls original_name, so its extension is never
+            // used: only a PDF or a Word file can open, decided by the bytes.
+            let isPDF = plain.starts(with: Array("%PDF-".utf8))
+            let isZip = plain.starts(with: [0x50, 0x4B, 0x03, 0x04])
+            let ext: String
+            if outline.mimeType == "application/pdf", isPDF { ext = "pdf" }
+            else if outline.mimeType.contains("wordprocessingml"), isZip { ext = "docx" }
+            else {
+                errorMessage = "This outline isn't a PDF or Word file, so Weft won't open it."
+                return
+            }
+            let base = (outline.originalName as NSString).deletingPathExtension
+                .components(separatedBy: CharacterSet(charactersIn: "/:\\")).joined(separator: "-")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let file = dir.appendingPathComponent(
+                "\(base.isEmpty || base.hasPrefix(".") ? "Outline" : String(base.prefix(80))).\(ext)")
+            try plain.write(to: file, options: [.atomic])
+            Self.markQuarantined(file)
             #if canImport(AppKit)
-            NSWorkspace.shared.open(url)
+            NSWorkspace.shared.open(file)
             #endif
         } catch {
             errorMessage = describe(error)
+        }
+    }
+
+    /// Mark a file Weft wrote from downloaded bytes as downloaded, so macOS
+    /// treats it like any other file from the internet.
+    nonisolated static func markQuarantined(_ url: URL) {
+        let value = String(format: "0081;%08lx;Weft;", Int(Date().timeIntervalSince1970))
+        _ = value.withCString { ptr in
+            setxattr(url.path, "com.apple.quarantine", ptr, strlen(ptr), 0, 0)
+        }
+    }
+
+    /// Keys of the teacher of the class this session belongs to (the same
+    /// person essays are sealed to). nil when the session or its class can't
+    /// be resolved; empty when the teacher has no essay key yet.
+    private func outlineTeacherKeys(code: String?) async -> [DevicePublicKey]? {
+        guard let code,
+              let session = try? await supabase.lookupSession(code: code),
+              let cid = session.classId,
+              let tid = enrolledClasses.first(where: { $0.id == cid })?.teacherUserId,
+              !tid.isEmpty else { return nil }
+        guard let listed = try? await supabase.listDeviceKeys(userIds: [tid]) else { return nil }
+        return listed.filter { $0.userId == tid && WeftContentSeal.isGenuine($0) }
+    }
+
+    /// Before Begin: if the outline was sealed to a teacher key that has since
+    /// changed (the teacher reset their essay password), reseal it to the
+    /// current key while the student can still replace it. Best effort.
+    private func resealOutlineIfNeeded(sessionId sid: String) async {
+        guard outlineAllowedBySession[sid] == true, let outline = myOutlines[sid],
+              !outline.storagePath.isEmpty, !examRecipientKeys.isEmpty,
+              let url = try? await supabase.signedOutlineURL(path: outline.storagePath),
+              let (stored, _) = try? await URLSession.shared.data(from: url),
+              let env = try? JSONDecoder().decode(WeftEnvelope.self, from: stored)
+        else { return }
+        let current = Set(examRecipientKeys.map(\.kid))
+        if env.wraps.contains(where: { current.contains($0.recipientKid) }) { return }
+        let aad = WeftContentSeal.outlineAAD(sessionId: sid, userId: userId)
+        guard let plain = WeftContentSeal.openSealedFile(stored, userId: userId, expectedAAD: aad),
+              let resealed = WeftContentSeal.sealedFileBytes(
+                plain, userId: userId, teacherKeys: examRecipientKeys, aad: aad)
+        else { return }
+        let path = "\(userId)/\(sid)/\(UUID().uuidString.lowercased())\(WeftContentSeal.sealedFileSuffix)"
+        do {
+            try await supabase.uploadOutlineFile(data: resealed, path: path,
+                                                 contentType: "application/octet-stream")
+            let row = try? await supabase.upsertOutline(
+                sessionId: sid, displayName: outline.displayName,
+                originalName: outline.originalName, mimeType: outline.mimeType,
+                sizeBytes: outline.sizeBytes, storagePath: path)
+            if let row, row.storagePath == path {
+                await supabase.removeOutlineObject(path: outline.storagePath)
+                if signedIn { myOutlines[sid] = row }
+            } else {
+                await supabase.removeOutlineObject(path: path)
+            }
+        } catch {
+            print("outline reseal failed: \(error)")
         }
     }
 
@@ -2041,6 +2166,9 @@ final class AppState {
             }
             return false
         }
+        // Last chance to fix an outline sealed to an old teacher key: once
+        // the students row exists, the outline is locked.
+        await resealOutlineIfNeeded(sessionId: session.id)
         do {
             // The students schema requires the proctoring facts (NOT NULL, no
             // defaults), so unknowns get explicit fallbacks rather than

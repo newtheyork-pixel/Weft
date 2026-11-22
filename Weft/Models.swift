@@ -327,6 +327,10 @@ struct ExamFile: Identifiable, Codable, Hashable, Sendable {
     /// True for the student's own uploaded outline — drives a distinct tab
     /// label/icon in the exam reference panel.
     var isOutline: Bool = false
+    /// Set for a sealed file (the outline): the stored bytes are an envelope
+    /// opened on this Mac with this user's essay key, checked against `sealedAAD`.
+    var sealedForUserId: String? = nil
+    var sealedAAD: String? = nil
 
     var isPDF: Bool { mimeType.contains("pdf") || originalName.lowercased().hasSuffix(".pdf") }
 

@@ -368,7 +368,7 @@ struct StudentClassHomeView: View {
                 .foregroundStyle(Theme.accent)
                 .linkPointer()
                 .disabled(app.outlineBusy)
-                .help("Attach a PDF or Word outline (up to 10 MB). You can replace it until you begin writing.")
+                .help("Attach a PDF or Word outline (up to 10 MB). It is locked so only you and your teacher can read it. You can replace it until you begin writing.")
             }
         }
     }
