@@ -62,12 +62,19 @@ struct DevicePublicKey: Codable, Hashable, Sendable {
     /// When the key was published (shown to a teacher for a key they did
     /// not add). Server-stamped text, displayed as-is.
     var createdAt: String? = nil
+    /// "password" (a teacher's essay password) or "student" (rebuilt by the
+    /// server from its secret, SAT-24). Never seal to a "student" key as a
+    /// teacher: the server could open it.
+    var kind: String? = nil
+
+    var isStudentKind: Bool { kind == "student" }
 
     enum CodingKeys: String, CodingKey {
         case userId = "user_id"
         case kid
         case publicX963 = "public_x963"
         case createdAt = "created_at"
+        case kind
     }
 }
 
@@ -119,6 +126,22 @@ enum WeftContentSeal {
         for counter in 0..<16 {
             let raw = HKDF<SHA256>.deriveKey(inputKeyMaterial: ikm,
                                              info: Data("weft-essay-key/p256/\(counter)".utf8),
+                                             outputByteCount: 32)
+            let bytes = raw.withUnsafeBytes { Data($0) }
+            if let key = try? P256.KeyAgreement.PrivateKey(rawRepresentation: bytes) { return key }
+        }
+        return nil
+    }
+
+    /// A student's essay key, rebuilt from the 32-byte seed the server hands
+    /// only to that signed-in student (get_my_student_key_seed). Same seed,
+    /// same key, on any Mac. Students have no essay password (SAT-24).
+    static func studentKey(fromSeed seed: Data) -> P256.KeyAgreement.PrivateKey? {
+        guard seed.count == 32 else { return nil }
+        let ikm = SymmetricKey(data: seed)
+        for counter in 0..<16 {
+            let raw = HKDF<SHA256>.deriveKey(inputKeyMaterial: ikm,
+                                             info: Data("weft-student-key/p256/\(counter)".utf8),
                                              outputByteCount: 32)
             let bytes = raw.withUnsafeBytes { Data($0) }
             if let key = try? P256.KeyAgreement.PrivateKey(rawRepresentation: bytes) { return key }
@@ -178,24 +201,33 @@ enum WeftContentSeal {
             nonce: Data(cbox.nonce).base64EncodedString(),
             ct: (cbox.ciphertext + cbox.tag).base64EncodedString())
 
-        var wraps: [WeftEnvelopeWrap] = []
-        wraps.reserveCapacity(recipients.count)
-        for recip in recipients {
-            let recipPubRaw = recip.x963Representation
-            let eph = P256.KeyAgreement.PrivateKey()
-            let ephPubRaw = eph.publicKey.x963Representation
-            let shared = try eph.sharedSecretFromKeyAgreement(with: recip)
-            let kek = deriveKek(shared: shared, ephPubRaw: ephPubRaw, recipPubRaw: recipPubRaw)
-            let wbox = try AES.GCM.seal(dek, using: kek,
-                                        nonce: AES.GCM.Nonce(),
-                                        authenticating: wrapAAD)
-            wraps.append(WeftEnvelopeWrap(
-                recipientKid: kid(forX963: recipPubRaw),
-                ephPub: ephPubRaw.base64EncodedString(),
-                nonce: Data(wbox.nonce).base64EncodedString(),
-                wrappedDek: (wbox.ciphertext + wbox.tag).base64EncodedString()))
-        }
+        let wraps = try recipients.map { try wrap(dek: dek, to: $0) }
         return WeftEnvelope(v: envelopeVersion, suite: suite, content: content, wraps: wraps)
+    }
+
+    private static func wrap(dek: Data, to recip: P256.KeyAgreement.PublicKey) throws -> WeftEnvelopeWrap {
+        let recipPubRaw = recip.x963Representation
+        let eph = P256.KeyAgreement.PrivateKey()
+        let ephPubRaw = eph.publicKey.x963Representation
+        let shared = try eph.sharedSecretFromKeyAgreement(with: recip)
+        let kek = deriveKek(shared: shared, ephPubRaw: ephPubRaw, recipPubRaw: recipPubRaw)
+        let wbox = try AES.GCM.seal(dek, using: kek, nonce: AES.GCM.Nonce(), authenticating: wrapAAD)
+        return WeftEnvelopeWrap(
+            recipientKid: kid(forX963: recipPubRaw),
+            ephPub: ephPubRaw.base64EncodedString(),
+            nonce: Data(wbox.nonce).base64EncodedString(),
+            wrappedDek: (wbox.ciphertext + wbox.tag).base64EncodedString())
+    }
+
+    /// Returning work: open the essay's content key with this Mac's key (the
+    /// teacher's) and wrap it for one more person (the student). The essay
+    /// itself and its sealed comment quotes are untouched.
+    static func extraWrap(for recipient: DevicePublicKey, envelope env: WeftEnvelope,
+                          userId: String) -> WeftEnvelopeWrap? {
+        guard isGenuine(recipient), let pub = publicKey(from: recipient),
+              let dek = try? openDEK(envelope: env, userId: userId)
+        else { return nil }
+        return try? wrap(dek: dek.withUnsafeBytes { Data($0) }, to: pub)
     }
 
     /// Unwrap this Mac's copy of the envelope's content key.
@@ -266,10 +298,14 @@ enum WeftContentSeal {
     }
 
     /// Seal to the given teacher keys plus the writer's own essay key. No teacher key, no envelope: the caller must not send anything.
-    static func sealHTML(_ html: String, userId: String,
-                         teacherKeys: [DevicePublicKey], aad: String) -> WeftEnvelope? {
+    /// `includeSelf: false` for a student's exam essay: sealed to the teacher
+    /// only, so the student (whose key the server can rebuild) can't open it
+    /// until it is returned.
+    static func sealHTML(_ html: String, userId: String, teacherKeys: [DevicePublicKey],
+                         aad: String, includeSelf: Bool) -> WeftEnvelope? {
         guard let data = html.data(using: .utf8) else { return nil }
-        return sealData(data, userId: userId, teacherKeys: teacherKeys, aad: aad)
+        return sealData(data, userId: userId, teacherKeys: teacherKeys, aad: aad,
+                        includeSelf: includeSelf)
     }
 
     // MARK: Outline files
@@ -286,7 +322,8 @@ enum WeftContentSeal {
     /// A sealed file as stored: the envelope as JSON.
     static func sealedFileBytes(_ data: Data, userId: String,
                                 teacherKeys: [DevicePublicKey], aad: String) -> Data? {
-        guard let env = sealData(data, userId: userId, teacherKeys: teacherKeys, aad: aad)
+        guard let env = sealData(data, userId: userId, teacherKeys: teacherKeys, aad: aad,
+                                 includeSelf: true)
         else { return nil }
         return try? JSONEncoder().encode(env)
     }
@@ -302,11 +339,12 @@ enum WeftContentSeal {
     }
 
     /// Seal bytes to the teacher keys plus the writer's own key.
-    static func sealData(_ data: Data, userId: String,
-                         teacherKeys: [DevicePublicKey], aad: String) -> WeftEnvelope? {
-        var pubs = publicKeys(from: teacherKeys.filter(isGenuine))
+    static func sealData(_ data: Data, userId: String, teacherKeys: [DevicePublicKey],
+                         aad: String, includeSelf: Bool) -> WeftEnvelope? {
+        // A server-rebuildable student key is never a teacher recipient.
+        var pubs = publicKeys(from: teacherKeys.filter { isGenuine($0) && !$0.isStudentKind })
         guard !pubs.isEmpty else { return nil }
-        if let selfKey = localRecipient(userId: userId) {
+        if includeSelf, let selfKey = localRecipient(userId: userId) {
             let raw = selfKey.x963Representation
             if !pubs.contains(where: { $0.x963Representation == raw }) {
                 pubs.append(selfKey)
