@@ -88,14 +88,24 @@ final class RichTextController {
                           h2Size: RichTextStyle.h2FontSize)
     }
 
-    /// Copy the document on the typing thread, then serialize off it.
-    func htmlSnapshotOffMain() async -> String {
+    /// Copy the document on the typing thread, then count and serialize off it.
+    /// Publishing the count is skipped when a newer edit has already started
+    /// its own recount; the returned pair still matches this snapshot, which
+    /// is what the save uploads.
+    func htmlAndWordCountOffMain() async -> (html: String, wordCount: Int) {
+        recountGeneration += 1
+        let generation = recountGeneration
         let copy = snapshot()
         let h1 = RichTextStyle.h1FontSize
         let h2 = RichTextStyle.h2FontSize
-        return await Task.detached(priority: .utility) {
-            RichTextHTML.html(from: copy, h1Size: h1, h2Size: h2)
+        let result = await Task.detached(priority: .utility) {
+            (html: RichTextHTML.html(from: copy, h1Size: h1, h2Size: h2),
+             wordCount: RichTextHTML.wordCount(in: copy))
         }.value
+        if generation == recountGeneration, wordCount != result.wordCount {
+            wordCount = result.wordCount
+        }
+        return result
     }
 
     /// Drop a source quotation at the caret: italic indented paragraph plus
@@ -127,41 +137,40 @@ final class RichTextController {
         recountWords()
     }
 
+    /// Bumped by every recount. An in-flight count from an older snapshot
+    /// must not publish over a newer one.
+    @ObservationIgnored private var recountGeneration = 0
+
     /// Debounced word count so a mid-word keystroke does not walk the whole
-    /// document on the typing path. Toolbar actions still call `recountWords`
-    /// immediately.
+    /// document on the typing path. The walk itself runs off the main actor
+    /// on a copy. Toolbar actions still call `recountWords` immediately.
     func scheduleRecount() {
+        recountGeneration += 1
+        let generation = recountGeneration
         recountTask?.cancel()
         recountTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled else { return }
-            self?.recountWords()
+            guard !Task.isCancelled, let self, generation == self.recountGeneration else { return }
+            let copy = self.snapshot()
+            let count = await Task.detached(priority: .utility) {
+                RichTextHTML.wordCount(in: copy)
+            }.value
+            guard !Task.isCancelled, generation == self.recountGeneration else { return }
+            if self.wordCount != count { self.wordCount = count }
         }
     }
 
     /// Recompute the published word count from the live document. Matches the
     /// web editor's `trimmed.split(/\s+/)` rule; list markers are layout chrome
-    /// and never counted.
+    /// and never counted. Immediate path (toolbar, seeding): the caller is
+    /// already on the main actor and wants the label now.
     func recountWords() {
+        recountGeneration += 1
         guard let tv = textView, let storage = tv.textStorage else {
             if wordCount != 0 { wordCount = 0 }
             return
         }
-        let ns = storage.string as NSString
-        var count = 0
-        ns.enumerateSubstrings(
-            in: NSRange(location: 0, length: ns.length),
-            options: [.byParagraphs, .substringNotRequired]
-        ) { _, pRange, _, _ in
-            guard pRange.length > 0 else { return }
-            var text = ns.substring(with: pRange)
-            if let style = storage.attribute(.paragraphStyle, at: pRange.location, effectiveRange: nil) as? NSParagraphStyle,
-               !style.textLists.isEmpty,
-               let prefix = RichTextController.markerPrefixLength(of: text) {
-                text = (text as NSString).substring(from: prefix)
-            }
-            count += text.split(whereSeparator: \.isWhitespace).count
-        }
+        let count = RichTextHTML.wordCount(in: storage)
         // @Observable fires on every set; only publish real changes so a
         // mid-word keystroke doesn't invalidate the host view for nothing.
         if wordCount != count { wordCount = count }
@@ -795,8 +804,8 @@ struct RichTextEditor: NSViewRepresentable {
         textView.isSelectable = true
         textView.isRichText = true
         textView.allowsUndo = true
-        textView.isAutomaticSpellingCorrectionEnabled = false
         textView.isContinuousSpellCheckingEnabled = spellcheckEnabled
+        lockTypingBehavior(textView)
         textView.usesFontPanel = false
         textView.importsGraphics = false
         textView.font = RichTextStyle.bodyFont
@@ -842,11 +851,13 @@ struct RichTextEditor: NSViewRepresentable {
         if textView.isEditable != isEditable {
             textView.isEditable = isEditable
         }
-        // Sync teacher-controlled spell-check toggle. Autocorrect stays off
-        // unconditionally regardless of this flag.
+        // Sync teacher-controlled spell-check. Autocorrect and text
+        // replacements stay off (see lockTypingBehavior). Quote and dash
+        // substitution stay at the system default.
         if textView.isContinuousSpellCheckingEnabled != spellcheckEnabled {
             textView.isContinuousSpellCheckingEnabled = spellcheckEnabled
         }
+        lockTypingBehavior(textView)
         // Keep the controller pointed at the current view. Deferred for the
         // same reason as in makeNSView: the first updateNSView runs inside the
         // same SwiftUI transaction, and register() mutates observable state
@@ -873,6 +884,16 @@ struct RichTextEditor: NSViewRepresentable {
             controller.scheduleRecount()
             onEdit?()
         }
+    }
+
+    /// Autocorrect stays off. Text replacements stay off too: a student can
+    /// store a short code in System Settings that expands into a prepared
+    /// paragraph, which is an integrity hole, not a speed tweak. Smart quotes
+    /// and dashes are left at the system default — turning them off changes
+    /// how the essay looks, and they are not worth it unless a profile says so.
+    private func lockTypingBehavior(_ textView: NSTextView) {
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
     }
 }
 

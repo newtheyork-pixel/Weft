@@ -71,7 +71,10 @@ struct DevicePublicKey: Codable, Hashable, Sendable {
     }
 }
 
-enum WeftContentSeal {
+// Nonisolated so autosave can seal off the main actor. CryptoKit and the
+// keychain calls below are safe on a background thread; the caret used to
+// wait on a fresh P-256 wrap per teacher after every pause.
+nonisolated enum WeftContentSeal {
 
     static let suite = "P256-HKDF-SHA256-AES256GCM"
     private static let hkdfSalt = Data("weft-e2ee-v1".utf8)

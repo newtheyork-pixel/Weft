@@ -12,7 +12,8 @@ import Foundation
 import CryptoKit
 import Security
 
-enum ExamDraftStore {
+// Nonisolated so the encrypted draft write does not run on the typing thread.
+nonisolated enum ExamDraftStore {
 
     struct Draft: Sendable {
         var html: String
