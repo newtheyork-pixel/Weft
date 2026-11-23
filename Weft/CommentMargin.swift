@@ -187,8 +187,9 @@ struct MarginedPaper: View {
         return out
     }
 
-    // Measurements that follow the room available.
-    private struct Metrics {
+    // Measurements that follow the room available. Shared with the
+    // read-only draft views so the paper stays put when switching drafts.
+    struct Metrics {
         var paperWidth: CGFloat
         var padH: CGFloat
         var padV: CGFloat
@@ -197,6 +198,10 @@ struct MarginedPaper: View {
     }
 
     private func metrics(for width: CGFloat) -> Metrics {
+        Self.metrics(for: width, canComment: canComment)
+    }
+
+    static func metrics(for width: CGFloat, canComment: Bool) -> Metrics {
         let avail = max(320, width - 2 * Theme.Space.lg)
         let column: CGFloat = avail >= 980 ? 288 : (avail >= 700 ? 248 : (avail >= 560 ? 212 : 188))
         let gutter: CGFloat = canComment ? (avail >= 640 ? 40 : 32) : 20

@@ -30,6 +30,8 @@ private struct ReviewEntry: Identifiable {
     var finalComment: String
     var paragraphs: [String]    // the essay body, paragraph by paragraph
     var comments: [EssayComment] = []
+    /// Sample drafts (preview only; live drafts come from AppState).
+    var drafts: [StudentDraft] = []
 
     enum Status {
         case writing, submitted, joined, leftFullscreen
@@ -68,6 +70,13 @@ private struct ReviewEntry: Identifiable {
 
     static let mock: [ReviewEntry] = {
         var rows = mockRows
+        // The sample session is Draft 3 of the assignment. Ava wrote every
+        // draft, Ben skipped Draft 2, Maya's Draft 1 was sealed on another
+        // Mac, and the others have only this one.
+        for i in 0..<3 { rows[i].wordCount = WordDiff.wordCount(rows[i].paragraphs) }
+        rows[0].drafts = SampleDrafts.ava + [SampleDrafts.current("1", version: 3, avaEssay)]
+        rows[1].drafts = SampleDrafts.ben + [SampleDrafts.current("2", version: 3, benEssay)]
+        rows[2].drafts = SampleDrafts.maya + [SampleDrafts.current("3", version: 3, mayaEssay)]
         rows[0].comments = [
             mockComment("m1", on: avaEssay, submission: "1",
                         quote: "a small, stubborn coin of gold against the whole weight of the night",
@@ -209,6 +218,16 @@ struct ReviewGradingView: View {
     /// typing a comment was visibly slow on a class of any size.
     @State private var liveRoster: [ReviewEntry] = []
 
+    /// Another of this student's drafts on screen, read-only (nil = the
+    /// graded draft). Grading always applies to the graded draft.
+    @State private var viewedDraftId: String?
+    /// Compare mode: the shown draft against an earlier one.
+    @State private var comparing = false
+    /// The earlier draft the teacher picked (nil = the one just before).
+    @State private var compareBaseId: String?
+    /// Finished comparisons, keyed "<older id>><newer id>".
+    @State private var comparisons: [String: DraftComparison] = [:]
+
     private let defaultPointsPossible: Double = 100
 
     /// True when we have real submissions to grade (signed-in, non-empty load).
@@ -302,6 +321,9 @@ struct ReviewGradingView: View {
         .onChange(of: current.id) { _, _ in
             seedBuffers()
             activeCommentId = nil
+            viewedDraftId = nil
+            comparing = false
+            compareBaseId = nil
         }
         .onChange(of: isLive) { _, _ in index = 0; seedBuffers() }
         .onAppear { seedBuffers() }
@@ -631,8 +653,16 @@ struct ReviewGradingView: View {
         VStack(alignment: .leading, spacing: 0) {
             readerHead
             Divider().overlay(Color.black.opacity(0.08))
+            if hasDrafts, viewingOther || compareBase != nil {
+                draftNote
+                Divider().overlay(Color.black.opacity(0.08))
+            }
             Group {
-                if current.paragraphs.isEmpty {
+                if let shown = shownDraft, let base = compareBase {
+                    DraftPaperFrame { comparePaper(shown, base: base) }
+                } else if let shown = shownDraft, shown.id != current.id {
+                    DraftPaperFrame { draftPaper(shown) }
+                } else if current.paragraphs.isEmpty {
                     ScrollView {
                         emptyPaper
                             .padding(.horizontal, Theme.Space.xl)
@@ -654,11 +684,23 @@ struct ReviewGradingView: View {
                         emptyHint: "Select words on the paper to comment on them.")
                 }
             }
-            .id(current.id)
+            .id(readerKey)
             .transition(.opacity)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(red: 0.976, green: 0.984, blue: 0.992)) // #f9fbfd canvas
         }
+        // Other drafts load after the screen is up, one student at a time.
+        .task(id: current.id) {
+            guard isLive, current.id != ReviewEntry.placeholder.id else { return }
+            await app.loadStudentDrafts(submissionId: current.id)
+        }
+        .task(id: comparisonKey) { await compareDrafts() }
+        .background { draftShortcuts }
+    }
+
+    /// Changes whenever a different paper (or comparison) is on screen.
+    private var readerKey: String {
+        "\(current.id)|\(shownDraft?.id ?? "")|\(compareBase?.id ?? "")"
     }
 
     private var readerHead: some View {
@@ -667,18 +709,37 @@ struct ReviewGradingView: View {
                 .font(Theme.sans(16, .semibold))
                 .foregroundStyle(Theme.inkSoft)
 
-            HStack(spacing: Theme.Space.md) {
-                Chip(text: current.status.label, kind: current.status.chipKind)
-                Text("\(current.wordCount) words")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.muted)
-                    .monospacedDigit()
-                if !current.lastEdited.isEmpty {
-                    Text(current.lastEdited)
+            if let other = viewingOther ? shownDraft : nil {
+                // The draft on screen, not the graded one.
+                HStack(spacing: Theme.Space.md) {
+                    Chip(text: other.submittedAt != nil ? "Submitted" : "Not submitted",
+                         kind: other.submittedAt != nil ? .good : .warn)
+                    Text("\(other.wordCount) words")
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.muted)
+                        .monospacedDigit()
+                    if let when = draftDateLabel(other) {
+                        Text(when)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.muted)
+                    }
+                }
+            } else {
+                HStack(spacing: Theme.Space.md) {
+                    Chip(text: current.status.label, kind: current.status.chipKind)
+                    Text("\(current.wordCount) words")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.muted)
+                        .monospacedDigit()
+                    if !current.lastEdited.isEmpty {
+                        Text(current.lastEdited)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.muted)
+                    }
                 }
             }
+
+            draftsRow
 
             if let prompt {
                 VStack(alignment: .leading, spacing: Theme.Space.xs) {
@@ -736,6 +797,306 @@ struct ReviewGradingView: View {
         switch current.status {
         case .writing: return "This student is still writing. Nothing has been turned in yet."
         default:       return "This student has joined but has not started writing."
+        }
+    }
+
+
+    // MARK: Drafts
+
+    /// This student's drafts of the assignment, oldest first. Preview: the
+    /// sample drafts. Live: looked up once per student (see DraftHistory).
+    private var drafts: [StudentDraft] {
+        guard isLive else { return current.drafts }
+        guard case .loaded(let list)? = app.draftState(forSubmission: current.id) else { return [] }
+        return list
+    }
+
+    /// The switcher shows only when there is more than one draft.
+    private var hasDrafts: Bool {
+        drafts.count > 1 && drafts.contains { $0.id == current.id }
+    }
+
+    /// The draft on screen: the picked one, else the graded one.
+    private var shownDraft: StudentDraft? {
+        guard hasDrafts else { return nil }
+        if let id = viewedDraftId, let d = drafts.first(where: { $0.id == id }) { return d }
+        return drafts.first { $0.id == current.id }
+    }
+
+    private var gradedLabel: String {
+        drafts.first { $0.id == current.id }?.label ?? "this draft"
+    }
+
+    /// True while a draft other than the graded one is on screen.
+    private var viewingOther: Bool {
+        guard let s = shownDraft else { return false }
+        return s.id != current.id
+    }
+
+    /// The graded draft reads from the grading load, the others from theirs.
+    private func paragraphs(of d: StudentDraft) -> [String] {
+        d.id == current.id ? current.paragraphs : d.paragraphs
+    }
+
+    /// Earlier drafts the shown one can be compared with, nearest first.
+    private var compareCandidates: [StudentDraft] {
+        guard let s = shownDraft, !s.unreadable, !paragraphs(of: s).isEmpty else { return [] }
+        return drafts
+            .filter { $0.versionNumber < s.versionNumber && !$0.unreadable && !$0.paragraphs.isEmpty }
+            .reversed()
+    }
+
+    private var compareBase: StudentDraft? {
+        guard comparing else { return nil }
+        let candidates = compareCandidates
+        if let id = compareBaseId, let d = candidates.first(where: { $0.id == id }) { return d }
+        return candidates.first
+    }
+
+    private var comparisonKey: String? {
+        guard let base = compareBase, let shown = shownDraft else { return nil }
+        return "\(base.id)>\(shown.id)"
+    }
+
+    /// Diff the two drafts off the main thread (a long essay can take a
+    /// few tens of milliseconds), then keep the result for this pair.
+    private func compareDrafts() async {
+        guard let key = comparisonKey, comparisons[key] == nil,
+              let base = compareBase, let shown = shownDraft else { return }
+        let old = paragraphs(of: base)
+        let new = paragraphs(of: shown)
+        let result = await Task.detached(priority: .userInitiated) {
+            WordDiff.diff(old: old, new: new)
+        }.value
+        comparisons[key] = DraftComparison(added: result.added, removed: result.removed,
+                                           text: WordDiff.attributed(result))
+    }
+
+    private func selectDraft(_ id: String) {
+        withAnimation(.easeOut(duration: 0.15)) {
+            viewedDraftId = id == current.id ? nil : id
+            // Keep comparing if the newly shown draft has an earlier one.
+            if let pick = compareBaseId, !compareCandidates.contains(where: { $0.id == pick }) {
+                compareBaseId = nil
+            }
+            if compareCandidates.isEmpty { comparing = false }
+        }
+    }
+
+    private func stepDraft(_ delta: Int) {
+        guard hasDrafts, let s = shownDraft, let i = drafts.firstIndex(of: s) else { return }
+        let j = i + delta
+        guard drafts.indices.contains(j) else { return }
+        selectDraft(drafts[j].id)
+    }
+
+    private func backToGraded() {
+        withAnimation(.easeOut(duration: 0.15)) {
+            viewedDraftId = nil
+            comparing = false
+            compareBaseId = nil
+        }
+    }
+
+    private func draftDateLabel(_ d: StudentDraft) -> String? {
+        if let when = d.submittedAt { return "Submitted " + Self.editedFormatter.string(from: when) }
+        if let when = d.updatedAt { return "Edited " + Self.editedFormatter.string(from: when) }
+        return nil
+    }
+
+    /// The switcher and the Compare control, under the student's name.
+    @ViewBuilder private var draftsRow: some View {
+        if hasDrafts, let shown = shownDraft {
+            HStack(spacing: Theme.Space.md) {
+                DraftSwitcher(drafts: drafts, gradedId: current.id, selectedId: shown.id,
+                              onSelect: selectDraft)
+                compareControl
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 2)
+        } else if isLive, case .failed(let message)? = app.draftState(forSubmission: current.id) {
+            HStack(spacing: Theme.Space.sm) {
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.muted)
+                Button("Try again") {
+                    let id = current.id
+                    Task { await app.loadStudentDrafts(submissionId: id, retry: true) }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+                .linkPointer()
+            }
+        }
+    }
+
+    /// "Compare with Draft 1", plus a menu to pick another earlier draft
+    /// when there is more than one.
+    @ViewBuilder private var compareControl: some View {
+        let candidates = compareCandidates
+        if let target = compareBase ?? candidates.first {
+            HStack(spacing: 2) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) { comparing.toggle() }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.left.arrow.right")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Compare with \(target.label)")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundStyle(comparing ? Color.white : Theme.accent)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(comparing ? Theme.accent : Theme.accent.opacity(0.09)))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .linkPointer()
+                .help(comparing ? "Stop comparing" : "Show what changed since \(target.label)")
+                .accessibilityAddTraits(comparing ? .isSelected : [])
+
+                if candidates.count > 1 {
+                    Menu {
+                        ForEach(candidates) { d in
+                            Button("Compare with \(d.label)") {
+                                withAnimation(.easeOut(duration: 0.15)) {
+                                    compareBaseId = d.id
+                                    comparing = true
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Theme.accent)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Pick which draft to compare with")
+                    .accessibilityLabel("Pick which draft to compare with")
+                }
+            }
+            .fixedSize()
+        }
+    }
+
+    /// The strip above the paper while another draft or a comparison is on
+    /// screen: what you are looking at, and the way back.
+    private var draftNote: some View {
+        HStack(alignment: .center, spacing: Theme.Space.md) {
+            Image(systemName: compareBase != nil ? "arrow.left.arrow.right" : "clock.arrow.circlepath")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+            VStack(alignment: .leading, spacing: 3) {
+                if let base = compareBase {
+                    if let key = comparisonKey, let done = comparisons[key] {
+                        Text(done.summary(since: base.label))
+                            .font(Theme.sans(13, .semibold))
+                            .foregroundStyle(Theme.inkSoft)
+                            .monospacedDigit()
+                    } else {
+                        Text("Comparing with \(base.label)\u{2026}")
+                            .font(Theme.sans(13, .semibold))
+                            .foregroundStyle(Theme.inkSoft)
+                    }
+                    HStack(spacing: Theme.Space.md) {
+                        diffLegend
+                        Text(viewingOther ? "Grading applies to \(gradedLabel)."
+                                          : "Comments are hidden while comparing.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.muted)
+                    }
+                } else if let shown = shownDraft {
+                    Text("Viewing \(shown.label). Grading applies to \(gradedLabel).")
+                        .font(Theme.sans(13, .semibold))
+                        .foregroundStyle(Theme.inkSoft)
+                    Text("Read only. Comments stay on \(gradedLabel).")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.muted)
+                }
+            }
+            Spacer(minLength: Theme.Space.sm)
+            Button {
+                backToGraded()
+            } label: {
+                Text(viewingOther ? "Back to \(gradedLabel)" : "Stop comparing")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.inkSoft)
+            }
+            .buttonStyle(.glass)
+            .linkPointer()
+            .help(viewingOther ? "Show the draft you are grading" : "Show the paper with its comments")
+        }
+        .padding(.horizontal, Theme.Space.xl)
+        .padding(.vertical, Theme.Space.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.accent.opacity(0.05))
+    }
+
+    /// A key to the compare colors.
+    private var diffLegend: some View {
+        HStack(spacing: Theme.Space.sm) {
+            Text("Added")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.inkSoft)
+                .underline(color: Color(nsColor: WordDiff.addedLine))
+                .padding(.horizontal, 4)
+                .background(Color(nsColor: WordDiff.addedFill))
+            Text("Removed")
+                .font(.system(size: 11, weight: .medium))
+                .strikethrough(color: Color(nsColor: WordDiff.removedInk))
+                .foregroundStyle(Color(nsColor: WordDiff.removedInk))
+                .padding(.horizontal, 4)
+                .background(Color(nsColor: WordDiff.removedFill))
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Added words are underlined in green. Removed words are struck through in red.")
+    }
+
+    /// A draft other than the graded one, read-only.
+    @ViewBuilder private func draftPaper(_ d: StudentDraft) -> some View {
+        if d.unreadable {
+            DraftPaperMessage(
+                title: "\(d.label) can't be opened on this Mac",
+                message: "It is sealed to a key this Mac doesn't hold. Open Weft on the Mac that holds the class keys to read it.",
+                system: "lock")
+        } else if d.paragraphs.isEmpty {
+            DraftPaperMessage(title: "\(d.label) is empty",
+                              message: "Nothing was written in this draft.")
+        } else {
+            PaperTextView(paragraphs: d.paragraphs)
+        }
+    }
+
+    /// The shown draft with what changed since `base` marked in it.
+    @ViewBuilder private func comparePaper(_ shown: StudentDraft, base: StudentDraft) -> some View {
+        if let key = comparisonKey, let done = comparisons[key] {
+            AttributedPaperView(text: done.text,
+                                accessibilityLabel: "\(shown.label) compared with \(base.label)")
+        } else {
+            DraftPaperMessage(title: "Comparing\u{2026}",
+                              message: "Finding what changed since \(base.label).")
+        }
+    }
+
+    /// ⌘[ and ⌘] step through the drafts.
+    @ViewBuilder private var draftShortcuts: some View {
+        if hasDrafts {
+            Group {
+                Button("Previous draft") { stepDraft(-1) }
+                    .keyboardShortcut("[", modifiers: .command)
+                Button("Next draft") { stepDraft(1) }
+                    .keyboardShortcut("]", modifiers: .command)
+            }
+            .opacity(0)
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
         }
     }
 
