@@ -5,8 +5,10 @@
 //  NSApp.presentationOptions (set in KioskController) already disables Cmd-Tab,
 //  Cmd-Q, Force-Quit, and the Apple menu, but it does NOT stop the escape /
 //  launcher hotkeys a student could cheat with: Spotlight & launchers
-//  (⌘Space / ⌥Space → Spotlight, Raycast, Alfred, the ChatGPT app, Siri)
-//  and Mission Control / Spaces (⌃↑↓←→). The native route is a CGEventTap at
+//  (⌘Space / ⌥Space → Spotlight, Raycast, Alfred, the ChatGPT app, Siri),
+//  Mission Control / Spaces (⌃↑↓←→), and the dedicated function-row keys
+//  (F3 Mission Control, F4 Launchpad, F5 Spotlight). The native route is a
+//  CGEventTap at
 //  the session level — the "separate component that degrades gracefully" the
 //  KioskController TODO asks for. Screenshot / screen-recording hotkeys
 //  (⌘⇧3/4/5/6) are intentionally left alone so a recording of the exam can
@@ -17,9 +19,10 @@
 //
 //  Safe by construction — four guarantees that matter for a live exam app:
 //    1. NEVER EATS TYPING. Every rule in shouldSuppress(keyCode:flags:) requires
-//       a modifier (or is a bare F13-F19 key never used for writing), so plain
-//       space, arrows, digits, and punctuation always pass through. A bug cannot
-//       swallow a student's essay.
+//       a modifier (or is a bare function key never used for writing: F3/F4/F5,
+//       the Touch Bar Launchpad key, and F13-F19), so plain space, arrows,
+//       digits, and punctuation always pass through. A bug cannot swallow a
+//       student's essay.
 //    2. FAIL-OPEN. If the app isn't trusted for Accessibility, or tapCreate
 //       returns nil, nothing is installed and the kiosk lock simply runs without
 //       raw-key suppression. No grant → no behavior change.
@@ -41,6 +44,7 @@ final class ExamKeyGuard {
     /// MODIFIER (or is a bare function key never used for writing), so plain text —
     /// space, arrows, digits, punctuation — always passes through untouched.
     /// kVK codes: Space 49, Tab 48, ←123 →124 ↓125 ↑126,
+    /// F3=99 F4=118 F5=96, Touch Bar Launchpad=160,
     /// F13–F19 = 105,107,113,106,64,79,80. Screenshot keys (3=20 4=21 6=22 5=23)
     /// are not suppressed.
     nonisolated static func shouldSuppress(keyCode: Int64, flags: CGEventFlags) -> Bool {
@@ -62,6 +66,10 @@ final class ExamKeyGuard {
         case 123, 124, 125, 126:              return ctrl
         // App switcher — ⌘Tab (also covered by presentationOptions; belt + braces).
         case 48:                              return cmd
+        // Dedicated function-row keys — F3 Mission Control, F4 Launchpad,
+        // F5 Spotlight, plus the Touch Bar Launchpad key. Bare keys that never
+        // type text, so suppressing them cannot eat a student's essay.
+        case 96, 99, 118, 160:                return true
         // Third-party launcher rebinds on F13–F19 (bare keys, never used to type).
         case 105, 107, 113, 106, 64, 79, 80:  return true
         default:                              return false

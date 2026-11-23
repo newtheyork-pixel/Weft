@@ -384,6 +384,9 @@ struct ExamView: View {
                 detail: nil,
                 footnote: "Leaving the exam is logged for your teacher. Resume when you're ready.",
                 submitTitle: "Resume writing",
+                // Not red: red is the destructive action (Submit and exit), and
+                // resuming is the calm way back to the essay.
+                buttonTint: Theme.accent,
                 onSubmit: resumeFromFocusLoss
             )
             .transition(.opacity)
@@ -397,14 +400,19 @@ struct ExamView: View {
         VStack(spacing: 0) {
             header
             toolbarRow
-            // Locked while the breathing guide covers it, so nothing typed
-            // then can land in the essay unseen.
-            RichTextEditor(controller: controller, isEditable: !expired && !showBreath,
+            // Locked while the breathing guide covers it, and while a blackout
+            // (screen-sharing detected or focus lost) is up: "Writing paused"
+            // must mean the essay is actually frozen, or a student can keep
+            // typing — and saving — underneath the overlay unseen.
+            RichTextEditor(controller: controller,
+                           isEditable: !expired && !showBreath && runtime.block == nil,
                            spellcheckEnabled: assignment.spellcheckEnabled,
                            onEdit: { scheduleSave(); app.markWriting() })
                 .accessibilityLabel("Essay")
                 .accessibilityHint(expired
                     ? "Time is up. The essay can no longer be edited."
+                    : runtime.block != nil
+                    ? "Writing is paused. The essay can no longer be edited."
                     : "Write your response to the prompt.")
                 .background(Color.white)
                 .padding(.horizontal, Theme.Space.xl)

@@ -73,8 +73,9 @@ final class KioskController {
     private var savedSharingType: NSWindow.SharingType = .readOnly
 
     /// Raw-key suppression for the exam — blocks ⌘Space launchers (Spotlight /
-    /// Raycast / ChatGPT) and Mission Control. Screenshot / recording hotkeys
-    /// pass through. Fail-open: a no-op unless the app is trusted for
+    /// Raycast / ChatGPT), Mission Control (⌃arrows and the F3 key) and the
+    /// dedicated F4 Launchpad / F5 Spotlight keys. Screenshot / recording
+    /// hotkeys pass through. Fail-open: a no-op unless the app is trusted for
     /// Accessibility, so the lock degrades gracefully when the grant is missing.
     private let keyGuard = ExamKeyGuard()
 
