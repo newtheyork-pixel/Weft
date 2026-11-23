@@ -885,6 +885,69 @@ final class SupabaseManager: @unchecked Sendable {
         return found.first?.user_id ?? nil
     }
 
+    // MARK: Drafts (a student's earlier and later drafts, while grading)
+
+    /// One test's place in its version group (no questions, no text).
+    func draftTest(id: String) async throws -> DraftTestRow? {
+        let found: [DraftTestRow] = try await rows("tests", query: [
+            URLQueryItem(name: "select", value: "id,version_group_id,version_number"),
+            URLQueryItem(name: "id", value: "eq.\(id)"),
+        ])
+        return found.first
+    }
+
+    /// Every one of the teacher's tests in a version group: the root (its id
+    /// IS the group id, version_group_id may be null) and its drafts.
+    func listVersionGroupTests(groupId: String, teacherUserId: String) async throws -> [DraftTestRow] {
+        try await rows("tests", query: [
+            URLQueryItem(name: "select", value: "id,version_group_id,version_number"),
+            URLQueryItem(name: "or", value: "(id.eq.\(groupId),version_group_id.eq.\(groupId))"),
+            URLQueryItem(name: "teacher_user_id", value: "eq.\(teacherUserId)"),
+        ])
+    }
+
+    /// The teacher's sessions in one class for any of these tests.
+    func listClassSessions(testIds: [String], classId: String,
+                           teacherUserId: String) async throws -> [ExamSession] {
+        guard !testIds.isEmpty else { return [] }
+        return try await rows("sessions", query: [
+            URLQueryItem(name: "select", value: "id,code,test_id,class_id,status,created_at"),
+            URLQueryItem(name: "test_id", value: "in.(" + testIds.joined(separator: ",") + ")"),
+            URLQueryItem(name: "class_id", value: "eq.\(classId)"),
+            URLQueryItem(name: "teacher_user_id", value: "eq.\(teacherUserId)"),
+            URLQueryItem(name: "status", value: "neq.archived"),
+        ])
+    }
+
+    /// One person's students rows (one per session joined) in these sessions.
+    func listStudentRows(userId: String, sessionIds: [String]) async throws -> [DraftStudentRow] {
+        guard !sessionIds.isEmpty else { return [] }
+        return try await rows("students", query: [
+            URLQueryItem(name: "select", value: "id,session_id"),
+            URLQueryItem(name: "user_id", value: "eq.\(userId)"),
+            URLQueryItem(name: "session_id", value: "in.(" + sessionIds.joined(separator: ",") + ")"),
+        ])
+    }
+
+    /// The essays behind these students rows (sealed; opened on this Mac).
+    func listSubmissions(studentIds: [String]) async throws -> [TeacherSubmission] {
+        guard !studentIds.isEmpty else { return [] }
+        let inList = "in.(" + studentIds.joined(separator: ",") + ")"
+        let cipher = "id,session_id,student_id,question_id,content_html,content_cipher,word_count,updated_at,submitted_at"
+        let plain = "id,session_id,student_id,question_id,content_html,word_count,updated_at,submitted_at"
+        do {
+            return try await rows("essay_submissions", query: [
+                URLQueryItem(name: "select", value: cipher),
+                URLQueryItem(name: "student_id", value: inList),
+            ])
+        } catch {
+            return try await rows("essay_submissions", query: [
+                URLQueryItem(name: "select", value: plain),
+                URLQueryItem(name: "student_id", value: inList),
+            ])
+        }
+    }
+
     func listGrades(submissionIds: [String]) async throws -> [EssayGrade] {
         guard !submissionIds.isEmpty else { return [] }
         let inList = "in.(" + submissionIds.joined(separator: ",") + ")"

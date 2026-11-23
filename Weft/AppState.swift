@@ -241,6 +241,14 @@ final class AppState {
     var gradingOutlines: [OutlineUpload] = []
     /// Margin comments for the session being graded, keyed by submission id.
     var gradingComments: [String: [EssayComment]] = [:]
+    /// A student's drafts across the graded assignment's version group,
+    /// keyed by "<student user id>|<version group id>" (DraftHistory.swift).
+    var draftHistories: [String: DraftHistoryState] = [:]
+    /// Which draftHistories key a graded submission resolved to.
+    var draftKeyBySubmission: [String: String] = [:]
+    /// The graded session's version group and its class sessions, keyed by
+    /// the graded session id. Same for every student, so resolved once.
+    var draftGroups: [String: DraftGroup] = [:]
     /// The teacher's essay key this exam's essay is sealed to (the
     /// student's own key is added by sealHTML).
     var examRecipientKeys: [DevicePublicKey] = []
@@ -389,6 +397,7 @@ final class AppState {
         classRoster = []; rosterClassId = nil; rosterClassName = ""
         gradingSubmissions = []; grades = [:]
         gradingComments = [:]
+        clearDraftHistory()
         examRecipientKeys = []
         examLockState = nil
         pendingTeacherKey = nil
@@ -445,6 +454,7 @@ final class AppState {
         gradingOutlines = []
         gradingSubmissions = []
         grades = [:]
+        clearDraftHistory()
     }
 
     // MARK: - Auth
@@ -1886,6 +1896,7 @@ final class AppState {
         gradingRoster = []
         gradingOutlines = []
         gradingComments = [:]
+        clearDraftHistory()
         gradesFresh = false
         teacherScreen = .grading
         // ReviewGradingView's .task owns the load (auto-cancelled with the
