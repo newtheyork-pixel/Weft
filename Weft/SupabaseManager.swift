@@ -734,31 +734,94 @@ final class SupabaseManager: @unchecked Sendable {
     func listEssayComments(sessionId: String) async throws -> [EssayComment] {
         try await rows("essay_comments", query: [
             URLQueryItem(name: "select",
-                         value: "id,submission_id,session_id,student_id,range_start,range_end,quote,quote_cipher,body,visibility"),
+                         value: "id,submission_id,session_id,student_id,range_start,range_end,quote,quote_cipher,body,visibility,author,created_at,updated_at,resolved_at"),
             URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
             URLQueryItem(name: "order", value: "created_at.asc"),
         ])
     }
 
+    /// The quote is sent only sealed (`quoteCipher`); the readable `quote`
+    /// column is always "" and prefix/suffix are never sent (they would be
+    /// the student's words in the clear). `rangeStart`/`rangeEnd` are the
+    /// UTF-16 offsets of the passage in the paper's plain text.
     @discardableResult
-    /// The quote is sent only sealed (`quoteCipher`); `quoteLength` keeps the
-    /// range columns meaningful without the text.
     func createEssayComment(submissionId: String, sessionId: String, studentId: String,
-                            quoteLength: Int, quoteCipher: WeftSealedText,
-                            body: String) async throws -> EssayComment? {
+                            rangeStart: Int, rangeEnd: Int, quoteCipher: WeftSealedText,
+                            body: String, visibility: String) async throws -> EssayComment? {
         struct Payload: Encodable {
             let submission_id: String; let session_id: String; let student_id: String
             let range_start: Int; let range_end: Int
             let quote: String; let quote_cipher: WeftSealedText
             let body: String; let visibility: String
         }
-        let end = max(quoteLength, 1)
         let rows: [EssayComment] = try await insert("essay_comments",
             values: Payload(submission_id: submissionId, session_id: sessionId,
-                            student_id: studentId, range_start: 0, range_end: end,
+                            student_id: studentId, range_start: rangeStart, range_end: rangeEnd,
                             quote: "", quote_cipher: quoteCipher,
-                            body: body, visibility: "shared"))
+                            body: body, visibility: visibility == "private" ? "private" : "shared"))
         return rows.first
+    }
+
+    /// What a comment PATCH hands back. Never the quote columns.
+    struct EssayCommentState: Decodable, Sendable {
+        let id: String
+        var body: String
+        var visibility: String?
+        var updatedAt: Date?
+        var resolvedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id, body, visibility
+            case updatedAt = "updated_at"
+            case resolvedAt = "resolved_at"
+        }
+    }
+
+    /// PATCH one comment and read back its state. nil = no row changed (RLS
+    /// refused it or it is gone): PostgREST answers that with 2xx and zero
+    /// rows, never a 403.
+    private func patchEssayComment<Body: Encodable>(id: String, values: Body) async throws -> EssayCommentState? {
+        let rows: [EssayCommentState] = try await update("essay_comments", values: values, query: [
+            URLQueryItem(name: "id", value: "eq.\(id)"),
+            URLQueryItem(name: "select", value: "id,body,visibility,updated_at,resolved_at"),
+        ])
+        return rows.first
+    }
+
+    /// Change the teacher's text only. Never touches quote / quote_cipher.
+    func updateEssayCommentBody(id: String, body: String) async throws -> EssayCommentState? {
+        struct Payload: Encodable { let body: String }
+        return try await patchEssayComment(id: id, values: Payload(body: body))
+    }
+
+    /// 'shared' (the student sees it once the grade is shared) or 'private'.
+    func setEssayCommentVisibility(id: String, isPrivate: Bool) async throws -> EssayCommentState? {
+        struct Payload: Encodable { let visibility: String }
+        return try await patchEssayComment(id: id, values: Payload(visibility: isPrivate ? "private" : "shared"))
+    }
+
+    /// Resolve (resolved_at = now) or reopen (resolved_at = null).
+    func setEssayCommentResolved(id: String, resolved: Bool) async throws -> EssayCommentState? {
+        struct Payload: Encodable {
+            let resolvedAt: Date?
+            enum CodingKeys: String, CodingKey { case resolvedAt = "resolved_at" }
+            func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: CodingKeys.self)
+                if let resolvedAt { try c.encode(resolvedAt, forKey: .resolvedAt) }
+                else { try c.encodeNil(forKey: .resolvedAt) }   // an explicit null reopens it
+            }
+        }
+        return try await patchEssayComment(id: id, values: Payload(resolvedAt: resolved ? Date() : nil))
+    }
+
+    /// Delete one comment. False = the row survived (refused by RLS).
+    func deleteEssayComment(id: String) async throws -> Bool {
+        struct Row: Decodable { let id: String }
+        let deleted: [Row] = try await deleteReturning("essay_comments", query: [
+            URLQueryItem(name: "id", value: "eq.\(id)"),
+            URLQueryItem(name: "select", value: "id"),
+        ])
+        return !deleted.isEmpty
     }
 
     func listDeviceKeys(userIds: [String]) async throws -> [DevicePublicKey] {
@@ -1798,6 +1861,9 @@ struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
     var body: String
     var visibility: String?
     var createdAt: Date?
+    /// Not returned by get_my_returned_work today; read when present so a
+    /// resolved comment is hidden from the student too.
+    var resolvedAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -1809,6 +1875,7 @@ struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
         case body
         case visibility
         case createdAt = "created_at"
+        case resolvedAt = "resolved_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -1822,6 +1889,7 @@ struct ReturnedComment: Identifiable, Codable, Hashable, Sendable {
         body = (try? c.decode(String.self, forKey: .body)) ?? ""
         visibility = try? c.decode(String.self, forKey: .visibility)
         createdAt = try? c.decode(Date.self, forKey: .createdAt)
+        resolvedAt = try? c.decode(Date.self, forKey: .resolvedAt)
     }
 }
 

@@ -22,7 +22,9 @@ private struct ReturnedEssay: Identifiable, Hashable {
     var releasedAt: Date?
     var points: Double?        // nil => "Feedback only (no score yet)"
     var pointsPossible: Double
-    var paragraphs: [EssayParagraph]
+    /// The paper as plain paragraphs, built the same way as on the
+    /// teacher's Mac (PaperText), so the comments' ranges line up.
+    var paragraphs: [String]
     var feedback: String       // overall comment from the teacher ("" => none)
     var comments: [InlineComment]
 
@@ -55,12 +57,14 @@ struct EssayRun: Hashable {
     var commentId: String?      // non-nil => highlighted, tied to a margin note
 }
 
-/// A teacher comment anchored to a quote in the essay.
+/// A teacher comment anchored to a passage in the essay.
 private struct InlineComment: Identifiable, Hashable {
     let id: String
-    var quote: String           // the highlighted text it points at ("" => none)
+    var quote: String           // the highlighted words ("" => can't be placed)
     var body: String
-    var orphaned: Bool = false  // "Comment location changed" (web: orphan badge)
+    var rangeStart: Int = 0
+    var rangeEnd: Int = 0
+    var createdAt: Date? = nil
 }
 
 /// Numbers without a trailing ".00" but keeping half points (87.5 stays 87.5).
@@ -189,15 +193,24 @@ struct ReturnedWorkView: View {
     // MARK: 3-column body
 
     private var body3Col: some View {
-        HStack(spacing: 0) {
-            listPane
-                .frame(width: 260)
-            Divider().opacity(0.4)
-            paperCanvas
-                .frame(maxWidth: .infinity)
-            Divider().opacity(0.4)
-            rail
-                .frame(width: 320)
+        // The paper and its comment column need the room, so the side panes
+        // narrow on a smaller window.
+        GeometryReader { geo in
+            let compact = geo.size.width < 1320
+            // Below this the essay list moves into a picker in the rail.
+            let noList = geo.size.width < 1100
+            HStack(spacing: 0) {
+                if !noList {
+                    listPane
+                        .frame(width: compact ? 200 : 260)
+                    Divider().opacity(0.4)
+                }
+                paperCanvas
+                    .frame(maxWidth: .infinity)
+                Divider().opacity(0.4)
+                rail(showPicker: noList)
+                    .frame(width: compact ? 264 : 320)
+            }
         }
     }
 
@@ -253,67 +266,65 @@ struct ReturnedWorkView: View {
         .linkPointer()
     }
 
-    // MARK: Centre — read-only essay "paper" (clean WHITE opaque card)
+    // MARK: Centre: the paper with the teacher's comments beside it
 
+    /// Read-only: the student can select and copy, and click a highlight or
+    /// a card to pair them, but cannot add, edit, resolve or delete.
     private var paperCanvas: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.Space.lg) {
-                ForEach(Array(selected.paragraphs.enumerated()), id: \.offset) { _, para in
-                    paragraphText(para)
-                }
-            }
-            .animation(.easeOut(duration: 0.18), value: activeCommentId)
-            .padding(.horizontal, 56)
-            .padding(.vertical, 56)
-            .frame(maxWidth: 760, alignment: .leading)
-            .background(Color.white)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.06), radius: 4, x: 0, y: 1)
-            .padding(.horizontal, Theme.Space.xl)
-            .padding(.vertical, Theme.Space.xxl)
-            .frame(maxWidth: .infinity)
-        }
+        MarginedPaper(
+            paragraphs: selected.paragraphs,
+            comments: marginItems,
+            activeId: $activeCommentId)
+            .id(selected.id)
+            .background(Color(red: 0.976, green: 0.984, blue: 0.992))
     }
 
-    /// Build one paragraph as a single Text, inlining the comment highlights as
-    /// accent-tinted, background-shaded spans (the web .ec-hl wrapper).
-    private func paragraphText(_ para: EssayParagraph) -> Text {
-        var out = Text("")
-        for run in para.runs {
-            var t = Text(run.text)
-                .font(Theme.serif(16))
-                .foregroundColor(Theme.inkSoft)
-            if let cid = run.commentId {
-                let active = cid == activeCommentId
-                t = t
-                    .foregroundColor(Theme.accent)
-                    .underline(true, color: Theme.accent.opacity(active ? 0.6 : 0.35))
-            }
-            out = out + t
+    private var marginItems: [MarginItem] {
+        let text = PaperText.plain(selected.paragraphs)
+        return selected.comments.map { c in
+            MarginItem(id: c.id, body: c.body, author: "Teacher", createdAt: c.createdAt,
+                       isPrivate: false, resolved: false,
+                       anchor: PaperText.anchor(rangeStart: c.rangeStart, rangeEnd: c.rangeEnd,
+                                                quote: c.quote, in: text))
         }
-        return out
     }
 
     // MARK: Right rail — score, overall comment, comments
 
-    private var rail: some View {
+    private func rail(showPicker: Bool) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.lg) {
+                if showPicker, essays.count > 1 { essayPicker }
                 scoreCard
                 finalCommentCard
-                kickerRow("bubble.left.and.text.bubble.right", "Comments on your essay")
-                    .padding(.top, Theme.Space.xs)
-                commentsList
+                commentsNote
             }
             .padding(Theme.Space.lg)
             .padding(.bottom, Theme.Space.xxl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(.regularMaterial)
+    }
+
+    /// The essay list as a menu, for narrow windows.
+    private var essayPicker: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            kickerRow("doc.text", "Your essays")
+            Menu {
+                ForEach(essays) { essay in
+                    Button(essay.title) {
+                        selectedId = essay.id
+                        activeCommentId = nil
+                    }
+                }
+            } label: {
+                Text(selected.title)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .menuStyle(.button)
+            .accessibilityLabel("Choose an essay")
+        }
     }
 
     private var scoreCard: some View {
@@ -390,77 +401,17 @@ struct ReturnedWorkView: View {
         )
     }
 
-    @ViewBuilder
-    private var commentsList: some View {
-        if selected.comments.isEmpty {
-            Text("No comments on this essay.")
+    private var commentsNote: some View {
+        let n = selected.comments.count
+        return VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            kickerRow("bubble.left.and.text.bubble.right", "Comments on your essay")
+            Text(n == 0 ? "No comments on this essay."
+                 : (n == 1 ? "1 comment, shown beside your essay." : "\(n) comments, shown beside your essay."))
                 .font(Theme.sans(13))
                 .foregroundStyle(Theme.muted)
-                .padding(Theme.Space.md)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
-                )
-        } else {
-            VStack(spacing: Theme.Space.sm) {
-                ForEach(selected.comments) { c in
-                    commentCard(c)
-                }
-            }
+                .fixedSize(horizontal: false, vertical: true)
         }
-    }
-
-    private func commentCard(_ c: InlineComment) -> some View {
-        let active = c.id == activeCommentId
-        return Button {
-            activeCommentId = (active ? nil : c.id)
-        } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                if !c.quote.isEmpty {
-                    Text(c.quote)
-                        .font(Theme.sans(12))
-                        .foregroundStyle(Theme.muted)
-                        .lineLimit(2)
-                        .padding(.leading, Theme.Space.sm)
-                        .overlay(alignment: .leading) {
-                            Rectangle().fill(Theme.accent).frame(width: 3)
-                        }
-                }
-                Text(c.body)
-                    .font(Theme.sans(14))
-                    .foregroundStyle(Theme.inkSoft)
-                    .lineSpacing(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if c.orphaned {
-                    Text("Comment location changed")
-                        .font(Theme.sans(11, .semibold))
-                        .foregroundStyle(Theme.warn)
-                        .padding(.top, 2)
-                    Text("The teacher's note points to text you edited.")
-                        .font(Theme.sans(11))
-                        .foregroundStyle(Theme.muted)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(Theme.Space.md)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                    .fill(Color.white)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                    .stroke(active ? Theme.accent : Color.black.opacity(0.08),
-                            lineWidth: active ? 1.5 : 1)
-            )
-            .shadow(color: active ? Theme.accent.opacity(0.18) : .clear,
-                    radius: active ? 8 : 0, x: 0, y: 2)
-            .animation(.easeOut(duration: 0.18), value: active)
-        }
-        .buttonStyle(.plain)
-        .rowHover()
-        .help(active ? "Hide this comment's highlight" : "Show this comment's highlight in the essay")
-        .linkPointer()
+        .padding(.top, Theme.Space.xs)
     }
 
     // MARK: Empty state
@@ -557,9 +508,8 @@ extension ReturnedWorkView {
 
 private extension ReturnedWorkView {
     /// Map a released-work DTO into the read-only presentation model. The body
-    /// HTML is flattened to plain paragraphs (the inline-highlight ranges from
-    /// the web build aren't reconstructed here; the teacher's comments still show
-    /// in the right rail).
+    /// HTML is flattened to plain paragraphs exactly as the teacher's grading
+    /// paper does, so each comment's stored range lands on the same words.
     nonisolated static func makeEssay(_ item: ReturnedWorkItem) -> ReturnedEssay {
         ReturnedEssay(
             id: item.submissionId,
@@ -567,13 +517,17 @@ private extension ReturnedWorkView {
             releasedAt: item.releasedAt,
             points: item.points,
             pointsPossible: item.pointsPossible,
-            paragraphs: paragraphs(fromHTML: item.contentHtml, comments: item.comments),
+            paragraphs: PaperText.paragraphs(fromHTML: item.contentHtml),
             feedback: item.feedback,
-            comments: item.comments.map { c in
-                let quote = c.quote ?? ""
-                return InlineComment(id: c.id, quote: quote, body: c.body,
-                                     orphaned: quote.isEmpty)
-            }
+            // Shared only (the server returns nothing else); resolved ones are
+            // hidden when the server says so.
+            comments: item.comments
+                .filter { ($0.visibility ?? "shared") == "shared" && $0.resolvedAt == nil }
+                .map { c in
+                    InlineComment(id: c.id, quote: c.quote ?? "", body: c.body,
+                                  rangeStart: c.rangeStart ?? 0, rangeEnd: c.rangeEnd ?? 0,
+                                  createdAt: c.createdAt)
+                }
         )
     }
 }
@@ -588,39 +542,22 @@ private extension ReturnedWorkView {
             releasedAt: Calendar.current.date(byAdding: .day, value: -2, to: .now),
             points: 92,
             pointsPossible: 100,
-            paragraphs: [
-                EssayParagraph(runs: [
-                    .init(text: "From its opening lines, the passage sets light and dark against each other not as opposites but as a single shifting field. "),
-                    .init(text: "The lantern in the window is never simply a source of warmth", commentId: "c1"),
-                    .init(text: "; it is the one fixed point against which the surrounding darkness is measured, and the narrator returns to it whenever the scene threatens to lose its bearings."),
-                ]),
-                EssayParagraph(runs: [
-                    .init(text: "As the chapter progresses, the imagery turns inward. The shadows that gather in the hall are described in the same language used earlier for the protagonist's doubt, so that "),
-                    .init(text: "the darkness becomes a mirror of conscience rather than a threat from outside.", commentId: "c2"),
-                    .init(text: " This doubling is what gives the passage its quiet tension: the reader is never sure whether the light is protecting the character or merely exposing what they would rather not see."),
-                ]),
-                EssayParagraph(runs: [
-                    .init(text: "By the final paragraph the two forces have collapsed into one. The dawn that breaks over the courtyard is neither pure relief nor pure loss; it is simply the moment at which the distinction stops mattering, and the character steps into a grey, undivided day."),
-                ]),
-            ],
+            paragraphs: sample1,
             feedback: "A genuinely strong reading. You move past the obvious good-versus-evil framing and track how the imagery actually behaves across the passage, which is exactly the work this prompt asks for. Tighten your second paragraph so the conscience claim lands with a little more textual proof, and watch the long sentences in the close. This is honest, careful analysis.",
             comments: [
-                InlineComment(
-                    id: "c1",
-                    quote: "The lantern in the window is never simply a source of warmth",
-                    body: "Nice. This is the right place to anchor your argument. Could you name one concrete detail from the lantern's description here?"
-                ),
-                InlineComment(
-                    id: "c2",
-                    quote: "the darkness becomes a mirror of conscience rather than a threat from outside.",
-                    body: "Strong claim. It would be even stronger with a short quotation showing the shared language you mention."
-                ),
+                sampleComment("c1", in: sample1,
+                              quote: "The lantern in the window is never simply a source of warmth",
+                              body: "Nice. This is the right place to anchor your argument. Could you name one concrete detail from the lantern's description here?",
+                              daysAgo: 2),
+                sampleComment("c2", in: sample1,
+                              quote: "the darkness becomes a mirror of conscience rather than a threat from outside.",
+                              body: "Strong claim. It would be even stronger with a short quotation showing the shared language you mention.",
+                              daysAgo: 2),
                 InlineComment(
                     id: "c3",
                     quote: "",
                     body: "Your conclusion is your best paragraph. Trust this kind of restraint earlier in the essay too.",
-                    orphaned: true
-                ),
+                    createdAt: Calendar.current.date(byAdding: .day, value: -2, to: .now)),
             ]
         ),
         ReturnedEssay(
@@ -629,26 +566,37 @@ private extension ReturnedWorkView {
             releasedAt: Calendar.current.date(byAdding: .day, value: -9, to: .now),
             points: nil,
             pointsPossible: 100,
-            paragraphs: [
-                EssayParagraph(runs: [
-                    .init(text: "The narrator's unreliability is built quietly, through small contradictions the reader is trusted to catch. "),
-                    .init(text: "Twice in the first page the narrator corrects a detail they had just stated as fact", commentId: "c1"),
-                    .init(text: ", and these corrections are never explained, which trains us to read everything that follows with one eyebrow raised."),
-                ]),
-                EssayParagraph(runs: [
-                    .init(text: "What makes the technique work is restraint. The author never tells us the narrator is lying; the gaps simply accumulate until we are doing the suspicion ourselves."),
-                ]),
-            ],
+            paragraphs: sample2,
             feedback: "I haven't put a number on this yet, but your instinct here is good. Keep going with the idea that the reader is made to do the suspecting. Bring in one more example and this becomes a real argument.",
             comments: [
-                InlineComment(
-                    id: "c1",
-                    quote: "Twice in the first page the narrator corrects a detail they had just stated as fact",
-                    body: "Good specific observation. Quote one of these two corrections directly and the point is airtight."
-                ),
+                sampleComment("c1", in: sample2,
+                              quote: "Twice in the first page the narrator corrects a detail they had just stated as fact",
+                              body: "Good specific observation. Quote one of these two corrections directly and the point is airtight.",
+                              daysAgo: 9),
             ]
         ),
     ]
+
+    static let sample1: [String] = [
+        "From its opening lines, the passage sets light and dark against each other not as opposites but as a single shifting field. The lantern in the window is never simply a source of warmth; it is the one fixed point against which the surrounding darkness is measured, and the narrator returns to it whenever the scene threatens to lose its bearings.",
+        "As the chapter progresses, the imagery turns inward. The shadows that gather in the hall are described in the same language used earlier for the protagonist's doubt, so that the darkness becomes a mirror of conscience rather than a threat from outside. This doubling is what gives the passage its quiet tension: the reader is never sure whether the light is protecting the character or merely exposing what they would rather not see.",
+        "By the final paragraph the two forces have collapsed into one. The dawn that breaks over the courtyard is neither pure relief nor pure loss; it is simply the moment at which the distinction stops mattering, and the character steps into a grey, undivided day.",
+    ]
+
+    static let sample2: [String] = [
+        "The narrator's unreliability is built quietly, through small contradictions the reader is trusted to catch. Twice in the first page the narrator corrects a detail they had just stated as fact, and these corrections are never explained, which trains us to read everything that follows with one eyebrow raised.",
+        "What makes the technique work is restraint. The author never tells us the narrator is lying; the gaps simply accumulate until we are doing the suspicion ourselves.",
+    ]
+
+    /// A sample comment with a real range into the sample paper.
+    static func sampleComment(_ id: String, in paragraphs: [String], quote: String,
+                              body: String, daysAgo: Int) -> InlineComment {
+        let r = (PaperText.plain(paragraphs) as NSString).range(of: quote)
+        return InlineComment(id: id, quote: quote, body: body,
+                             rangeStart: r.location == NSNotFound ? 0 : r.location,
+                             rangeEnd: r.location == NSNotFound ? 0 : NSMaxRange(r),
+                             createdAt: Calendar.current.date(byAdding: .day, value: -daysAgo, to: .now))
+    }
 }
 
 #Preview {

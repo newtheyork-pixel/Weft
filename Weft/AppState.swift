@@ -2026,14 +2026,18 @@ final class AppState {
         }
     }
 
-    /// Pin a margin note to a quote in the student's paper. Shared with the
-    /// student when the grade is released.
+    /// Pin a margin note to a passage in the student's paper. `rangeStart` /
+    /// `rangeEnd` are the passage's UTF-16 offsets in the paper's plain text
+    /// (PaperText.plain). Shared comments reach the student when the grade
+    /// is released; private ones never do.
     @discardableResult
-    func addEssayComment(submission: TeacherSubmission, quote: String, body: String) async -> Bool {
+    func addEssayComment(submission: TeacherSubmission, quote: String, body: String,
+                         rangeStart: Int, rangeEnd: Int, isPrivate: Bool = false) async -> Bool {
         guard signedIn else { return false }
         let q = quote.trimmingCharacters(in: .whitespacesAndNewlines)
         let note = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, !note.isEmpty,
+              rangeStart >= 0, rangeEnd > rangeStart,
               let sessionId = submission.sessionId ?? gradingSession?.id,
               let studentId = submission.studentId
         else { return false }
@@ -2051,11 +2055,72 @@ final class AppState {
         do {
             guard var row = try await supabase.createEssayComment(
                 submissionId: submission.id, sessionId: sessionId,
-                studentId: studentId, quoteLength: q.utf16.count,
-                quoteCipher: sealed, body: note)
+                studentId: studentId, rangeStart: rangeStart, rangeEnd: rangeEnd,
+                quoteCipher: sealed, body: note,
+                visibility: isPrivate ? "private" : "shared")
             else { return false }
             row.quote = q
+            if row.author == nil { row.author = userId }
+            if row.createdAt == nil { row.createdAt = Date() }
             gradingComments[submission.id, default: []].append(row)
+            return true
+        } catch {
+            errorMessage = describe(error)
+            return false
+        }
+    }
+
+    /// Change a margin note's text. The sealed quote is left alone.
+    @discardableResult
+    func updateEssayCommentBody(_ comment: EssayComment, body: String) async -> Bool {
+        let note = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !note.isEmpty else { return false }
+        return await patchComment(comment) { try await self.supabase.updateEssayCommentBody(id: comment.id, body: note) }
+    }
+
+    /// Make a margin note private (teachers only) or shared with the student.
+    @discardableResult
+    func setEssayCommentPrivate(_ comment: EssayComment, isPrivate: Bool) async -> Bool {
+        await patchComment(comment) { try await self.supabase.setEssayCommentVisibility(id: comment.id, isPrivate: isPrivate) }
+    }
+
+    /// Resolve (hide from the margin) or reopen a margin note.
+    @discardableResult
+    func setEssayCommentResolved(_ comment: EssayComment, resolved: Bool) async -> Bool {
+        await patchComment(comment) { try await self.supabase.setEssayCommentResolved(id: comment.id, resolved: resolved) }
+    }
+
+    @discardableResult
+    func deleteEssayComment(_ comment: EssayComment) async -> Bool {
+        guard signedIn, let sub = comment.submissionId else { return false }
+        do {
+            guard try await supabase.deleteEssayComment(id: comment.id) else {
+                errorMessage = "This comment couldn't be deleted. It may belong to a session you don't run."
+                return false
+            }
+            gradingComments[sub]?.removeAll { $0.id == comment.id }
+            return true
+        } catch {
+            errorMessage = describe(error)
+            return false
+        }
+    }
+
+    /// Run one comment PATCH and fold the returned state into the cache.
+    private func patchComment(_ comment: EssayComment,
+                              _ write: () async throws -> SupabaseManager.EssayCommentState?) async -> Bool {
+        guard signedIn, let sub = comment.submissionId else { return false }
+        do {
+            guard let state = try await write() else {
+                errorMessage = "This comment couldn't be changed. It may belong to a session you don't run."
+                return false
+            }
+            if let i = gradingComments[sub]?.firstIndex(where: { $0.id == comment.id }) {
+                gradingComments[sub]?[i].body = state.body
+                gradingComments[sub]?[i].visibility = state.visibility
+                gradingComments[sub]?[i].resolvedAt = state.resolvedAt
+                gradingComments[sub]?[i].updatedAt = state.updatedAt
+            }
             return true
         } catch {
             errorMessage = describe(error)
