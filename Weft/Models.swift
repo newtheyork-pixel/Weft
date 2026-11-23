@@ -652,6 +652,15 @@ struct EssayComment: Identifiable, Codable, Hashable, Sendable {
     var body: String
     var visibility: String?
     var quoteCipher: WeftSealedText?
+    /// auth.users id of the teacher (or admin) who wrote it.
+    var author: String? = nil
+    var createdAt: Date? = nil
+    var updatedAt: Date? = nil
+    /// Set when the comment is resolved (hidden from the margin).
+    var resolvedAt: Date? = nil
+
+    var isPrivate: Bool { visibility == "private" }
+    var isResolved: Bool { resolvedAt != nil }
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -660,8 +669,11 @@ struct EssayComment: Identifiable, Codable, Hashable, Sendable {
         case studentId = "student_id"
         case rangeStart = "range_start"
         case rangeEnd = "range_end"
-        case quote, body, visibility
+        case quote, body, visibility, author
         case quoteCipher = "quote_cipher"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case resolvedAt = "resolved_at"
     }
 }
 

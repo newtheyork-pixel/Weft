@@ -60,29 +60,60 @@ private struct ReviewEntry: Identifiable {
         submitted: false, returned: false, lastEdited: "",
         score: "", finalComment: "", paragraphs: [])
 
-    /// Cheap HTML → paragraphs: turn block-level closers into line breaks, strip
-    /// the remaining tags, decode the few common entities, and split into blocks.
+    /// The paper's paragraphs, built the same way the student's Mac builds
+    /// them, so a comment's stored range points at the same words on both.
     static func paragraphs(fromHTML html: String) -> [String] {
-        guard !html.isEmpty else { return [] }
-        var s = html
-        for tag in ["</p>", "<br>", "<br/>", "<br />", "</div>", "</h1>", "</h2>", "</h3>", "</li>"] {
-            s = s.replacingOccurrences(of: tag, with: "\n", options: .caseInsensitive)
-        }
-        let stripped = s.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-        let map = ["&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"",
-                   "&#39;": "'", "&apos;": "'", "&nbsp;": " "]
-        var decoded = stripped
-        for (k, v) in map { decoded = decoded.replacingOccurrences(of: k, with: v) }
-        let blocks = decoded
-            .components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        return blocks.isEmpty
-            ? [decoded.trimmingCharacters(in: .whitespacesAndNewlines)].filter { !$0.isEmpty }
-            : blocks
+        PaperText.paragraphs(fromHTML: html)
     }
 
-    static let mock: [ReviewEntry] = [
+    static let mock: [ReviewEntry] = {
+        var rows = mockRows
+        rows[0].comments = [
+            mockComment("m1", on: avaEssay, submission: "1",
+                        quote: "a small, stubborn coin of gold against the whole weight of the night",
+                        body: "Good choice of quotation. Say a little more about why \"stubborn\" matters here.",
+                        minutesAgo: 2),
+            mockComment("m2", on: avaEssay, submission: "1",
+                        quote: "a thin line of morning",
+                        body: "This is the heart of your argument. Make it the topic sentence of the paragraph.",
+                        minutesAgo: 60 * 26),
+            mockComment("m3", on: avaEssay, submission: "1",
+                        quote: "the plot's quiet engine",
+                        body: "Strong phrase. Check with the class rubric on figurative claims.",
+                        minutesAgo: 60 * 3, isPrivate: true),
+            mockComment("m4", on: avaEssay, submission: "1",
+                        quote: "clarity is shown to be earned, not given",
+                        body: "Thesis is clear. Nice.",
+                        minutesAgo: 60 * 50, resolved: true),
+        ]
+        rows[1].comments = [
+            mockComment("m5", on: benEssay, submission: "2",
+                        quote: "forgiving",
+                        body: "Lovely detail. Who else in the passage is \"forgiving\"?",
+                        minutesAgo: 60 * 30, author: "co-teacher"),
+        ]
+        return rows
+    }()
+
+    /// A sample comment with a real range into the sample paper.
+    private static func mockComment(_ id: String, on paragraphs: [String], submission: String,
+                                    quote: String, body: String, minutesAgo: Double,
+                                    isPrivate: Bool = false, resolved: Bool = false,
+                                    author: String = mockAuthor) -> EssayComment {
+        let r = (PaperText.plain(paragraphs) as NSString).range(of: quote)
+        let created = Date().addingTimeInterval(-minutesAgo * 60)
+        return EssayComment(id: id, submissionId: submission, sessionId: nil, studentId: nil,
+                            rangeStart: r.location == NSNotFound ? 0 : r.location,
+                            rangeEnd: r.location == NSNotFound ? 1 : NSMaxRange(r),
+                            quote: quote, body: body, visibility: isPrivate ? "private" : "shared",
+                            quoteCipher: nil, author: author, createdAt: created, updatedAt: created,
+                            resolvedAt: resolved ? created.addingTimeInterval(600) : nil)
+    }
+
+    /// Stands in for the signed-in teacher's id in the sample data.
+    static let mockAuthor = "__mock_me__"
+
+    private static let mockRows: [ReviewEntry] = [
         ReviewEntry(
             id: "1", name: "Ava Chen", status: .submitted, wordCount: 612,
             submitted: true, returned: false, lastEdited: "Last edited today at 10:42 AM",
@@ -153,9 +184,8 @@ struct ReviewGradingView: View {
     /// Local edit buffers for the selected submission, seeded from the live grade.
     @State private var scoreText: String = ""
     @State private var commentText: String = ""
-    @State private var marginQuote: String = ""
-    @State private var marginNote: String = ""
-    @State private var marginBusy = false
+    /// The open comment on the paper (its card raised, its passage stronger).
+    @State private var activeCommentId: String?
     /// Tracks which submission the buffers were seeded for, so we reseed on move.
     @State private var seededSubmissionId: String?
 
@@ -245,14 +275,21 @@ struct ReviewGradingView: View {
                         title: "No submissions yet",
                         body: "Nobody in this session has started writing. Rows appear here as students begin.")
                 } else {
-                    rosterRail
-                        .frame(width: 268)
-                    Divider().overlay(Color.black.opacity(0.08))
-                    reader
-                        .frame(maxWidth: .infinity)
-                    Divider().overlay(Color.black.opacity(0.08))
-                    gradeRail
-                        .frame(width: 320)
+                    // The paper and its comment column need the room, so on
+                    // a narrower window the roster shrinks to initials.
+                    GeometryReader { geo in
+                        let compact = geo.size.width < 1320
+                        HStack(spacing: 0) {
+                            rosterRail(compact: compact)
+                                .frame(width: compact ? 64 : 248)
+                            Divider().overlay(Color.black.opacity(0.08))
+                            reader
+                                .frame(maxWidth: .infinity)
+                            Divider().overlay(Color.black.opacity(0.08))
+                            gradeRail
+                                .frame(width: compact ? 296 : 320)
+                        }
+                    }
                 }
             }
         }
@@ -266,8 +303,7 @@ struct ReviewGradingView: View {
         .onChange(of: app.gradingRoster) { _, _ in rebuildLiveRoster() }
         .onChange(of: current.id) { _, _ in
             seedBuffers()
-            marginQuote = ""
-            marginNote = ""
+            activeCommentId = nil
         }
         .onChange(of: isLive) { _, _ in index = 0; seedBuffers() }
         .onAppear { seedBuffers() }
@@ -445,7 +481,57 @@ struct ReviewGradingView: View {
 
     // MARK: Left — roster rail
 
-    private var rosterRail: some View {
+    @ViewBuilder private func rosterRail(compact: Bool) -> some View {
+        if compact { compactRosterRail } else { fullRosterRail }
+    }
+
+    /// Initials only, for narrow windows. The name and status are in the
+    /// tooltip and the VoiceOver label.
+    private var compactRosterRail: some View {
+        ScrollView {
+            VStack(spacing: 6) {
+                ForEach(Array(roster.enumerated()), id: \.element.id) { i, s in
+                    compactRosterButton(s, index: i)
+                }
+            }
+            .padding(.vertical, Theme.Space.md)
+            .frame(maxWidth: .infinity)
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(.regularMaterial)
+    }
+
+    private func compactRosterButton(_ s: ReviewEntry, index i: Int) -> some View {
+        let active = i == index
+        let dot: Color = s.returned ? Theme.good : (s.submitted ? Theme.accentSoft : Theme.muted2)
+        let label = "\(s.name), \(s.status.label)" + (s.returned ? ", returned" : "")
+        return Button {
+            flushIfDirty()
+            withAnimation(.easeOut(duration: 0.18)) { index = i }
+        } label: {
+            ZStack(alignment: .bottomTrailing) {
+                ZStack {
+                    Circle().fill(active ? Theme.accent.opacity(0.16) : Theme.accentSoft.opacity(0.12))
+                    Text(s.initials)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                }
+                .frame(width: 34, height: 34)
+                .overlay(Circle().stroke(active ? Theme.accent : Color.clear, lineWidth: 2))
+                Circle()
+                    .fill(dot)
+                    .frame(width: 9, height: 9)
+                    .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+            }
+            .frame(width: 44, height: 44)
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
+        .linkPointer()
+    }
+
+    private var fullRosterRail: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Image(systemName: "person.2")
@@ -547,17 +633,32 @@ struct ReviewGradingView: View {
         VStack(alignment: .leading, spacing: 0) {
             readerHead
             Divider().overlay(Color.black.opacity(0.08))
-            ScrollView {
-                VStack {
-                    paper
+            Group {
+                if current.paragraphs.isEmpty {
+                    ScrollView {
+                        emptyPaper
+                            .padding(.horizontal, Theme.Space.xl)
+                            .padding(.top, Theme.Space.lg)
+                            .padding(.bottom, Theme.Space.xxxl)
+                            .frame(maxWidth: .infinity)
+                    }
+                } else {
+                    // The paper with its comment column (the Docs layout).
+                    // Select words to comment; click a highlight to open its card.
+                    MarginedPaper(
+                        paragraphs: current.paragraphs,
+                        comments: marginItems,
+                        activeId: $activeCommentId,
+                        handlers: commentHandlers,
+                        onAdd: { sel, body, isPrivate in
+                            await addComment(sel, body: body, isPrivate: isPrivate)
+                        },
+                        emptyHint: "Select words on the paper to comment on them.")
                 }
-                .padding(.horizontal, Theme.Space.xl)
-                .padding(.top, Theme.Space.lg)
-                .padding(.bottom, Theme.Space.xxxl)
-                .frame(maxWidth: .infinity)
-                .id(current.id)
-                .transition(.opacity)
             }
+            .id(current.id)
+            .transition(.opacity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(red: 0.976, green: 0.984, blue: 0.992)) // #f9fbfd canvas
         }
     }
@@ -570,11 +671,6 @@ struct ReviewGradingView: View {
 
             HStack(spacing: Theme.Space.md) {
                 Chip(text: current.status.label, kind: current.status.chipKind)
-                if current.submitted {
-                    Chip(text: "Submitted", kind: .good)
-                } else {
-                    Chip(text: "In progress", kind: .warn)
-                }
                 Text("\(current.wordCount) words")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.muted)
@@ -618,37 +714,6 @@ struct ReviewGradingView: View {
         .background(.regularMaterial)
     }
 
-    /// The clean WHITE opaque page. Deliberately NOT glass — this is paper.
-    private var paper: some View {
-        Group {
-            if current.paragraphs.isEmpty {
-                emptyPaper
-            } else {
-                VStack(alignment: .leading, spacing: Theme.Space.lg) {
-                    ForEach(Array(current.paragraphs.enumerated()), id: \.offset) { _, para in
-                        Text(para)
-                            .font(.system(size: 15))
-                            .foregroundStyle(Color.black)
-                            .lineSpacing(5)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-                .padding(.vertical, 56)
-                .padding(.horizontal, 64)
-                .frame(maxWidth: 760, alignment: .leading)
-                .frame(maxWidth: .infinity)
-                .background(Color.white)
-                .clipShape(RoundedRectangle(cornerRadius: 2))
-                .shadow(color: Color.black.opacity(0.12), radius: 6, x: 0, y: 2)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 2)
-                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
-                )
-            }
-        }
-    }
-
     private var emptyPaper: some View {
         VStack(spacing: Theme.Space.sm) {
             Text(current.status == .writing ? "Still writing" : "No submission yet")
@@ -688,7 +753,7 @@ struct ReviewGradingView: View {
                         }
                         scoreBlock
                         finalCommentBlock
-                        marginCommentsBlock
+                        commentsSummaryBlock
                     }
                     .padding(Theme.Space.lg)
                 }
@@ -840,94 +905,132 @@ struct ReviewGradingView: View {
         isLive ? (app.gradingComments[current.id] ?? []) : current.comments
     }
 
-    private var marginCommentsBlock: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.md) {
-            slotHead("In the margin", system: "text.quote")
-            Text("Select a sentence on the paper, paste it here, and leave a note on that line.")
+    /// Comments now live beside the paper; the rail just counts them.
+    private var commentsSummaryBlock: some View {
+        let all = currentComments
+        let open = all.filter { !$0.isResolved }
+        let privateCount = open.filter(\.isPrivate).count
+        let resolvedCount = all.count - open.count
+        var parts: [String] = [open.count == 1 ? "1 comment" : "\(open.count) comments"]
+        if privateCount > 0 { parts.append("\(privateCount) private") }
+        if resolvedCount > 0 { parts.append("\(resolvedCount) resolved") }
+        return VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            slotHead("Comments", system: "text.bubble")
+            Text(parts.joined(separator: " \u{00B7} "))
+                .font(Theme.sans(13))
+                .foregroundStyle(Theme.inkSoft)
+                .monospacedDigit()
+            Text("Select words on the paper to add one (\u{2325}\u{2318}M). Private notes never reach the student.")
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.muted)
                 .lineSpacing(2)
-            TextField("Quoted sentence", text: $marginQuote, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(Theme.sans(12))
-                .lineLimit(2...4)
-                .padding(8)
-                .background(
-                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                        .fill(Color.white.opacity(0.6)))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                        .stroke(Color.black.opacity(0.10), lineWidth: 1))
-            TextField("Your note", text: $marginNote, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(Theme.sans(13))
-                .lineLimit(3...6)
-                .padding(8)
-                .background(
-                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                        .fill(Color.white.opacity(0.6)))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                        .stroke(Color.black.opacity(0.10), lineWidth: 1))
-            Button {
-                addMarginComment()
-            } label: {
-                Text("Pin to the paper")
-                    .font(Theme.sans(13, .semibold))
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.glass)
-            .disabled(marginBusy || marginQuote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                      || marginNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .linkPointer()
-
-            if currentComments.isEmpty {
-                Text("No margin notes yet.")
-                    .font(Theme.sans(12))
-                    .foregroundStyle(Theme.muted)
-            } else {
-                VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                    ForEach(currentComments) { c in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(c.quote)
-                                .font(Theme.sans(12))
-                                .foregroundStyle(Theme.muted)
-                                .lineLimit(2)
-                                .padding(.leading, Theme.Space.sm)
-                                .overlay(alignment: .leading) {
-                                    Rectangle().fill(Theme.accent).frame(width: 3)
-                                }
-                            Text(c.body)
-                                .font(Theme.sans(13))
-                                .foregroundStyle(Theme.inkSoft)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-            }
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private func addMarginComment() {
-        let quote = marginQuote.trimmingCharacters(in: .whitespacesAndNewlines)
-        let note = marginNote.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !quote.isEmpty, !note.isEmpty else { return }
+    // MARK: Comments (margin)
+
+    /// The current paper's comments as the margin shows them.
+    private var marginItems: [MarginItem] {
+        let text = PaperText.plain(current.paragraphs)
+        let me = isLive ? app.userId : ReviewEntry.mockAuthor
+        return currentComments.map { c in
+            MarginItem(id: c.id, body: c.body,
+                       author: (c.author != nil && c.author == me) ? "You" : "Teacher",
+                       createdAt: c.createdAt,
+                       isPrivate: c.isPrivate,
+                       resolved: c.isResolved,
+                       anchor: PaperText.anchor(rangeStart: c.rangeStart, rangeEnd: c.rangeEnd,
+                                                quote: c.quote, in: text))
+        }
+    }
+
+    private var commentHandlers: CommentHandlers {
+        CommentHandlers(
+            saveEdit: { id, body in await editComment(id, body: body) },
+            delete: { id in deleteComment(id) },
+            setResolved: { id, resolved in resolveComment(id, resolved: resolved) },
+            setPrivate: { id, isPrivate in setCommentPrivate(id, isPrivate: isPrivate) })
+    }
+
+    private func comment(_ id: String) -> EssayComment? {
+        currentComments.first { $0.id == id }
+    }
+
+    /// Mutate a sample comment in place (preview only).
+    private func mutateMock(_ id: String, _ change: (inout EssayComment) -> Void) {
+        guard let i = mockRoster[safeMockIndex].comments.firstIndex(where: { $0.id == id }) else { return }
+        change(&mockRoster[safeMockIndex].comments[i])
+    }
+
+    /// Post a new comment on the selected passage. Returns an error to show
+    /// in the draft card, or nil when it was saved.
+    private func addComment(_ sel: PaperSelection, body: String, isPrivate: Bool) async -> String? {
+        let quote = sel.text
+        let start = sel.range.location
+        let end = NSMaxRange(sel.range)
+        guard !quote.isEmpty, end > start else { return "Select some words first." }
         if !isLive {
+            let now = Date()
             let row = EssayComment(id: UUID().uuidString, submissionId: current.id,
                                    sessionId: nil, studentId: nil,
-                                   rangeStart: 0, rangeEnd: max(quote.utf16.count, 1),
-                                   quote: quote, body: note, visibility: "shared")
+                                   rangeStart: start, rangeEnd: end,
+                                   quote: quote, body: body,
+                                   visibility: isPrivate ? "private" : "shared",
+                                   author: ReviewEntry.mockAuthor, createdAt: now, updatedAt: now)
             mockRoster[safeMockIndex].comments.append(row)
-            marginQuote = ""; marginNote = ""
+            return nil
+        }
+        guard let submission = app.gradingSubmissions.first(where: { $0.id == current.id }) else {
+            return "This paper isn't loaded. Reopen grading and try again."
+        }
+        app.errorMessage = nil
+        let ok = await app.addEssayComment(submission: submission, quote: quote, body: body,
+                                           rangeStart: start, rangeEnd: end, isPrivate: isPrivate)
+        if ok { return nil }
+        let message = app.errorMessage ?? "Couldn't save the comment. Check your connection and try again."
+        app.errorMessage = nil
+        return message
+    }
+
+    private func editComment(_ id: String, body: String) async -> Bool {
+        if !isLive {
+            mutateMock(id) { $0.body = body; $0.updatedAt = Date() }
+            return true
+        }
+        guard let c = comment(id) else { return false }
+        return await app.updateEssayCommentBody(c, body: body)
+    }
+
+    private func deleteComment(_ id: String) {
+        if activeCommentId == id { activeCommentId = nil }
+        if !isLive {
+            mockRoster[safeMockIndex].comments.removeAll { $0.id == id }
             return
         }
-        guard let submission = app.gradingSubmissions.first(where: { $0.id == current.id }) else { return }
-        marginBusy = true
-        Task {
-            let ok = await app.addEssayComment(submission: submission, quote: quote, body: note)
-            marginBusy = false
-            if ok { marginQuote = ""; marginNote = "" }
+        guard let c = comment(id) else { return }
+        Task { await app.deleteEssayComment(c) }
+    }
+
+    private func resolveComment(_ id: String, resolved: Bool) {
+        if resolved, activeCommentId == id { activeCommentId = nil }
+        if !isLive {
+            withAnimation(.easeOut(duration: 0.18)) {
+                mutateMock(id) { $0.resolvedAt = resolved ? Date() : nil }
+            }
+            return
         }
+        guard let c = comment(id) else { return }
+        Task { await app.setEssayCommentResolved(c, resolved: resolved) }
+    }
+
+    private func setCommentPrivate(_ id: String, isPrivate: Bool) {
+        if !isLive {
+            mutateMock(id) { $0.visibility = isPrivate ? "private" : "shared" }
+            return
+        }
+        guard let c = comment(id) else { return }
+        Task { await app.setEssayCommentPrivate(c, isPrivate: isPrivate) }
     }
 
     private var shareBlock: some View {
