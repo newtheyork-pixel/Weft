@@ -145,6 +145,8 @@ final class KioskController {
     /// tears down any previous lock so observers and saved state never stack
     /// (the Electron `if (_kioskCleanup) _kioskCleanup()` guard).
     func enterKiosk(window: NSWindow) {
+        // Any app opened during the exam is quit (release builds only).
+        ExamAppCloser.startWatching()
         // Re-entry (e.g. resume after a transient exit) must not stack observers
         // or clobber saved state. If a DIFFERENT window is still locked, fully
         // restore it first (level/full-screen) so we never strand it
@@ -234,6 +236,7 @@ final class KioskController {
     /// releases the observers.
     func exitKiosk(window: NSWindow) {
         inTest = false
+        ExamAppCloser.stopWatching()
         teardownObservers()
 
         // Restore the global presentation surface. Empty == normal desktop:
