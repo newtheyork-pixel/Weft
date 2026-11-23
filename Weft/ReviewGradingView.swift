@@ -568,11 +568,6 @@ struct ReviewGradingView: View {
 
             HStack(spacing: Theme.Space.md) {
                 Chip(text: current.status.label, kind: current.status.chipKind)
-                if current.submitted {
-                    Chip(text: "Submitted", kind: .good)
-                } else {
-                    Chip(text: "In progress", kind: .warn)
-                }
                 Text("\(current.wordCount) words")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.muted)

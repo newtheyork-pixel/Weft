@@ -48,6 +48,8 @@ struct PaperTextView: NSViewRepresentable {
         tv.textContainer?.widthTracksTextView = true
         tv.isVerticallyResizable = false
         tv.isHorizontallyResizable = false
+        tv.autoresizingMask = [.width]
+        tv.textContainer?.containerSize = NSSize(width: 640, height: CGFloat.greatestFiniteMagnitude)
         tv.delegate = context.coordinator
         tv.setAccessibilityLabel("Student's essay")
         return tv
@@ -69,12 +71,15 @@ struct PaperTextView: NSViewRepresentable {
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView tv: NSTextView,
                       context: Context) -> CGSize? {
-        let width = proposal.width ?? 600
-        guard let container = tv.textContainer, let layout = tv.layoutManager else { return nil }
-        container.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
-        layout.ensureLayout(for: container)
-        let height = ceil(layout.usedRect(for: container).height)
-        return CGSize(width: width, height: max(height, 20))
+        // Measure a copy of the text, never the live container: the live one
+        // tracks the view's real width (widthTracksTextView), and resizing it
+        // here made the text wrap in a narrow column and clip at the bottom.
+        let proposed = proposal.width ?? 640
+        let width = proposed.isFinite && proposed > 0 ? proposed : 640
+        let text = Self.attributed(paragraphs.joined(separator: "\n"), highlights: [])
+        let box = text.boundingRect(with: NSSize(width: width, height: CGFloat.greatestFiniteMagnitude),
+                                    options: [.usesLineFragmentOrigin, .usesFontLeading])
+        return CGSize(width: width, height: max(ceil(box.height) + 4, 20))
     }
 
     private static func attributed(_ text: String, highlights: [String]) -> NSAttributedString {
