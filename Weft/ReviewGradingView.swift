@@ -866,7 +866,8 @@ struct ReviewGradingView: View {
     }
 
     private var finalCommentBlock: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.md) {
+        let locked = isLive && app.grades[current.id]?.isFeedbackLocked == true
+        return VStack(alignment: .leading, spacing: Theme.Space.md) {
             slotHead("Final comment", system: "text.bubble")
             TextEditor(text: finalCommentBinding)
                 .font(Theme.sans(13))
@@ -882,9 +883,11 @@ struct ReviewGradingView: View {
                     RoundedRectangle(cornerRadius: Theme.Radius.sm)
                         .stroke(Color.black.opacity(0.10), lineWidth: 1)
                 )
+                .disabled(locked)
                 .overlay(alignment: .topLeading) {
                     if commentIsEmpty {
-                        Text("Write one overall comment for the whole essay.")
+                        Text(locked ? "Unlock your essay key and reopen grading to read this feedback."
+                             : "Write one overall comment for the whole essay.")
                             .font(Theme.sans(13))
                             .foregroundStyle(Theme.muted2)
                             // Mirror the editor's exact text origin — 8 outer
@@ -1049,7 +1052,7 @@ struct ReviewGradingView: View {
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.glass)
-                .disabled(app.isLoading)
+                .disabled(app.isLoading || savingIds.contains(current.id))
                 .help("Save the score and comment privately. The student does not see it yet.")
                 .linkPointer()
             }
@@ -1071,7 +1074,7 @@ struct ReviewGradingView: View {
             }
             .buttonStyle(.glassProminent)
             .tint(Theme.accent)
-            .disabled(app.isLoading)
+            .disabled(app.isLoading || savingIds.contains(current.id))
             .help(current.returned ? "Update and re-share with this student" : "Send the score and your comment to the student")
             .linkPointer()
 
@@ -1192,6 +1195,7 @@ struct ReviewGradingView: View {
         // text and the dirty flag only if the buffers still hold this text.
         let sent = PendingGrade(score: scoreText, comment: comment)
         pendingGrades[id] = sent
+        guard !savingIds.contains(id) else { return }
 
         let points: Double?
         switch Self.scoreInput(scoreText) {

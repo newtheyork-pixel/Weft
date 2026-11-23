@@ -33,7 +33,7 @@ struct WeftEnvelopeContent: Codable, Hashable, Sendable {
     var ct: String
 }
 
-/// Short text (a comment quote) sealed with an essay's content key.
+/// A small AES-GCM payload (a sealed comment quote or a feedback key wrap).
 struct WeftSealedText: Codable, Hashable, Sendable {
     var v: Int
     var nonce: String
@@ -193,10 +193,16 @@ nonisolated enum WeftContentSeal {
     /// Wrap `plaintext` to every recipient. Empty recipients is a no-op error.
     static func seal(plaintext: Data, aad: String,
                      recipients: [P256.KeyAgreement.PublicKey]) throws -> WeftEnvelope {
+        try seal(plaintext: plaintext, aad: aad, recipients: recipients,
+                 contentKey: SymmetricKey(size: .bits256))
+    }
+
+    private static func seal(plaintext: Data, aad: String,
+                             recipients: [P256.KeyAgreement.PublicKey],
+                             contentKey: SymmetricKey) throws -> WeftEnvelope {
         guard !recipients.isEmpty else { throw SealError.noRecipients }
-        let dekKey = SymmetricKey(size: .bits256)
-        let dek = dekKey.withUnsafeBytes { Data($0) }
-        let cbox = try AES.GCM.seal(plaintext, using: dekKey,
+        let dek = contentKey.withUnsafeBytes { Data($0) }
+        let cbox = try AES.GCM.seal(plaintext, using: contentKey,
                                     nonce: AES.GCM.Nonce(),
                                     authenticating: Data(aad.utf8))
         let content = WeftEnvelopeContent(
@@ -259,15 +265,77 @@ nonisolated enum WeftContentSeal {
 
     static func open(envelope env: WeftEnvelope, userId: String) throws -> Data {
         let dek = try openDEK(envelope: env, userId: userId)
-        guard let cNonce = Data(base64Encoded: env.content.nonce),
-              let cBytes = Data(base64Encoded: env.content.ct),
-              cBytes.count >= 16
+        return try openAESGCM(nonce: env.content.nonce, ciphertext: env.content.ct,
+                              using: dek, aad: env.content.aad)
+    }
+
+    private static func openAESGCM(nonce: String, ciphertext: String,
+                                   using key: SymmetricKey, aad: String) throws -> Data {
+        guard let nonce = Data(base64Encoded: nonce),
+              let bytes = Data(base64Encoded: ciphertext), bytes.count >= 16
         else { throw SealError.badEnvelope }
-        let cct = cBytes.prefix(cBytes.count - 16)
-        let ctag = cBytes.suffix(16)
-        let csb = try AES.GCM.SealedBox(nonce: try AES.GCM.Nonce(data: cNonce),
-                                        ciphertext: cct, tag: ctag)
-        return try AES.GCM.open(csb, using: dek, authenticating: Data(env.content.aad.utf8))
+        let box = try AES.GCM.SealedBox(nonce: try AES.GCM.Nonce(data: nonce),
+                                       ciphertext: bytes.dropLast(16), tag: bytes.suffix(16))
+        return try AES.GCM.open(box, using: key, authenticating: Data(aad.utf8))
+    }
+
+    // MARK: - Grade feedback
+
+    private static func gradeFeedbackAAD(submissionId: String) -> String {
+        "grade-feedback|\(submissionId.lowercased())|v1"
+    }
+
+    private static func gradeFeedbackReturnAAD(submissionId: String) -> String {
+        "grade-feedback-return|\(submissionId.lowercased())|v1"
+    }
+
+    /// Staff open their envelope with a password key. A returned grade also
+    /// carries a wrap for the student that is independent of the essay key.
+    static func sealGradeFeedback(_ text: String, submissionId: String, staffKeys: [DevicePublicKey],
+                                  studentReturnKey: Data?) throws -> (cipher: WeftEnvelope, studentWrap: WeftSealedText?) {
+        guard staffKeys.allSatisfy({ $0.kind == "password" && isGenuine($0) })
+        else { throw SealError.badEnvelope }
+        let contentKey = SymmetricKey(size: .bits256)
+        let cipher = try seal(plaintext: Data(text.utf8), aad: gradeFeedbackAAD(submissionId: submissionId),
+                              recipients: publicKeys(from: staffKeys), contentKey: contentKey)
+        guard let studentReturnKey else { return (cipher, nil) }
+        guard studentReturnKey.count == 32 else { throw SealError.badEnvelope }
+
+        let aad = gradeFeedbackReturnAAD(submissionId: submissionId)
+        let dek = contentKey.withUnsafeBytes { Data($0) }
+        let wrap = try AES.GCM.seal(dek, using: SymmetricKey(data: studentReturnKey),
+                                    nonce: AES.GCM.Nonce(), authenticating: Data(aad.utf8))
+        return (cipher, WeftSealedText(v: envelopeVersion, nonce: Data(wrap.nonce).base64EncodedString(),
+                                      ct: (wrap.ciphertext + wrap.tag).base64EncodedString()))
+    }
+
+    static func openGradeFeedback(_ cipher: WeftEnvelope, submissionId: String, userId: String) throws -> String {
+        let contentKey = try openDEK(envelope: cipher, userId: userId)
+        return try openGradeFeedback(cipher, submissionId: submissionId, contentKey: contentKey)
+    }
+
+    static func openReturnedGradeFeedback(_ cipher: WeftEnvelope, studentWrap: WeftSealedText,
+                                          submissionId: String, studentReturnKey: Data) throws -> String {
+        guard studentReturnKey.count == 32, studentWrap.v == envelopeVersion,
+              Data(base64Encoded: studentWrap.nonce)?.count == 12,
+              Data(base64Encoded: studentWrap.ct)?.count == 48
+        else { throw SealError.badEnvelope }
+        let dek = try openAESGCM(nonce: studentWrap.nonce, ciphertext: studentWrap.ct,
+                                 using: SymmetricKey(data: studentReturnKey),
+                                 aad: gradeFeedbackReturnAAD(submissionId: submissionId))
+        return try openGradeFeedback(cipher, submissionId: submissionId, contentKey: SymmetricKey(data: dek))
+    }
+
+    private static func openGradeFeedback(_ cipher: WeftEnvelope, submissionId: String,
+                                          contentKey: SymmetricKey) throws -> String {
+        let aad = gradeFeedbackAAD(submissionId: submissionId)
+        guard cipher.v == envelopeVersion, cipher.suite == suite, cipher.content.aad == aad,
+              Data(base64Encoded: cipher.content.nonce)?.count == 12
+        else { throw SealError.badEnvelope }
+        let bytes = try openAESGCM(nonce: cipher.content.nonce, ciphertext: cipher.content.ct,
+                                   using: contentKey, aad: aad)
+        guard let text = String(data: bytes, encoding: .utf8) else { throw SealError.badEnvelope }
+        return text
     }
 
     // MARK: Text sealed under an essay's content key (comment quotes)
