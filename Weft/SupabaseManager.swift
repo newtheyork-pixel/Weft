@@ -812,6 +812,11 @@ final class SupabaseManager: @unchecked Sendable {
         return out
     }
 
+    /// The school admins' published essay keys (SAT-20), for sealing to.
+    func listSchoolAdminKeys() async throws -> [DevicePublicKey] {
+        try await rpc("list_school_admin_keys")
+    }
+
     /// The auth user behind a `students` row (teacher side, own sessions).
     func studentUserId(studentId: String) async throws -> String? {
         struct Row: Decodable { let user_id: String? }
