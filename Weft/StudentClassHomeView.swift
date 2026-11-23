@@ -165,11 +165,19 @@ struct StudentClassHomeView: View {
                 .foregroundStyle(Theme.inkSoft)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
-            Button("Retry") { Task { await app.loadStudentHome() } }
-                .buttonStyle(.plain)
-                .font(Theme.sans(12.5, .semibold))
-                .foregroundStyle(Theme.accent)
-                .linkPointer()
+            if app.pendingTeacherKey != nil {
+                Button("Trust new lock") { Task { await app.trustNewTeacherKey() } }
+                    .buttonStyle(.plain)
+                    .font(Theme.sans(12.5, .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .linkPointer()
+            } else {
+                Button("Retry") { Task { await app.loadStudentHome() } }
+                    .buttonStyle(.plain)
+                    .font(Theme.sans(12.5, .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .linkPointer()
+            }
         }
         .padding(Theme.Space.md)
         .background(Theme.warn.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
