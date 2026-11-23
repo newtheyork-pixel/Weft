@@ -1157,6 +1157,7 @@ final class AppState {
     /// so the student portal never has to fetch it.
     func loadReturnedWork() async {
         guard signedIn else { return }
+        let actor = userId
         if essayKeyState != .ready { await checkEssayKey() }
         do {
             var items = try await supabase.getMyReturnedWork()
@@ -1183,6 +1184,11 @@ final class AppState {
                     items[i].contentCipher = env
                 }
             }
+            let feedbackIds = items.compactMap { item in
+                item.feedbackStudentWrap == nil ? nil : item.submissionId
+            }
+            let feedbackKeys = (try? await supabase.gradeFeedbackReturnKeys(submissionIds: feedbackIds)) ?? [:]
+            guard signedIn, userId == actor, !Task.isCancelled else { return }
             returnedWork = items.map { item in
                 var copy = item
                 copy.contentHtml = revealHTML(item.contentHtml, cipher: item.contentCipher)
@@ -1198,9 +1204,19 @@ final class AppState {
                             qc, underEssay: essay, userId: userId, aad: aad)
                     }
                 }
+                if let cipher = item.feedbackCipher {
+                    var opened: String?
+                    if let wrap = item.feedbackStudentWrap, let key = feedbackKeys[item.submissionId] {
+                        opened = try? WeftContentSeal.openReturnedGradeFeedback(
+                            cipher, studentWrap: wrap, submissionId: item.submissionId, studentReturnKey: key)
+                    }
+                    copy.feedback = opened ?? ""
+                    copy.feedbackUnavailable = opened == nil
+                }
                 return copy
             }
         } catch {
+            guard signedIn, userId == actor, !Task.isCancelled else { return }
             errorMessage = describe(error)
         }
     }
@@ -1898,10 +1914,7 @@ final class AppState {
         // sessions stay gradeable forever. nil (dev gallery / #Preview) keeps
         // the silent no-op so the grading screen's mock fallback renders.
         guard let sid = gradingSession?.id else { return }
-        // Do not clear gradesFresh here: saveGrade reloads after every
-        // write, and flipping it false would paint "Loading submissions"
-        // over the essay the teacher is in the middle of scoring.
-        // openGrading already set it false for a first open.
+        // openGrading already clears gradesFresh on the first load.
         if !signedIn {
             gradingSubmissions = []
             grades = [:]
@@ -1909,6 +1922,7 @@ final class AppState {
             gradingComments = [:]
             return
         }
+        let actor = userId
         errorMessage = nil
         do {
             let subs = try await supabase.listSessionSubmissions(sessionId: sid)
@@ -1921,7 +1935,7 @@ final class AppState {
             let comments = (try? await supabase.listEssayComments(sessionId: sid)) ?? []
             // The teacher may have opened a DIFFERENT session while we loaded;
             // a stale payload must never overwrite it or set gradesFresh.
-            guard gradingSession?.id == sid else { return }
+            guard gradingSession?.id == sid, signedIn, userId == actor, !Task.isCancelled else { return }
             gradingSubmissions = subs.map { sub in
                 var copy = sub
                 copy.contentHtml = revealHTML(sub.contentHtml ?? "", cipher: sub.contentCipher)
@@ -1945,10 +1959,17 @@ final class AppState {
                 bySub[sid, default: []].append(c)
             }
             gradingComments = bySub
-            grades = Dictionary(uniqueKeysWithValues: g.map { ($0.submissionId, $0) })
+            grades = Dictionary(uniqueKeysWithValues: g.map { grade in
+                var copy = grade
+                if let cipher = grade.feedbackCipher {
+                    copy.feedback = try? WeftContentSeal.openGradeFeedback(
+                        cipher, submissionId: grade.submissionId, userId: actor)
+                }
+                return (copy.submissionId, copy)
+            })
             gradesFresh = true   // grades cache now reflects the DB for THIS session
         } catch {
-            guard gradingSession?.id == sid else { return }
+            guard gradingSession?.id == sid, signedIn, userId == actor, !Task.isCancelled else { return }
             errorMessage = describe(error)
         }
     }
@@ -1970,64 +1991,74 @@ final class AppState {
             errorMessage = "This submission is missing its session or student."
             return false
         }
+        guard gradesFresh, gradingSession?.id == sid else {
+            errorMessage = "Reopen grading to load the current grade before saving."
+            return false
+        }
+        let actor = userId
+        let existing = grades[submission.id]
+        let firstRelease = share && existing?.isReleased != true
+        let isReturning = share || existing?.isReleased == true
+        let feedbackLocked = existing?.isFeedbackLocked == true
+        // A score edit can preserve locked feedback. First release must also
+        // wrap the feedback key for the student, which requires an unlocked key.
+        guard !feedbackLocked || (feedback.isEmpty && !firstRelease) else {
+            errorMessage = "Unlock your essay key and reopen grading to edit or return the saved feedback."
+            return false
+        }
         errorMessage = nil
-        let cached = grades[submission.id]?.releasedAt
-        // Trust the "first release" decision only if the grades cache we're
-        // reading from was loaded successfully (not stale/failed).
-        let wasFresh = gradesFresh
-        // upsertGrade writes released_at verbatim (no DB-side COALESCE), so the
-        // value we send IS the new server state. The in-memory cache can be
-        // stale (e.g. the grade was released on another device/session since we
-        // loaded), and clearing released_at would silently retract a grade the
-        // student already sees. Make the non-share path server-authoritative:
-        // re-fetch this submission's current released_at right before the write
-        // so a save-without-sharing can never un-share. Fall back to the cache
-        // only if the fetch fails (then we keep whatever we last knew, never a
-        // worse-than-cache nil).
-        let existing: Date?
-        if share {
-            existing = cached
-        } else if let fetched = try? await supabase.listGrades(submissionIds: [submission.id]).first {
-            existing = fetched.releasedAt
-        } else {
-            existing = cached
-        }
-        let releasedAt: String?
-        if share {
-            releasedAt = SupabaseDate.fractional.string(from: existing ?? Date())
-        } else {
-            releasedAt = existing.map { SupabaseDate.fractional.string(from: $0) }
-        }
-        // Returned: let the student open the essay (SAT-24). Best effort: the
-        // grade still saves if the student has no key yet.
-        var studentWrap: WeftEnvelopeWrap?
-        var wrapProblem = false
-        if releasedAt != nil, let env = submission.contentCipher {
-            studentWrap = await returnWrap(envelope: env, studentId: stid)
-            wrapProblem = studentWrap == nil
-        }
         do {
-            try await supabase.upsertGrade(submissionId: submission.id, sessionId: sid, studentId: stid,
-                                           points: points, pointsPossible: pointsPossible,
-                                           feedback: feedback, releasedAt: releasedAt,
-                                           studentWrap: studentWrap)
-            if wrapProblem, share {
+            var feedbackCipher: WeftEnvelope?
+            var feedbackStudentWrap: WeftSealedText?
+            if !feedback.isEmpty {
+                let staff = try await supabase.gradeFeedbackStaffKeys(submissionId: submission.id)
+                guard let local = WeftContentSeal.publishableKey(userId: actor),
+                      staff.contains(where: { $0.userId == actor && $0.kid == local.kid }) else {
+                    throw SupabaseError.auth("Unlock your essay key on this Mac to seal the feedback.")
+                }
+                var feedbackReturnKey: Data?
+                if isReturning {
+                    guard let keys = try? await supabase.gradeFeedbackReturnKeys(submissionIds: [submission.id]),
+                          let key = keys[submission.id] else {
+                        throw SupabaseError.auth("The student’s feedback key is unavailable. Try sharing again.")
+                    }
+                    feedbackReturnKey = key
+                }
+                do {
+                    (feedbackCipher, feedbackStudentWrap) = try WeftContentSeal.sealGradeFeedback(
+                        feedback, submissionId: submission.id, staffKeys: staff, studentReturnKey: feedbackReturnKey)
+                } catch {
+                    // A staff key that isn't a genuine essay-password key, or a
+                    // malformed student key. Never seal past it; keep the text.
+                    throw SupabaseError.auth("Weft couldn't seal this feedback to the class's staff keys, so nothing was saved. Your comment is still here; try again, or ask your school admin to check the staff keys.")
+                }
+            }
+            // The return wrap for the essay is independent of the feedback.
+            var essayStudentWrap: WeftEnvelopeWrap?
+            if isReturning, let envelope = submission.contentCipher {
+                essayStudentWrap = await returnWrap(envelope: envelope, studentId: stid)
+            }
+            guard signedIn, userId == actor else { return false }
+            var saved = try await supabase.saveGrade(
+                submissionId: submission.id, sessionId: sid, studentId: stid, points: points,
+                pointsPossible: pointsPossible, feedbackCipher: feedbackCipher,
+                feedbackStudentWrap: feedbackStudentWrap, replaceFeedback: !feedbackLocked,
+                releasedAt: firstRelease ? SupabaseManager.nowISO() : nil,
+                studentWrap: essayStudentWrap, expectedUpdatedAt: existing?.updatedAt)
+            guard signedIn, userId == actor else { return true }
+            if gradingSession?.id == sid {
+                saved.feedback = feedbackLocked ? nil : feedback
+                grades[submission.id] = saved
+            }
+            if share, submission.contentCipher != nil, essayStudentWrap == nil, gradingSession?.id == sid {
                 errorMessage = "Shared. Weft couldn't unlock the paper for the student yet, so they'll see the grade but not the essay. Share again in a moment; if it keeps happening, the student needs to sign in to Weft once."
             }
-            let releasedDate: Date? = releasedAt.flatMap { SupabaseDate.fractional.date(from: $0) }
-            grades[submission.id] = EssayGrade(submissionId: submission.id, points: points,
-                                               pointsPossible: pointsPossible, feedback: feedback,
-                                               releasedAt: releasedDate)
-            gradesFresh = true
-            // Notify the student only on the first release (sharing for the first
-            // time, off a known-fresh cache), never on re-saves of already-shared
-            // work, and never with the score in the email.
-            if share, existing == nil, wasFresh {
+            if firstRelease {
                 Task { await supabase.notify("grades_published", body: ["submission_id": submission.id]) }
             }
             return true
         } catch {
-            errorMessage = describe(error)
+            if signedIn, userId == actor { errorMessage = describe(error) }
             return false
         }
     }
