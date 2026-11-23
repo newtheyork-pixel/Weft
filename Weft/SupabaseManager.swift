@@ -401,6 +401,8 @@ final class SupabaseManager: @unchecked Sendable {
         var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("rest/v1/\(table)"),
                                   resolvingAgainstBaseURL: false)!
         comps.queryItems = query
+        // Keep the plus in Postgres timestamp offsets through query decoding.
+        comps.percentEncodedQuery = comps.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
 
         var req = URLRequest(url: comps.url!)
         req.httpMethod = "PATCH"
@@ -952,9 +954,32 @@ final class SupabaseManager: @unchecked Sendable {
         guard !submissionIds.isEmpty else { return [] }
         let inList = "in.(" + submissionIds.joined(separator: ",") + ")"
         return try await rows("essay_grades", query: [
-            URLQueryItem(name: "select", value: "submission_id,points,points_possible,feedback,released_at"),
+            URLQueryItem(name: "select", value: "submission_id,points,points_possible,feedback,feedback_cipher,released_at,updated_at"),
             URLQueryItem(name: "submission_id", value: inList),
         ])
+    }
+
+    func gradeFeedbackStaffKeys(submissionId: String) async throws -> [DevicePublicKey] {
+        try await rpc("get_grade_feedback_staff_keys", params: ["p_submission_id": submissionId])
+    }
+
+    func gradeFeedbackReturnKeys(submissionIds: [String]) async throws -> [String: Data] {
+        guard !submissionIds.isEmpty else { return [:] }
+        struct Row: Decodable {
+            let submission_id: String
+            let key_seed: String
+        }
+        var keys: [String: Data] = [:]
+        for start in stride(from: 0, to: submissionIds.count, by: 100) {
+            let ids = Array(submissionIds[start..<min(start + 100, submissionIds.count)])
+            let found: [Row] = try await rpc("get_grade_feedback_return_keys", params: ["p_submission_ids": ids])
+            for row in found {
+                if let key = Data(base64Encoded: row.key_seed), key.count == 32 {
+                    keys[row.submission_id] = key
+                }
+            }
+        }
+        return keys
     }
 
     // MARK: - Teacher writes
@@ -1143,25 +1168,75 @@ final class SupabaseManager: @unchecked Sendable {
         }
     }
 
-    /// Upsert a grade. `essay_grades.session_id` and `student_id` are NOT NULL,
-    /// so they MUST be supplied (mirrors teacher.js). `releasedAt` is the exact
-    /// value to store (the caller decides whether to keep/clear the share time).
-    func upsertGrade(submissionId: String, sessionId: String, studentId: String,
-                     points: Double?, pointsPossible: Double, feedback: String,
-                     releasedAt: String?, studentWrap: WeftEnvelopeWrap? = nil) async throws {
-        struct Payload: Encodable {
-            let submission_id: String; let session_id: String; let student_id: String
-            let points: Double?; let points_possible: Double
-            let feedback: String; let released_at: String?
-            /// Omitted when nil (synthesized encodeIfPresent), so a save
-            /// without a new wrap never erases the one already stored.
-            let student_wrap: WeftEnvelopeWrap?
+    /// Update only the version the grader saw. A concurrent return or edit
+    /// must be reviewed before a stale draft can replace it.
+    func saveGrade(submissionId: String, sessionId: String, studentId: String,
+                   points: Double?, pointsPossible: Double, feedbackCipher: WeftEnvelope?,
+                   feedbackStudentWrap: WeftSealedText?, replaceFeedback: Bool, releasedAt: String?,
+                   studentWrap: WeftEnvelopeWrap?, expectedUpdatedAt: String?) async throws -> EssayGrade {
+        let payload = GradeWrite(submissionId: submissionId, sessionId: sessionId, studentId: studentId,
+                                 points: points, pointsPossible: pointsPossible, feedbackCipher: feedbackCipher,
+                                 feedbackStudentWrap: feedbackStudentWrap, replaceFeedback: replaceFeedback,
+                                 releasedAt: releasedAt, studentWrap: studentWrap)
+        let conflict = SupabaseError.auth("This grade changed while you were editing. Reopen grading and review the latest grade before saving again.")
+        let saved: [EssayGrade]
+        if let expectedUpdatedAt {
+            saved = try await update("essay_grades", values: payload, query: [
+                URLQueryItem(name: "submission_id", value: "eq.\(submissionId)"),
+                URLQueryItem(name: "updated_at", value: "eq.\(expectedUpdatedAt)"),
+            ])
+        } else {
+            do {
+                saved = try await insert("essay_grades", values: payload)
+            } catch SupabaseError.badResponse(_, let body) where Self.isUniqueViolation(body: body) {
+                throw conflict
+            }
         }
-        let _: [EssayGrade] = try await upsert("essay_grades",
-            values: Payload(submission_id: submissionId, session_id: sessionId, student_id: studentId,
-                            points: points, points_possible: pointsPossible, feedback: feedback,
-                            released_at: releasedAt, student_wrap: studentWrap),
-            onConflict: "submission_id", returning: false)
+        guard let grade = saved.first else { throw conflict }
+        return grade
+    }
+
+    private struct GradeWrite: Encodable {
+        let submissionId: String
+        let sessionId: String
+        let studentId: String
+        let points: Double?
+        let pointsPossible: Double
+        let feedbackCipher: WeftEnvelope?
+        let feedbackStudentWrap: WeftSealedText?
+        let replaceFeedback: Bool
+        let releasedAt: String?
+        let studentWrap: WeftEnvelopeWrap?
+
+        enum CodingKeys: String, CodingKey {
+            case submissionId = "submission_id"
+            case sessionId = "session_id"
+            case studentId = "student_id"
+            case points
+            case pointsPossible = "points_possible"
+            case feedback
+            case feedbackCipher = "feedback_cipher"
+            case feedbackStudentWrap = "feedback_student_wrap"
+            case releasedAt = "released_at"
+            case studentWrap = "student_wrap"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var row = encoder.container(keyedBy: CodingKeys.self)
+            try row.encode(submissionId, forKey: .submissionId)
+            try row.encode(sessionId, forKey: .sessionId)
+            try row.encode(studentId, forKey: .studentId)
+            try row.encode(points, forKey: .points)
+            try row.encode(pointsPossible, forKey: .pointsPossible)
+            if replaceFeedback {
+                // Clear the legacy column atomically with the ciphertext write.
+                try row.encode("", forKey: .feedback)
+                try row.encode(feedbackCipher, forKey: .feedbackCipher)
+                try row.encode(feedbackStudentWrap, forKey: .feedbackStudentWrap)
+            }
+            try row.encodeIfPresent(releasedAt, forKey: .releasedAt)
+            try row.encodeIfPresent(studentWrap, forKey: .studentWrap)
+        }
     }
 
     // MARK: - Student exam lifecycle (register / autosave / submit)
@@ -1854,6 +1929,9 @@ struct ReturnedWorkItem: Identifiable, Decodable, Hashable, Sendable {
     var points: Double?
     var pointsPossible: Double
     var feedback: String
+    var feedbackCipher: WeftEnvelope?
+    var feedbackStudentWrap: WeftSealedText?
+    var feedbackUnavailable = false
     var releasedAt: Date?
     var comments: [ReturnedComment]
 
@@ -1868,6 +1946,8 @@ struct ReturnedWorkItem: Identifiable, Decodable, Hashable, Sendable {
         case points
         case pointsPossible = "points_possible"
         case feedback
+        case feedbackCipher = "feedback_cipher"
+        case feedbackStudentWrap = "feedback_student_wrap"
         case releasedAt = "released_at"
         case comments
     }
@@ -1882,6 +1962,8 @@ struct ReturnedWorkItem: Identifiable, Decodable, Hashable, Sendable {
         points = try c.decodeIfPresent(Double.self, forKey: .points)
         pointsPossible = try c.decodeIfPresent(Double.self, forKey: .pointsPossible) ?? 0
         feedback = try c.decodeIfPresent(String.self, forKey: .feedback) ?? ""
+        feedbackCipher = try c.decodeIfPresent(WeftEnvelope.self, forKey: .feedbackCipher)
+        feedbackStudentWrap = try c.decodeIfPresent(WeftSealedText.self, forKey: .feedbackStudentWrap)
         releasedAt = try c.decodeIfPresent(Date.self, forKey: .releasedAt)
         comments = try c.decodeIfPresent([ReturnedComment].self, forKey: .comments) ?? []
     }

@@ -1227,7 +1227,8 @@ struct ReviewGradingView: View {
     }
 
     private var finalCommentBlock: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.md) {
+        let locked = isLive && app.grades[current.id]?.isFeedbackLocked == true
+        return VStack(alignment: .leading, spacing: Theme.Space.md) {
             slotHead("Final comment", system: "text.bubble")
             TextEditor(text: finalCommentBinding)
                 .font(Theme.sans(13))
@@ -1243,9 +1244,11 @@ struct ReviewGradingView: View {
                     RoundedRectangle(cornerRadius: Theme.Radius.sm)
                         .stroke(Color.black.opacity(0.10), lineWidth: 1)
                 )
+                .disabled(locked)
                 .overlay(alignment: .topLeading) {
                     if commentIsEmpty {
-                        Text("Write one overall comment for the whole essay.")
+                        Text(locked ? "Unlock your essay key and reopen grading to read this feedback."
+                             : "Write one overall comment for the whole essay.")
                             .font(Theme.sans(13))
                             .foregroundStyle(Theme.muted2)
                             // Mirror the editor's exact text origin — 8 outer
@@ -1410,7 +1413,7 @@ struct ReviewGradingView: View {
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.glass)
-                .disabled(app.isLoading)
+                .disabled(app.isLoading || savingIds.contains(current.id))
                 .help("Save the score and comment privately. The student does not see it yet.")
                 .linkPointer()
             }
@@ -1432,7 +1435,7 @@ struct ReviewGradingView: View {
             }
             .buttonStyle(.glassProminent)
             .tint(Theme.accent)
-            .disabled(app.isLoading)
+            .disabled(app.isLoading || savingIds.contains(current.id))
             .help(current.returned ? "Update and re-share with this student" : "Send the score and your comment to the student")
             .linkPointer()
 
@@ -1544,18 +1547,25 @@ struct ReviewGradingView: View {
         // on the way to another student, and by the time the task runs the
         // buffers and `current` belong to that student instead.
         let id = submission.id
-        let comment = commentText
-        let possible = pointsPossible
-        let alreadyReleased = app.grades[id]?.isReleased ?? false
         // Exactly what THIS write carries. The teacher often keeps typing while
         // a save is in flight (the Score field's onSubmit saves, and so does
         // Save without sharing), so the completion below clears the pending
         // text and the dirty flag only if the buffers still hold this text.
-        let sent = PendingGrade(score: scoreText, comment: comment)
+        let sent = PendingGrade(score: scoreText, comment: commentText)
         pendingGrades[id] = sent
+        // One write per student at a time: each write names the grade version
+        // it replaces (SAT-13), so two in flight would conflict. This request
+        // stays in pendingGrades and goes out when the current write lands.
+        guard !savingIds.contains(id) else { return }
+        writeGrade(submission, sent: sent, pointsPossible: pointsPossible,
+                   share: share || (app.grades[id]?.isReleased ?? false))
+    }
 
+    private func writeGrade(_ submission: TeacherSubmission, sent: PendingGrade,
+                            pointsPossible possible: Double, share: Bool) {
+        let id = submission.id
         let points: Double?
-        switch Self.scoreInput(scoreText) {
+        switch Self.scoreInput(sent.score) {
         case .blank:
             points = nil
         case .value(let entered):
@@ -1564,7 +1574,7 @@ struct ReviewGradingView: View {
             // Don't write: "9o" would be stored as "no score at all" with
             // nothing on screen to say so. Keep the typing and say why.
             saveErrors[id] = "Score must be a number, or left blank."
-            gradeDirty = true
+            if current.id == id { gradeDirty = true }
             return
         }
 
@@ -1574,8 +1584,8 @@ struct ReviewGradingView: View {
             let saved = await app.saveGrade(submission: submission,
                                             points: points,
                                             pointsPossible: possible,
-                                            feedback: comment,
-                                            share: share || alreadyReleased)
+                                            feedback: sent.comment,
+                                            share: share)
             savingIds.remove(id)
             if saved {
                 // Anything typed during the round-trip stays pending and dirty,
@@ -1586,6 +1596,13 @@ struct ReviewGradingView: View {
                 savedAt[id] = Date()
                 if current.id == id, scoreText == sent.score, commentText == sent.comment {
                     gradeDirty = false
+                }
+                // A save asked for while this one was in flight (often a flush
+                // on the way to the next student) goes out now, against the
+                // version this write just stored.
+                if let queued = pendingGrades[id] {
+                    writeGrade(submission, sent: queued, pointsPossible: possible,
+                               share: app.grades[id]?.isReleased ?? false)
                 }
             } else {
                 saveErrors[id] = app.errorMessage

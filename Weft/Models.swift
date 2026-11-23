@@ -683,16 +683,21 @@ struct EssayGrade: Identifiable, Codable, Hashable, Sendable {
     var points: Double?
     var pointsPossible: Double?
     var feedback: String?
+    var feedbackCipher: WeftEnvelope?
     var releasedAt: Date?
+    let updatedAt: String
 
     var id: String { submissionId }
     var isReleased: Bool { releasedAt != nil }
+    var isFeedbackLocked: Bool { feedbackCipher != nil && feedback == nil }
 
     enum CodingKeys: String, CodingKey {
         case submissionId = "submission_id"
         case points
         case pointsPossible = "points_possible"
         case feedback
+        case feedbackCipher = "feedback_cipher"
         case releasedAt = "released_at"
+        case updatedAt = "updated_at"
     }
 }
