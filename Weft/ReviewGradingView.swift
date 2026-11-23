@@ -622,16 +622,12 @@ struct ReviewGradingView: View {
             if current.paragraphs.isEmpty {
                 emptyPaper
             } else {
-                VStack(alignment: .leading, spacing: Theme.Space.lg) {
-                    ForEach(Array(current.paragraphs.enumerated()), id: \.offset) { _, para in
-                        Text(para)
-                            .font(.system(size: 15))
-                            .foregroundStyle(Color.black)
-                            .lineSpacing(5)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
+                // Select words here to comment on them (the margin panel
+                // picks up the selection); commented passages are highlighted.
+                PaperTextView(paragraphs: current.paragraphs,
+                              highlights: currentComments.map(\.quote),
+                              selection: $marginQuote)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 56)
                 .padding(.horizontal, 64)
                 .frame(maxWidth: 760, alignment: .leading)
@@ -841,21 +837,22 @@ struct ReviewGradingView: View {
     private var marginCommentsBlock: some View {
         VStack(alignment: .leading, spacing: Theme.Space.md) {
             slotHead("In the margin", system: "text.quote")
-            Text("Select a sentence on the paper, paste it here, and leave a note on that line.")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.muted)
-                .lineSpacing(2)
-            TextField("Quoted sentence", text: $marginQuote, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(Theme.sans(12))
-                .lineLimit(2...4)
-                .padding(8)
-                .background(
-                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                        .fill(Color.white.opacity(0.6)))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                        .stroke(Color.black.opacity(0.10), lineWidth: 1))
+            if marginQuote.isEmpty {
+                Text("Select words on the paper to comment on them.")
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.muted)
+                    .lineSpacing(2)
+            } else {
+                Text(marginQuote)
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.inkSoft)
+                    .lineLimit(3)
+                    .padding(.leading, Theme.Space.sm)
+                    .overlay(alignment: .leading) {
+                        Rectangle().fill(Theme.accent).frame(width: 3)
+                    }
+                    .accessibilityLabel("Selected text: \(marginQuote)")
+            }
             TextField("Your note", text: $marginNote, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(Theme.sans(13))
@@ -870,11 +867,13 @@ struct ReviewGradingView: View {
             Button {
                 addMarginComment()
             } label: {
-                Text("Pin to the paper")
+                Text("Add comment")
                     .font(Theme.sans(13, .semibold))
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.glass)
+            .keyboardShortcut(.return, modifiers: .command)
+            .help("Add comment (⌘↩)")
             .disabled(marginBusy || marginQuote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                       || marginNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .linkPointer()
