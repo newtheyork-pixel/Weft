@@ -254,7 +254,7 @@ struct AdminSidebarLayout: View {
 }
 
 #Preview {
-    AdminHomeView(variant: .sidebar)
+    AdminHomeView()
         .environment(AppState())
         .preferredColorScheme(.light)
         .frame(width: 1100, height: 760)

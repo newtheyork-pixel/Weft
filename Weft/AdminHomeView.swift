@@ -1,35 +1,11 @@
 //
 //  AdminHomeView.swift
 //  Weft: the school admin page (SAT-20): teachers and admins, every class
-//  and roster, and every session's work. Three layouts of the same page are
-//  built so one can be picked: A (sidebar), B (overview), C (tables). The live
-//  one comes from `weft.adminVariant`; debug builds show a switch in the top
-//  bar, and the dev gallery shows all three. The shared pieces live here.
+//  and roster, and every session's work, in a sidebar layout
+//  (AdminSidebarLayout). The shared pieces live here.
 //
 
 import SwiftUI
-
-/// The three admin page layouts.
-enum AdminVariant: Int, CaseIterable, Identifiable {
-    case sidebar = 1, overview = 2, tables = 3
-    var id: Int { rawValue }
-
-    var letter: String {
-        switch self {
-        case .sidebar: "A"
-        case .overview: "B"
-        case .tables: "C"
-        }
-    }
-
-    var name: String {
-        switch self {
-        case .sidebar: "Sidebar"
-        case .overview: "Overview"
-        case .tables: "Tables"
-        }
-    }
-}
 
 /// The three areas of the admin page.
 enum AdminSection: String, CaseIterable, Identifiable {
@@ -64,14 +40,12 @@ enum AdminSection: String, CaseIterable, Identifiable {
 /// Router for the admin role: the admin page, or grading a session opened
 /// from it (the same grading screen teachers use).
 struct AdminFlowView: View {
-    /// nil = the saved choice (`weft.adminVariant`).
-    var variant: AdminVariant?
     @Environment(AppState.self) private var app
 
     var body: some View {
         Group {
             switch app.adminScreen {
-            case .home: AdminHomeView(variant: variant)
+            case .home: AdminHomeView()
             case .grading: ReviewGradingView()
             }
         }
@@ -79,49 +53,18 @@ struct AdminFlowView: View {
     }
 }
 
-/// The admin page: top bar plus the chosen layout.
+/// The admin page: top bar plus the sidebar layout.
 struct AdminHomeView: View {
-    /// nil = the saved choice; set by the dev gallery to pin one layout.
-    var variant: AdminVariant?
     @Environment(AppState.self) private var app
-    @AppStorage("weft.adminVariant") private var storedVariant = AdminVariant.sidebar.rawValue
-
-    private var current: AdminVariant {
-        variant ?? AdminVariant(rawValue: storedVariant) ?? .sidebar
-    }
 
     var body: some View {
         VStack(spacing: 0) {
-            WeftTopBar(role: "Admin", trailing: variantSwitch)
-            Group {
-                switch current {
-                case .sidebar: AdminSidebarLayout()
-                case .overview: AdminOverviewLayout()
-                case .tables: AdminTablesLayout()
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            WeftTopBar(role: "Admin", trailing: nil)
+            AdminSidebarLayout()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(AmbientBackground())
         .task { await app.loadAdminHome() }
-    }
-
-    /// Debug builds only: flip between the three layouts in place.
-    private var variantSwitch: AnyView? {
-        #if DEBUG
-        guard variant == nil else { return nil }
-        return AnyView(
-            Picker("Layout", selection: $storedVariant) {
-                ForEach(AdminVariant.allCases) { v in Text(v.letter).tag(v.rawValue) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 120)
-            .help("Admin page layout (debug builds only)")
-        )
-        #else
-        return nil
-        #endif
     }
 }
 
@@ -473,40 +416,37 @@ struct AdminPageHeader: View {
     }
 }
 
-// MARK: - Side-by-side comparison (dev gallery)
+// MARK: - Session row (All work)
 
-/// All three layouts at once, scaled down, for picking one. They fit
-/// across a wide window; a narrow one scrolls sideways.
-struct AdminCompareView: View {
-    private let size = CGSize(width: 1000, height: 720)
+/// One session row: title, class and date, submitted count, status, Open.
+struct AdminWorkRow: View {
+    let session: SchoolSession
+    let open: () -> Void
+    @Environment(AppState.self) private var app
 
     var body: some View {
-        GeometryReader { geo in
-            grid(scale: min(0.62, max(0.45, (geo.size.width - 4 * Theme.Space.xl) / (3 * size.width))))
-        }
-        .background(AmbientBackground())
-    }
-
-    private func grid(scale: CGFloat) -> some View {
-        ScrollView([.horizontal, .vertical]) {
-            HStack(alignment: .top, spacing: Theme.Space.xl) {
-                ForEach(AdminVariant.allCases) { v in
-                    VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                        Text("\(v.letter) · \(v.name)")
-                            .font(Theme.sans(13, .semibold))
-                            .foregroundStyle(Theme.inkSoft)
-                        AdminHomeView(variant: v)
-                            .frame(width: size.width, height: size.height)
-                            .scaleEffect(scale, anchor: .topLeading)
-                            .frame(width: size.width * scale, height: size.height * scale,
-                                   alignment: .topLeading)
-                            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
-                            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                                .strokeBorder(Color.black.opacity(0.12)))
-                    }
-                }
+        let chip = AdminFormat.statusChip(session.status)
+        let meta = [app.schoolClassName(session.classId), AdminFormat.dateTime(session.createdAt)]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+        HStack(spacing: Theme.Space.md) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.title)
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundStyle(Theme.inkSoft)
+                Text(meta)
+                    .font(Theme.sans(12.5))
+                    .foregroundStyle(Theme.muted)
             }
-            .padding(Theme.Space.xl)
+            Spacer()
+            Text(AdminFormat.submitted(session.submittedCount))
+                .font(Theme.sans(13))
+                .monospacedDigit()
+                .foregroundStyle(Theme.muted)
+            Chip(text: chip.text, kind: chip.kind)
+            Button("Review essays", action: open)
+                .buttonStyle(.glass)
+                .linkPointer()
+                .help("Read and grade this session's essays")
         }
     }
 }
