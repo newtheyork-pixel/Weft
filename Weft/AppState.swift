@@ -1307,7 +1307,7 @@ final class AppState {
         defer { teacherHomeInFlight = false }
         errorMessage = nil
         do {
-            let classes = try await supabase.listTeacherClasses()
+            let classes = try await supabase.listTeacherClasses(userId: userId)
             let tests = try await supabase.listTeacherTests(userId: userId)
             // Signed out while a fetch was in flight: signOut() already restored
             // the mock state, so never write the old account's data over it
@@ -2776,6 +2776,10 @@ final class AppState {
             schoolClasses = c
             schoolSessions = w
             adminLoaded = true
+            // Best effort: show who teaches each class.
+            if let names = try? await supabase.listSchoolTeachers(), signedIn {
+                adminTeacherNames = names
+            }
         } catch {
             guard signedIn else { return }
             errorMessage = adminMessage(error)

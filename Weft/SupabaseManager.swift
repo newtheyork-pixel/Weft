@@ -650,9 +650,12 @@ final class SupabaseManager: @unchecked Sendable {
 
     // MARK: - Teacher reads
 
-    func listTeacherClasses() async throws -> [ClassRoom] {
+    /// The signed-in teacher's own classes. The filter matters: an admin can
+    /// read every class (SAT-20), but their Teacher view lists only theirs.
+    func listTeacherClasses(userId: String) async throws -> [ClassRoom] {
         try await rows("classes", query: [
             URLQueryItem(name: "select", value: "*"),
+            URLQueryItem(name: "teacher_user_id", value: "eq.\(userId)"),
             URLQueryItem(name: "archived_at", value: "is.null"),
             URLQueryItem(name: "order", value: "created_at.desc"),
         ])
@@ -1096,6 +1099,15 @@ final class SupabaseManager: @unchecked Sendable {
                 URLQueryItem(name: "order", value: "name.asc"),
             ])
         }
+    }
+
+    /// Email of each class's teacher, keyed by user id (admins only, SAT-20).
+    func listSchoolTeachers() async throws -> [String: String] {
+        struct Row: Decodable { let user_id: String; let email: String? }
+        let found: [Row] = try await rpc("list_school_teachers")
+        var out: [String: String] = [:]
+        for r in found { if let e = r.email { out[r.user_id] = e } }
+        return out
     }
 
     /// A class roster, removed students included (removed_at set).
