@@ -201,6 +201,20 @@ struct SignInView: View {
                 .help("Take an exam")
             }
 
+            if app.accountRole == .admin {
+                Button {
+                    app.enterAdmin()
+                } label: {
+                    Label("Admin", systemImage: "building.columns")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.glass)
+                .controlSize(.large)
+                .frame(maxWidth: .infinity)
+                .pointerStyle(.link)
+                .help("Manage staff, classes and all student work")
+            }
+
             Button("Not you? Sign out") { app.signOut() }
                 .buttonStyle(.plain)
                 .font(Theme.sans(12))
@@ -215,7 +229,10 @@ struct SignInView: View {
     /// Shown only to signed-in teachers/admins; students are routed straight to
     /// the portal and never see this card.
     private var roleCardCopy: String {
-        "Choose how to continue. Teacher view runs and grades exams. Student view takes an exam."
+        if app.accountRole == .admin {
+            return "Choose how to continue. Teacher view runs and grades exams. Student view takes an exam. Admin manages the school."
+        }
+        return "Choose how to continue. Teacher view runs and grades exams. Student view takes an exam."
     }
 
     private var footer: some View {
@@ -252,6 +269,19 @@ struct GoogleG: View {
     SignInView()
         .environment(AppState())
         .preferredColorScheme(.light)   // Weft's identity is light; matches the real app
+        .frame(width: 480, height: 760)
+}
+
+#Preview("Signed in (admin chooser)") {
+    let app = AppState()
+    app.signedIn = true
+    app.accountRole = .admin
+    app.role = .admin
+    app.displayName = "School Admin"
+    app.email = "principal@school.org"
+    return SignInView()
+        .environment(app)
+        .preferredColorScheme(.light)
         .frame(width: 480, height: 760)
 }
 

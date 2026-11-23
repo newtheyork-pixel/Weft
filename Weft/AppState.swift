@@ -15,7 +15,7 @@ import AppKit
 @MainActor
 @Observable
 final class AppState {
-    enum Route: Equatable { case signIn, teacher, student }
+    enum Route: Equatable { case signIn, teacher, student, admin }
 
     /// Sub-navigation inside the student role (the native analogue of the
     /// Electron #stage-* swap). RootView → StudentFlowView reads this.
@@ -263,6 +263,34 @@ final class AppState {
     // School-approved websites (from the published Google Sheet), for the editor.
     var approvedSites: [ApprovedSite] = []
     var approvedSitesLoading = false
+    /// The graded session's test when it isn't one of the signed-in user's
+    /// own (an admin grading another teacher's class), for the prompt.
+    var gradingTest: Assignment?
+    /// Where closing grading returns to: the admin page or the teacher home.
+    private(set) var gradingFromAdmin = false
+
+    // MARK: School admin (SAT-20)
+    enum AdminScreen: Equatable { case home, grading }
+    var adminScreen: AdminScreen = .home
+    /// The school's staff list (preview: samples).
+    var staff: [StaffMember] = StaffMember.sample
+    /// Every class in the school, archived ones included (they still name
+    /// old sessions); the Students lists show only active ones.
+    var schoolClasses: [SchoolClass] = SchoolClass.sample
+    /// Every session in the school, newest first.
+    var schoolSessions: [SchoolSession] = SchoolSession.sample
+    /// Rosters by class id, removed students included. A missing key means
+    /// not loaded yet: never claim an empty class before the load confirms it.
+    var adminRosters: [String: [ClassEnrollment]] = [:]
+    /// True once the admin page's first load came back (preview: always).
+    var adminLoaded = true
+    /// Teacher names by user id, when known. The server does not expose
+    /// other teachers' emails yet, so signed in this is empty.
+    var adminTeacherNames: [String: String] = AppState.sampleTeacherNames
+    /// Reentrancy guard for loadAdminHome (mirrors teacherHomeInFlight).
+    private var adminHomeInFlight = false
+    /// Preview-only roster store so remove / add back demo signed out.
+    private var previewRosters: [String: [ClassEnrollment]] = AppState.sampleRosters
 
     // MARK: Async UI state
     var isLoading = false
@@ -324,6 +352,22 @@ final class AppState {
                 await loadStudentHome()
             }
         }
+    }
+
+    /// The school admin page. Admins only; the server enforces it too.
+    func enterAdmin() {
+        guard !ExamGate.inProgress else {
+            errorMessage = "Finish the exam before leaving it."
+            return
+        }
+        guard !signedIn || accountRole == .admin else { return }
+        errorMessage = nil
+        stopRosterPolling()
+        stopStudentHomePolling()
+        role = .admin
+        adminScreen = .home
+        route = .admin
+        if signedIn { Task { await checkEssayKey(); await loadAdminHome() } }
     }
 
     func signOut() {
@@ -394,6 +438,15 @@ final class AppState {
         pendingKeyTrust = nil
         examUnreadableDraft = false; allowFreshOverUnreadable = false
         essayKeyState = nil
+        gradingTest = nil; gradingFromAdmin = false
+        adminScreen = .home
+        staff = StaffMember.sample
+        schoolClasses = SchoolClass.sample
+        schoolSessions = SchoolSession.sample
+        adminRosters = [:]
+        adminLoaded = true
+        adminTeacherNames = AppState.sampleTeacherNames
+        previewRosters = AppState.sampleRosters
         teacherClasses = [.sample, .sample2]
         assignments = [.sample, .sample2]
         roster = RosterStudent.sample
@@ -445,6 +498,14 @@ final class AppState {
         gradingOutlines = []
         gradingSubmissions = []
         grades = [:]
+        gradingTest = nil; gradingFromAdmin = false
+        adminScreen = .home
+        staff = []
+        schoolClasses = []
+        schoolSessions = []
+        adminRosters = [:]
+        adminLoaded = false
+        adminTeacherNames = [:]
     }
 
     // MARK: - Auth
@@ -1869,6 +1930,34 @@ final class AppState {
     /// including sessions closed days ago. Never keyed to liveSession.
     /// Callers MUST pass title: sessionTitle(session); no other source.
     func openGrading(session: ExamSession, title: String) {
+        prepareGrading(session: session, title: title)
+        gradingFromAdmin = false
+        teacherScreen = .grading
+        // ReviewGradingView's .task owns the load (auto-cancelled with the
+        // view), the same shape as openReturnedWork. Firing one here as
+        // well ran the four queries twice on every open.
+    }
+
+    /// Admin: open any session in the school in the same grading screen.
+    /// The essays open on this Mac because they are sealed to the admins too.
+    func openAdminGrading(_ session: SchoolSession) {
+        prepareGrading(session: session.examSession, title: session.title)
+        gradingFromAdmin = true
+        adminScreen = .grading
+    }
+
+    /// Leave grading for wherever it was opened from.
+    func closeGrading() {
+        if gradingFromAdmin {
+            // AdminHomeView's .task reloads the page (fresh counts) on return.
+            errorMessage = nil
+            adminScreen = .home
+        } else {
+            teacherGoHome()
+        }
+    }
+
+    private func prepareGrading(session: ExamSession, title: String) {
         errorMessage = nil
         gradingSession = session
         gradingTitle = title
@@ -1880,11 +1969,8 @@ final class AppState {
         gradingRoster = []
         gradingOutlines = []
         gradingComments = [:]
+        gradingTest = nil
         gradesFresh = false
-        teacherScreen = .grading
-        // ReviewGradingView's .task owns the load (auto-cancelled with the
-        // view), the same shape as openReturnedWork. Firing one here as
-        // well ran the four queries twice on every open.
     }
 
     func loadGrading() async {
@@ -1941,6 +2027,14 @@ final class AppState {
             gradingComments = bySub
             grades = Dictionary(uniqueKeysWithValues: g.map { ($0.submissionId, $0) })
             gradesFresh = true   // grades cache now reflects the DB for THIS session
+            // Another teacher's session (admin grading): its test is not in
+            // `assignments`, so fetch it for the prompt. Best effort.
+            if let tid = gradingSession?.testId, gradingTest?.id != tid,
+               !assignments.contains(where: { $0.id == tid }),
+               let test = try? await supabase.getTest(id: tid),
+               gradingSession?.id == sid {
+                gradingTest = test
+            }
         } catch {
             guard gradingSession?.id == sid else { return }
             errorMessage = describe(error)
@@ -2660,6 +2754,221 @@ final class AppState {
                                                  isVM: report.isVM)
         }
     }
+
+    // MARK: - School admin (SAT-20)
+    //
+    // Same shape as the teacher paths: real Supabase when signed in, local
+    // mock mutations in preview so every admin button demos without a server.
+
+    /// Staff, classes and sessions for the admin page.
+    func loadAdminHome() async {
+        guard signedIn, !adminHomeInFlight else { return }
+        adminHomeInFlight = true
+        defer { adminHomeInFlight = false }
+        errorMessage = nil
+        do {
+            async let staffRows = supabase.listStaff()
+            async let classRows = supabase.listAllClasses()
+            async let sessionRows = supabase.listAllSessions()
+            let (s, c, w) = try await (staffRows, classRows, sessionRows)
+            guard signedIn else { return }   // signed out mid-load: keep the mocks
+            staff = s
+            schoolClasses = c
+            schoolSessions = w
+            adminLoaded = true
+        } catch {
+            guard signedIn else { return }
+            errorMessage = adminMessage(error)
+        }
+    }
+
+    /// Active classes (the Students lists), by name.
+    var activeSchoolClasses: [SchoolClass] {
+        schoolClasses
+            .filter { $0.archivedAt == nil }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    func schoolClassName(_ id: String?) -> String {
+        guard let id, let c = schoolClasses.first(where: { $0.id == id }) else { return "No class" }
+        return c.name
+    }
+
+    /// Who teaches a class, as plainly as the app knows it.
+    func teacherLabel(_ teacherUserId: String?) -> String {
+        guard let id = teacherUserId else { return "No teacher" }
+        if signedIn, id == userId { return "You" }
+        return adminTeacherNames[id] ?? "Another teacher"
+    }
+
+    /// Admins first, then teachers, each by email.
+    var sortedStaff: [StaffMember] {
+        staff.sorted {
+            if $0.role != $1.role { return $0.role == .admin }
+            return $0.email < $1.email
+        }
+    }
+
+    var adminCount: Int { staff.filter { $0.role == .admin }.count }
+
+    /// Add a teacher or admin by email. Returns whether it was added.
+    @discardableResult
+    func addStaff(email raw: String, role: UserRole) async -> Bool {
+        let email = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard email.contains("@"), !email.contains(" "), email.count >= 3 else {
+            errorMessage = "Enter a full email address."
+            return false
+        }
+        guard !staff.contains(where: { $0.email == email }) else {
+            errorMessage = "\(email) is already on the list."
+            return false
+        }
+        errorMessage = nil
+        if !signedIn {
+            staff.append(StaffMember(email: email, role: role, addedAt: .now))
+            return true
+        }
+        do {
+            let row = try await supabase.addStaff(email: email, role: role)
+            staff.append(row ?? StaffMember(email: email, role: role, addedAt: .now))
+            return true
+        } catch {
+            errorMessage = adminMessage(error)
+            return false
+        }
+    }
+
+    /// Make a staff member a teacher or an admin.
+    func setStaffRole(_ member: StaffMember, to role: UserRole) async {
+        guard member.role != role else { return }
+        errorMessage = nil
+        if !signedIn {
+            if member.role == .admin, adminCount <= 1 {
+                errorMessage = Self.lastAdminMessage
+                return
+            }
+            if let i = staff.firstIndex(where: { $0.email == member.email }) { staff[i].role = role }
+            return
+        }
+        do {
+            guard let row = try await supabase.setStaffRole(email: member.email, role: role) else {
+                errorMessage = "That change didn't save. Reload and try again."
+                return
+            }
+            if let i = staff.firstIndex(where: { $0.email == member.email }) { staff[i] = row }
+        } catch {
+            errorMessage = adminMessage(error)
+        }
+    }
+
+    /// Take someone off the staff list.
+    func removeStaff(_ member: StaffMember) async {
+        errorMessage = nil
+        if !signedIn {
+            if member.role == .admin, adminCount <= 1 {
+                errorMessage = Self.lastAdminMessage
+                return
+            }
+            staff.removeAll { $0.email == member.email }
+            return
+        }
+        do {
+            guard try await supabase.removeStaff(email: member.email) else {
+                errorMessage = "\(member.email) wasn't removed. Reload and try again."
+                return
+            }
+            staff.removeAll { $0.email == member.email }
+        } catch {
+            errorMessage = adminMessage(error)
+        }
+    }
+
+    /// Load one class's roster (removed students included).
+    func loadAdminRoster(classId: String) async {
+        if !signedIn {
+            adminRosters[classId] = previewRosters[classId] ?? []
+            return
+        }
+        do {
+            let rows = try await supabase.listClassRoster(classId: classId)
+            guard signedIn else { return }
+            adminRosters[classId] = rows
+        } catch {
+            guard signedIn else { return }
+            errorMessage = adminMessage(error)
+        }
+    }
+
+    /// Remove a student from a class, or add them back.
+    func setStudentRemoved(classId: String, student: ClassEnrollment, removed: Bool) async {
+        errorMessage = nil
+        if !signedIn {
+            var rows = previewRosters[classId] ?? []
+            if let i = rows.firstIndex(where: { $0.userId == student.userId }) {
+                rows[i].removedAt = removed ? .now : nil
+            }
+            previewRosters[classId] = rows
+            adminRosters[classId] = rows
+            updateStudentCount(classId: classId)
+            return
+        }
+        do {
+            guard try await supabase.setStudentRemoved(classId: classId, userId: student.userId,
+                                                       removed: removed) else {
+                errorMessage = "That change didn't save. Reload and try again."
+                return
+            }
+            await loadAdminRoster(classId: classId)
+            updateStudentCount(classId: classId)
+        } catch {
+            errorMessage = adminMessage(error)
+        }
+    }
+
+    private func updateStudentCount(classId: String) {
+        guard let rows = adminRosters[classId],
+              let i = schoolClasses.firstIndex(where: { $0.id == classId }) else { return }
+        schoolClasses[i].studentCount = rows.filter(\.isActive).count
+    }
+
+    private static let lastAdminMessage = "The school needs at least one admin."
+
+    /// Plain words for the admin page's server errors. PostgREST puts the
+    /// database's own message in the body's "message" field.
+    private func adminMessage(_ error: Error) -> String {
+        if let err = error as? SupabaseError, case let .badResponse(status, body) = err {
+            let json = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any]
+            let message = (json?["message"] as? String) ?? ""
+            let code = (json?["code"] as? String) ?? ""
+            if message.lowercased().contains("at least one admin") { return Self.lastAdminMessage }
+            if code == "23505" { return "That email is already on the list." }
+            if code == "23514" { return "Enter a full email address." }
+            if status == 401 || status == 403 || code == "42501" {
+                return "Only school admins can do that."
+            }
+            if !message.isEmpty { return message }
+        }
+        return describe(error)
+    }
+
+    static let sampleTeacherNames: [String: String] = ["t1": "J. Lee", "t2": "M. Garcia"]
+
+    static let sampleRosters: [String: [ClassEnrollment]] = [
+        ClassRoom.sample.id: [
+            ClassEnrollment(displayName: "Ava Chen", userId: "u1", createdAt: .now, removedAt: nil),
+            ClassEnrollment(displayName: "Ben Ortiz", userId: "u2", createdAt: .now, removedAt: nil),
+            ClassEnrollment(displayName: "Maya Singh", userId: "u3", createdAt: .now, removedAt: nil),
+            ClassEnrollment(displayName: "Leo Park", userId: "u4", createdAt: .now,
+                            removedAt: Date(timeIntervalSinceNow: -5 * 86400)),
+        ],
+        ClassRoom.sample2.id: [
+            ClassEnrollment(displayName: "Ava Chen", userId: "u1", createdAt: .now, removedAt: nil),
+            ClassEnrollment(displayName: "Noor Haddad", userId: "u5", createdAt: .now, removedAt: nil),
+        ],
+        "c3": [
+            ClassEnrollment(displayName: "Sam Rivera", userId: "u6", createdAt: .now, removedAt: nil),
+        ],
+    ]
 
     // MARK: - Teacher: invite students to a class
 

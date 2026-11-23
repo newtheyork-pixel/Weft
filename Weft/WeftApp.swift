@@ -84,7 +84,7 @@ struct WeftApp: App {
     }
 }
 
-/// Top-level router between sign-in / teacher / student.
+/// Top-level router between sign-in / teacher / student / admin.
 struct RootView: View {
     @Environment(AppState.self) private var app
 
@@ -97,6 +97,7 @@ struct RootView: View {
                 case .signIn:  SignInView()
                 case .teacher: TeacherFlowView()
                 case .student: StudentFlowView()
+                case .admin:   AdminFlowView()
                 }
             }
         }

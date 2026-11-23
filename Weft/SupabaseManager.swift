@@ -1043,6 +1043,107 @@ final class SupabaseManager: @unchecked Sendable {
             onConflict: "submission_id", returning: false)
     }
 
+    // MARK: - School admin (SAT-20; RLS lets only admins past these)
+
+    /// Every teacher and admin on the school's staff list.
+    func listStaff() async throws -> [StaffMember] {
+        try await rows("school_staff", query: [
+            URLQueryItem(name: "select", value: "email,role,added_by,added_at"),
+            URLQueryItem(name: "order", value: "email.asc"),
+        ])
+    }
+
+    /// Add a teacher or admin by email. They need not have signed in yet.
+    /// `added_by` is filled in by the server.
+    func addStaff(email: String, role: UserRole) async throws -> StaffMember? {
+        struct Payload: Encodable { let email: String; let role: String }
+        let result: [StaffMember] = try await insert("school_staff",
+            values: Payload(email: email.lowercased(), role: role.rawValue))
+        return result.first
+    }
+
+    /// Change a staff member's role. Returns the updated row; nil means the
+    /// server changed nothing (RLS hides refusals as zero rows).
+    func setStaffRole(email: String, role: UserRole) async throws -> StaffMember? {
+        struct Payload: Encodable { let role: String }
+        let result: [StaffMember] = try await update("school_staff",
+            values: Payload(role: role.rawValue),
+            query: [URLQueryItem(name: "email", value: "eq.\(email.lowercased())")])
+        return result.first
+    }
+
+    /// Remove a staff member. Returns whether a row was actually deleted.
+    func removeStaff(email: String) async throws -> Bool {
+        let gone: [StaffMember] = try await deleteReturning("school_staff", query: [
+            URLQueryItem(name: "email", value: "eq.\(email.lowercased())"),
+        ])
+        return !gone.isEmpty
+    }
+
+    /// Every class in the school, with its count of students not removed.
+    /// Falls back to the plain list (no counts) if the embedded count fails.
+    func listAllClasses() async throws -> [SchoolClass] {
+        do {
+            return try await rows("classes", query: [
+                URLQueryItem(name: "select",
+                             value: "id,name,join_code,teacher_user_id,archived_at,class_enrollments(count)"),
+                URLQueryItem(name: "class_enrollments.removed_at", value: "is.null"),
+                URLQueryItem(name: "order", value: "name.asc"),
+            ])
+        } catch {
+            return try await rows("classes", query: [
+                URLQueryItem(name: "select", value: "id,name,join_code,teacher_user_id,archived_at"),
+                URLQueryItem(name: "order", value: "name.asc"),
+            ])
+        }
+    }
+
+    /// A class roster, removed students included (removed_at set).
+    func listClassRoster(classId: String) async throws -> [ClassEnrollment] {
+        try await listClassEnrollments(classId: classId)
+    }
+
+    /// Remove a student from a class (removed_at = now) or add them back
+    /// (removed_at = null). Returns whether the server changed the row.
+    func setStudentRemoved(classId: String, userId: String, removed: Bool) async throws -> Bool {
+        struct Payload: Encodable {
+            let removed_at: String?
+            enum CodingKeys: String, CodingKey { case removed_at }
+            // Always send the key: null is what adds a student back.
+            func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: CodingKeys.self)
+                if let removed_at { try c.encode(removed_at, forKey: .removed_at) }
+                else { try c.encodeNil(forKey: .removed_at) }
+            }
+        }
+        let changed: [ClassEnrollment] = try await update("class_enrollments",
+            values: Payload(removed_at: removed ? Self.nowISO() : nil),
+            query: [URLQueryItem(name: "class_id", value: "eq.\(classId)"),
+                    URLQueryItem(name: "user_id", value: "eq.\(userId)"),
+                    URLQueryItem(name: "select", value: "display_name,user_id,created_at,removed_at")])
+        return !changed.isEmpty
+    }
+
+    /// Every session in the school, newest first, with its assignment title
+    /// and the number of submitted essays. Falls back to the plain list (no
+    /// title or count) if the embedded read fails.
+    func listAllSessions() async throws -> [SchoolSession] {
+        let base = "id,code,class_id,test_id,teacher_user_id,status,created_at"
+        do {
+            return try await rows("sessions", query: [
+                URLQueryItem(name: "select",
+                             value: base + ",tests(title,version_number),essay_submissions(count)"),
+                URLQueryItem(name: "essay_submissions.submitted_at", value: "not.is.null"),
+                URLQueryItem(name: "order", value: "created_at.desc.nullslast"),
+            ])
+        } catch {
+            return try await rows("sessions", query: [
+                URLQueryItem(name: "select", value: base),
+                URLQueryItem(name: "order", value: "created_at.desc.nullslast"),
+            ])
+        }
+    }
+
     // MARK: - Student exam lifecycle (register / autosave / submit)
 
     /// The caller's newest SUBMITTED essay for an assignment family (the

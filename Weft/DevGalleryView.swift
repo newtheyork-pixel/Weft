@@ -23,6 +23,10 @@ enum DevScreen: String, CaseIterable, Identifiable {
     case templates
     case editor
     case grading
+    case adminSidebar
+    case adminOverview
+    case adminTables
+    case adminCompare
     case keyGuard
 
     var id: String { rawValue }
@@ -43,6 +47,10 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .templates:   return "Teacher · Templates"
         case .editor:      return "Teacher · Assignment editor"
         case .grading:     return "Teacher · Grading"
+        case .adminSidebar:  return "Admin · A Sidebar"
+        case .adminOverview: return "Admin · B Overview"
+        case .adminTables:   return "Admin · C Tables"
+        case .adminCompare:  return "Admin · A, B, C side by side"
         case .keyGuard:    return "Dev · Key guard tester"
         }
     }
@@ -64,6 +72,10 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .templates:   return ["templates", "template"]
         case .editor:      return ["editor", "assignment"]
         case .grading:     return ["grading", "grade", "review"]
+        case .adminSidebar:  return ["admin", "admina"]
+        case .adminOverview: return ["adminb"]
+        case .adminTables:   return ["adminc"]
+        case .adminCompare:  return ["admincompare", "admins"]
         case .keyGuard:    return ["keyguard", "keys"]
         }
     }
@@ -83,6 +95,10 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .templates:   TemplatePickerView()
         case .editor:      AssignmentEditorView()
         case .grading:     ReviewGradingView()
+        case .adminSidebar:  AdminFlowView(variant: .sidebar)
+        case .adminOverview: AdminFlowView(variant: .overview)
+        case .adminTables:   AdminFlowView(variant: .tables)
+        case .adminCompare:  AdminCompareView()
         case .keyGuard:    KeyGuardTesterView()
         }
     }
