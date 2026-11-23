@@ -20,7 +20,7 @@ this file makes it real. The phases:
 | Webcam / camera capture | ❌ **Dropped** (2026-06-14) | No `NSCameraUsageDescription`, no camera entitlement, no `AVCaptureSession`. Permission + "Camera stills" copy removed. |
 | Periodic screenshots | ⏸️ **Deprioritized** | Only if it can be made to cost **zero typing performance** (see below). Unbuilt until then. |
 | Content protection (capture exclusion) | ✅ **Done** | `window.sharingType = .none` in `KioskController` (saved/restored around the lock). |
-| Raw-key suppression (launchers / screenshots / Spaces) | ✅ **Done** (device-tested) | `ExamKeyGuard` (CGEventTap) blocks ⌘Space / ⌥Space launchers, ⌘⇧ screenshots, ⌃-arrow Mission Control, ⌘Tab, F13–F19 and the dedicated F3 Mission Control / F4 Launchpad / F5 Spotlight keys. Needs the Accessibility grant; fails open if denied. |
+| Raw-key suppression (launchers / screenshots / Spaces) | ✅ **Done** (device-tested) | `ExamKeyGuard` (CGEventTap) blocks ⌘Space / ⌥Space launchers, ⌘⇧ screenshots, ⌃-arrow Mission Control, ⌘Tab, F13–F19. The dedicated Mission Control / Launchpad / Spotlight keys (160 / 131 / 177, plus plain F3–F5) were added for SAT-27 and are **not yet device-tested**. Needs the Accessibility grant; fails open if denied. |
 | Request Accessibility on the checks screen | ⬜ **Next** | Without the grant `ExamKeyGuard` is a no-op. The pre-exam checks should prompt/verify it (required vs best-effort — TBD). |
 | `allowCapture` admin escape hatch | ⬜ Backlog | Let an admin test-driving the app bypass content-protection to screenshot for a bug report. Minor. |
 | Locked-browser chrome (back/forward/reload) | ⬜ Backlog | UX polish. |
@@ -64,15 +64,16 @@ touched:
 - **⌘⇧3/4/5/6** — screenshots / screen recording (allowed to pass, listed for contrast)
 - **⌃↑ ↓ ← →** — Mission Control / Spaces / App Exposé
 - **⌘Tab** and **F13–F19** (launcher rebinds)
-- **F3 / F4 / F5** (and the Touch Bar Launchpad key) — the dedicated Mission
-  Control / Launchpad / Spotlight keys on the function row
+- The dedicated **Mission Control / Launchpad / Spotlight** keys on the top
+  row (keycodes 160 / 131 / 177), and plain **F3 / F4 / F5** for when they're
+  pressed with fn or the top row is set to standard function keys
 
 (CapsLock is intentionally *not* handled — macOS toggles it below the session tap,
 so it can't be suppressed this way, and it isn't a cheat vector.)
 
 Safe by construction: every rule in `shouldSuppress(keyCode:flags:)` needs a
-modifier (or is a bare function key that never types text: F3/F4/F5, Touch Bar
-Launchpad, F13–F19), so plain space / arrows / digits always pass; it **fails open** if the
+modifier (or is a bare key that never types text: the dedicated Mission
+Control / Launchpad / Spotlight keys, F3/F4/F5, F13–F19), so plain space / arrows / digits always pass; it **fails open** if the
 app isn't trusted for Accessibility; and it's exam-scoped + self-healing.
 Device-tested via the dev harness (`WEFT_SCREEN=keyguard`).
 
