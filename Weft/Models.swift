@@ -499,8 +499,8 @@ struct RosterStudent: Identifiable, Codable, Hashable, Sendable {
     /// `outline_uploads` rows (keyed by user_id) to submissions (keyed by the
     /// students-row id). nil on legacy projections that didn't select it.
     var userId: String?
-    /// nil = the network check was not performed (the native app deliberately
-    /// skips IP matching; Electron rows still carry a real value).
+    /// The server's classroom network check (SAT-8): false = may not be on
+    /// the classroom network; nil = not known. Set by the server only.
     var networkSame: Bool?
     var remote: Bool
     var capture: Bool
