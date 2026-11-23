@@ -246,6 +246,9 @@ final class AppState {
     var examRecipientKeys: [DevicePublicKey] = []
     /// Whether this exam can be sealed to the teacher.
     var examLockState: ExamLockState?
+    /// A teacher key that differs from the one this Mac remembered for the
+    /// class, waiting for the student to trust it (SAT-21).
+    var pendingTeacherKey: (classId: String, key: DevicePublicKey)?
     /// Whether this Mac holds the signed-in person's essay key. nil = not
     /// checked yet (or the check couldn't reach the server).
     var essayKeyState: EssayKeyState?
@@ -388,6 +391,7 @@ final class AppState {
         gradingComments = [:]
         examRecipientKeys = []
         examLockState = nil
+        pendingTeacherKey = nil
         examUnreadableDraft = false; allowFreshOverUnreadable = false
         essayKeyState = nil
         teacherClasses = [.sample, .sample2]
@@ -426,6 +430,7 @@ final class AppState {
         liveExamOffer = nil
         examRecipientKeys = []
         examLockState = nil
+        pendingTeacherKey = nil
         examUnreadableDraft = false; allowFreshOverUnreadable = false
         essayKeyState = nil
         gradingComments = [:]
@@ -655,8 +660,11 @@ final class AppState {
                     : "Enter your essay password first, then add your outline."
                 return
             }
+            pendingTeacherKey = nil
             guard let teacherKeys = await outlineTeacherKeys(code: item.activeCode) else {
-                errorMessage = "Couldn't reach Weft to lock your outline. Check your connection and try again."
+                errorMessage = pendingTeacherKey != nil
+                    ? Self.teacherKeyChangedMessage
+                    : "Couldn't reach Weft to lock your outline. Check your connection and try again."
                 return
             }
             guard let sealed = WeftContentSeal.sealedFileBytes(
@@ -821,7 +829,13 @@ final class AppState {
               let tid = enrolledClasses.first(where: { $0.id == cid })?.teacherUserId,
               !tid.isEmpty else { return nil }
         guard let listed = try? await supabase.listDeviceKeys(userIds: [tid]) else { return nil }
-        return listed.filter { $0.userId == tid && WeftContentSeal.isGenuine($0) && !$0.isStudentKind }
+        let keys = listed.filter { $0.userId == tid && WeftContentSeal.isGenuine($0) && !$0.isStudentKind }
+        let checked = TeacherKeyPins.check(keys, me: userId, classId: cid)
+        if let changed = checked.changedTo {
+            pendingTeacherKey = (cid, changed)
+            return nil
+        }
+        return checked.ok
     }
 
     /// Before Begin: if the outline was sealed to a teacher key that has since
@@ -2088,6 +2102,7 @@ final class AppState {
         examDraftHTML = nil
         examMaterialsFailed = false
         examLockState = nil
+        pendingTeacherKey = nil
         examRecipientKeys = []
         examUnreadableDraft = false
         allowFreshOverUnreadable = false
@@ -2199,8 +2214,29 @@ final class AppState {
         let teacherKeys = listed.filter {
             $0.userId == tid && WeftContentSeal.isGenuine($0) && !$0.isStudentKind
         }
-        examRecipientKeys = teacherKeys
-        examLockState = teacherKeys.isEmpty ? .noTeacherKey : .ready
+        let checked = TeacherKeyPins.check(teacherKeys, me: me, classId: cid)
+        if let changed = checked.changedTo {
+            examRecipientKeys = []
+            pendingTeacherKey = (cid, changed)
+            examLockState = .teacherKeyChanged
+            return
+        }
+        examRecipientKeys = checked.ok
+        examLockState = checked.ok.isEmpty ? .noTeacherKey : .ready
+    }
+
+    static let teacherKeyChangedMessage = "Your teacher's lock is different from last time. That happens when a teacher resets their essay password. Ask your teacher. If they did, choose Trust new lock."
+
+    /// The student checked with their teacher: remember the new key for this
+    /// class and use it from now on.
+    func trustNewTeacherKey() async {
+        guard let pending = pendingTeacherKey else { return }
+        TeacherKeyPins.pin(pending.key.kid, me: userId, classId: pending.classId)
+        pendingTeacherKey = nil
+        errorMessage = nil
+        if let session = activeExamSession, session.classId == pending.classId {
+            await loadExamRecipientKeys(classId: pending.classId)
+        }
     }
 
     /// The student chose to start a new copy over a draft this Mac can't open.
@@ -2244,6 +2280,8 @@ final class AppState {
                     : "Enter your essay password first."
             case .unknownTeacher:
                 errorMessage = "This exam isn't linked to a class, so your work can't be locked to your teacher."
+            case .teacherKeyChanged:
+                errorMessage = Self.teacherKeyChangedMessage
             default:
                 errorMessage = "Couldn't check your teacher's lock. Check your connection and try again."
             }

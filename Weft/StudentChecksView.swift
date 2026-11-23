@@ -355,6 +355,9 @@ struct StudentChecksView: View {
                     } else if app.examUnreadableDraft {
                         Button("Start a new copy") { app.startFreshOverUnreadableDraft() }
                             .buttonStyle(.bordered)
+                    } else if app.pendingTeacherKey != nil {
+                        Button("Trust new lock") { Task { await app.trustNewTeacherKey() } }
+                            .buttonStyle(.bordered)
                     }
                 }
                 .padding(Theme.Space.md)
