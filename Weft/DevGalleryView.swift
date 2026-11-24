@@ -16,6 +16,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
     case checks
     case exam
     case examCarried
+    case breath
     case done
     case blocked
     case recovery
@@ -38,6 +39,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .checks:      return "Student · Pre-exam + privacy"
         case .exam:        return "Student · Exam (writing)"
         case .examCarried: return "Student · Exam (Draft 2, carried forward)"
+        case .breath: return "Student · Breathing guide"
         case .done:        return "Student · Done + ledger"
         case .blocked:     return "Student · Blocked (sharing)"
         case .recovery:    return "Student · Recovery prompt"
@@ -61,6 +63,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .checks:      return ["checks", "precheck", "privacy"]
         case .exam:        return ["exam", "writing", "write"]
         case .examCarried: return ["carried", "carry", "examcarried"]
+        case .breath: return ["breath", "breathe", "calm"]
         case .done:        return ["done", "ledger", "submitted"]
         case .blocked:     return ["blocked", "sharing"]
         case .recovery:    return ["recovery", "recover"]
@@ -82,6 +85,10 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .checks:      StudentChecksView()
         case .exam:        ExamView()
         case .examCarried: ExamView(previewCarryForward: true)
+        case .breath:
+            ExamView().overlay {
+                CalmBreathView(note: "Your time keeps running and your work is saved. Your teacher doesn't see this.") {}
+            }
         case .done:        StudentDoneView()
         case .blocked:     StudentBlockedView()
         case .recovery:    RecoveryPromptView()
