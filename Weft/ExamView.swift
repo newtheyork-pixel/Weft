@@ -425,6 +425,9 @@ struct ExamView: View {
                 detail: nil,
                 footnote: "Leaving the exam is logged for your teacher. Resume when you're ready.",
                 submitTitle: "Resume writing",
+                // Not red: red is the destructive action (Submit and exit), and
+                // resuming is the calm way back to the essay.
+                buttonTint: Theme.accent,
                 onSubmit: resumeFromFocusLoss
             )
             .transition(.opacity)
@@ -438,11 +441,12 @@ struct ExamView: View {
         VStack(spacing: 0) {
             header
             toolbarRow
-            // Locked while the breathing guide covers it, so nothing typed
-            // then can land in the essay unseen, and while a submit is in
-            // flight, so nothing typed lands after the submitted snapshot.
+            // Locked while the breathing guide covers it, while a blackout
+            // (screen-sharing detected or focus lost) is up, so "Writing
+            // paused" really means paused, and while a submit is in flight,
+            // so nothing typed lands after the submitted snapshot.
             RichTextEditor(controller: controller,
-                           isEditable: !expired && !showBreath && !submitting,
+                           isEditable: !expired && !showBreath && runtime.block == nil && !submitting,
                            spellcheckEnabled: assignment.spellcheckEnabled,
                            onEdit: { scheduleSave(); app.markWriting() })
                 .accessibilityLabel("Essay")
@@ -450,7 +454,9 @@ struct ExamView: View {
                     ? "Time is up. The essay can no longer be edited."
                     : submitting
                         ? "Submitting. The essay can't be edited right now."
-                        : "Write your response to the prompt.")
+                        : runtime.block != nil
+                            ? "Writing is paused. The essay can no longer be edited."
+                            : "Write your response to the prompt.")
                 .background(Color.white)
                 .padding(.horizontal, Theme.Space.xl)
             footerBar

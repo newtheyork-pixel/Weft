@@ -18,6 +18,10 @@ struct StudentBlockedView: View {
     var detail: String? = "zoom.us"
     var footnote: String = "Close it and your writing will resume automatically. Your teacher has been notified."
     var submitTitle: String? = "Can't close it? Submit and exit"
+    /// Tint for the single action button. Red reads as destructive (Submit and
+    /// exit); the focus-loss flavor's "Resume writing" is the calm path back to
+    /// the essay, so it uses the navy accent instead.
+    var buttonTint: Color = .red
     /// Fully hide the exam content behind the wash. The remote-control flavor
     /// MUST be opaque: its entire purpose is to keep the live question off a
     /// live remote session, and a translucent fill leaks the prompt + essay
@@ -54,7 +58,7 @@ struct StudentBlockedView: View {
                 if let submitTitle {
                     Button(submitTitle, action: onSubmit)
                         .buttonStyle(.bordered)
-                        .tint(.red)
+                        .tint(buttonTint)
                         .padding(.top, Theme.Space.sm)
                         .linkPointer()
                 }
