@@ -15,6 +15,9 @@ struct StudentChecksView: View {
     @State private var report: ProctoringReport?
     @State private var running = true
     @State private var beginBusy = false
+    /// Other open apps, closed when the exam begins.
+    @State private var openApps: [String] = []
+    @State private var closingApps = false
     @State private var keyGuardTrusted = ExamKeyGuard.isTrusted
     @State private var showBreath = false
 
@@ -26,6 +29,7 @@ struct StudentChecksView: View {
         "Counts your displays and looks for a hidden second or virtual screen.",
         "Confirms this is a real computer, not a virtual machine.",
         "Keeps watching for remote-control software while you write, and rechecks every few seconds.",
+        "Closes your other apps when you begin, and any app opened during the exam. Save your work in them first.",
     ]
 
     /// "What it never does" — the equally honest counter-list.
@@ -73,6 +77,14 @@ struct StudentChecksView: View {
             report = await ProctoringEngine().runChecks(teacherIP: nil)
             running = false
         }
+        .task {
+            // Keep the "these apps will close" list current while the student
+            // is on this screen (they may save and quit apps themselves).
+            while !Task.isCancelled {
+                openApps = ExamAppCloser.openAppNames()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
     }
 
     // MARK: Calm start
@@ -103,6 +115,7 @@ struct StudentChecksView: View {
 
     // MARK: Live check status
     private var statusCard: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
         GlassCard {
             HStack(spacing: Theme.Space.md) {
                 if running {
@@ -130,6 +143,22 @@ struct StudentChecksView: View {
                 Spacer(minLength: 0)
             }
             .animation(.easeOut(duration: 0.25), value: running)
+        }
+        if !openApps.isEmpty {
+            HStack(alignment: .top, spacing: Theme.Space.sm) {
+                Image(systemName: "xmark.app")
+                    .foregroundStyle(Theme.muted)
+                Text(ExamAppCloser.closesApps
+                     ? "When you begin, Weft closes \(openApps.joined(separator: ", ")). Save anything you need in them first."
+                     : "Test build: Weft would close \(openApps.joined(separator: ", ")). Apps are not closed in test builds.")
+                    .font(Theme.sans(12.5))
+                    .foregroundStyle(Theme.inkSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .padding(Theme.Space.md)
+            .background(Theme.accentSoft.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+        }
         }
     }
 
@@ -306,11 +335,21 @@ struct StudentChecksView: View {
             Button {
                 beginBusy = true
                 Task {
+                    var checked = report
+                    if app.signedIn, !openApps.isEmpty {
+                        closingApps = true
+                        await ExamAppCloser.closeAll()
+                        closingApps = false
+                        openApps = ExamAppCloser.openAppNames()
+                        // Closed apps no longer count against the student.
+                        checked = await ProctoringEngine().runChecks(teacherIP: nil)
+                        report = checked
+                    }
                     _ = await app.beginExam(
-                        screenCapture: report?.screenCapture ?? false,
-                        remote: report?.remote ?? false,
-                        displayCount: report.map { $0.displays },
-                        isVM: report.map { $0.isVM })
+                        screenCapture: checked?.screenCapture ?? false,
+                        remote: checked?.remote ?? false,
+                        displayCount: checked.map { $0.displays },
+                        isVM: checked.map { $0.isVM })
                     beginBusy = false
                 }
             } label: {
@@ -321,7 +360,7 @@ struct StudentChecksView: View {
                         Image(systemName: "pencil.and.outline")
                             .font(.system(size: 14, weight: .semibold))
                     }
-                    Text(running ? "Finishing checks…" : beginBusy ? "Starting exam…" : sessionPending ? "Loading assignment…" : "Enter exam")
+                    Text(running ? "Finishing checks…" : closingApps ? "Closing apps…" : beginBusy ? "Starting exam…" : sessionPending ? "Loading assignment…" : "Enter exam")
                         .font(Theme.sans(15, .semibold))
                 }
                 .frame(maxWidth: .infinity)
@@ -365,7 +404,7 @@ struct StudentChecksView: View {
             }
 
             Button("Back to home") { app.goToHome() }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .foregroundStyle(Theme.accent)
                 .font(Theme.sans(13))
                 .padding(.top, Theme.Space.xs)

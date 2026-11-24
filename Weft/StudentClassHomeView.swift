@@ -102,7 +102,7 @@ struct StudentClassHomeView: View {
                     .weftGlass(Theme.Radius.md)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .linkPointer()
             }
         }
@@ -124,7 +124,7 @@ struct StudentClassHomeView: View {
                 Label("Your classes", systemImage: "chevron.left")
                     .font(Theme.sans(13, .medium))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plainHit)
             .foregroundStyle(Theme.accent)
             .linkPointer()
             Text(app.enrolledClasses.first(where: { $0.id == app.selectedClassId })?.name ?? "Class")
@@ -167,13 +167,13 @@ struct StudentClassHomeView: View {
             Spacer(minLength: 0)
             if app.pendingKeyTrust != nil {
                 Button("Trust new lock") { Task { await app.trustNewTeacherKey() } }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plainHit)
                     .font(Theme.sans(12.5, .semibold))
                     .foregroundStyle(Theme.accent)
                     .linkPointer()
             } else {
                 Button("Retry") { Task { await app.loadStudentHome() } }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plainHit)
                     .font(Theme.sans(12.5, .semibold))
                     .foregroundStyle(Theme.accent)
                     .linkPointer()
@@ -302,7 +302,7 @@ struct StudentClassHomeView: View {
                                 .font(.system(size: 11, weight: .semibold))
                         }
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plainHit)
                     .font(Theme.sans(13, .semibold))
                     .foregroundStyle(Theme.accent)
                     .linkPointer()
@@ -318,7 +318,7 @@ struct StudentClassHomeView: View {
                             .font(.system(size: 11, weight: .semibold))
                     }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .font(Theme.sans(13, .semibold))
                 .foregroundStyle(Theme.accent)
                 .linkPointer()
@@ -371,7 +371,7 @@ struct StudentClassHomeView: View {
                         Text("Add outline")
                     }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .font(Theme.sans(12.5, .semibold))
                 .foregroundStyle(Theme.accent)
                 .linkPointer()
@@ -384,7 +384,7 @@ struct StudentClassHomeView: View {
     /// Inline text action (Replace / Remove), in the quiet link idiom.
     private func outlineAction(_ title: String, action: @escaping () -> Void) -> some View {
         Button(title, action: action)
-            .buttonStyle(.plain)
+            .buttonStyle(.plainHit)
             .font(Theme.sans(12.5, .semibold))
             .foregroundStyle(Theme.accent)
             .linkPointer()
@@ -409,7 +409,7 @@ struct StudentClassHomeView: View {
             }
             .foregroundStyle(Theme.accent)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .linkPointer()
         .help("Join a class with a class code")
         .padding(.top, Theme.Space.sm)

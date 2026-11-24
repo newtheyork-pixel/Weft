@@ -26,6 +26,7 @@ private struct ReturnedEssay: Identifiable, Hashable {
     /// teacher's Mac (PaperText), so the comments' ranges line up.
     var paragraphs: [String]
     var feedback: String       // overall comment from the teacher ("" => none)
+    var feedbackUnavailable = false
     var comments: [InlineComment]
 
     /// Sub-label for the left list: "Returned · 92/100" or "Returned · feedback".
@@ -260,7 +261,7 @@ struct ReturnedWorkView: View {
             )
             .animation(.easeOut(duration: 0.15), value: isActive)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .rowHover()
         .help(essay.title)
         .linkPointer()
@@ -382,12 +383,17 @@ struct ReturnedWorkView: View {
         let fb = selected.feedback.trimmingCharacters(in: .whitespacesAndNewlines)
         return VStack(alignment: .leading, spacing: Theme.Space.sm) {
             kickerRow("text.quote", "Overall comment from your teacher")
-            Text(fb.isEmpty ? "No overall comment." : fb)
+            Text(selected.feedbackUnavailable ? "The feedback could not be opened."
+                 : (fb.isEmpty ? "No overall comment." : fb))
                 .font(Theme.sans(14))
                 .foregroundStyle(fb.isEmpty ? Theme.muted : Theme.inkSoft)
                 .italic(fb.isEmpty)
                 .lineSpacing(3)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if selected.feedbackUnavailable {
+                Button("Retry feedback") { Task { await app.loadReturnedWork() } }
+                    .buttonStyle(.glass)
+            }
         }
         .padding(Theme.Space.lg)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -519,6 +525,7 @@ private extension ReturnedWorkView {
             pointsPossible: item.pointsPossible,
             paragraphs: PaperText.paragraphs(fromHTML: item.contentHtml),
             feedback: item.feedback,
+            feedbackUnavailable: item.feedbackUnavailable,
             // Shared only (the server returns nothing else); resolved ones are
             // hidden when the server says so.
             comments: item.comments
