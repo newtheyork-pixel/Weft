@@ -545,7 +545,7 @@ struct ReviewGradingView: View {
             }
             .frame(width: 44, height: 44)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .help(label)
         .accessibilityLabel(label)
         .linkPointer()
@@ -923,7 +923,7 @@ struct ReviewGradingView: View {
                     let id = current.id
                     Task { await app.loadStudentDrafts(submissionId: id, retry: true) }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Theme.accent)
                 .linkPointer()
@@ -953,7 +953,7 @@ struct ReviewGradingView: View {
                         .fill(comparing ? Theme.accent : Theme.accent.opacity(0.09)))
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .linkPointer()
                 .help(comparing ? "Stop comparing" : "Show what changed since \(target.label)")
                 .accessibilityAddTraits(comparing ? .isSelected : [])
@@ -1182,7 +1182,7 @@ struct ReviewGradingView: View {
                 .font(Theme.sans(13, .semibold))
                 .foregroundStyle(Theme.accent)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plainHit)
             .linkPointer()
             .help("Open the outline this student uploaded before writing")
             Text("Uploaded before the student began writing.")

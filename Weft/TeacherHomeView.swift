@@ -142,7 +142,7 @@ struct TeacherHomeView: View {
                     .weftGlass(Theme.Radius.md)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .linkPointer()
             }
         }
@@ -174,7 +174,7 @@ struct TeacherHomeView: View {
             }
             .foregroundStyle(Theme.accent)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .linkPointer()
         .help("Create a new class")
     }
@@ -189,7 +189,7 @@ struct TeacherHomeView: View {
                     sectionHeader("doc.text", "Library")
                     Spacer()
                     Button("+ New") { app.openNewAssignment() }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.plainHit)
                         .foregroundStyle(Theme.accent)
                         .font(Theme.sans(13, .semibold))
                         .linkPointer()
@@ -248,7 +248,7 @@ struct TeacherHomeView: View {
                 Label("Your classes", systemImage: "chevron.left")
                     .font(Theme.sans(13, .medium))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plainHit)
             .foregroundStyle(Theme.accent)
             .linkPointer()
             HStack {
@@ -458,7 +458,7 @@ struct TeacherHomeView: View {
                 Button("Go to \(app.liveClassName ?? "class")") {
                     app.selectTeacherClass(liveCid)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .font(Theme.sans(13, .semibold))
                 .foregroundStyle(Theme.accent)
                 .linkPointer()
@@ -487,7 +487,7 @@ struct TeacherHomeView: View {
                         Label("Go to the Library", systemImage: "doc.text")
                             .font(Theme.sans(13, .semibold))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plainHit)
                     .foregroundStyle(Theme.accent)
                     .linkPointer()
                 } else {
@@ -631,7 +631,7 @@ struct TeacherHomeView: View {
                     Task { await app.loadTeacherHome(); await app.loadClassSessions() }
                 }
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plainHit)
             .font(Theme.sans(12.5, .semibold))
             .foregroundStyle(Theme.accent)
             .linkPointer()

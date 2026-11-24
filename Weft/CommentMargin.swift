@@ -285,7 +285,7 @@ struct MarginedPaper: View {
                     .overlay(Circle().stroke(Color.black.opacity(0.12), lineWidth: 1))
                     .shadow(color: Color.black.opacity(0.14), radius: 3, x: 0, y: 1)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plainHit)
             .keyboardShortcut("m", modifiers: [.command, .option])
             .help("Add a comment (\u{2325}\u{2318}M)")
             .accessibilityLabel("Add comment on the selected text")
@@ -310,7 +310,7 @@ struct MarginedPaper: View {
                         Button(showResolved ? "Hide resolved" : "Show resolved (\(resolvedCount))") {
                             withAnimation(.easeOut(duration: 0.18)) { showResolved.toggle() }
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.plainHit)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.accent)
                         .linkPointer()
@@ -555,7 +555,7 @@ struct CommentCardView: View {
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .rowHover(corner: 6, strength: 0.08)
         .help(label)
         .accessibilityLabel(label)
@@ -573,7 +573,7 @@ struct CommentCardView: View {
             }
             .foregroundStyle(item.isPrivate ? Theme.muted : Theme.good)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .linkPointer()
         .help(item.isPrivate
               ? "Only teachers see this. Click to show it to the student."
@@ -672,7 +672,7 @@ struct DraftCommentCard: View {
                 }
                 .foregroundStyle(isPrivate ? Theme.muted : Theme.good)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plainHit)
             .linkPointer()
             .help(isPrivate ? "Only teachers will see this. Click to show it to the student."
                             : "The student sees this when you share the grade. Click to make it private.")

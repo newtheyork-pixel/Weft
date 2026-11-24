@@ -443,7 +443,7 @@ struct ExamView: View {
                 .background(Theme.accent.opacity(0.10), in: Capsule())
                 .foregroundStyle(Theme.accent)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .disabled(expired || submitting)
         .help("Take 30 seconds to breathe. Your time keeps running.")
         .linkPointer()
@@ -501,7 +501,7 @@ struct ExamView: View {
                     .padding(.horizontal, 12).padding(.vertical, 5)
                     .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .help(soon ? "Time remaining"
                       : hidden ? "Show the time left. It also comes back by itself for the last 5 minutes."
                                : "Hide the time left. It comes back by itself for the last 5 minutes.")
@@ -527,7 +527,7 @@ struct ExamView: View {
             } label: {
                 Image(systemName: referencesVisible ? "sidebar.right" : "sidebar.left")
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.iconHit)
             .keyboardShortcut("r", modifiers: [.command, .shift])
             .help(referencesVisible ? "Hide references, write only (⌘⇧R)" : "Show references (⌘⇧R)")
             .accessibilityLabel(referencesVisible ? "Hide references" : "Show references")
@@ -659,6 +659,8 @@ private struct WordCountLabel: View {
         }
         .font(.system(size: 12, weight: .medium, design: .rounded))
         .monospacedDigit()
+        .lineLimit(1)
+        .fixedSize()
         .help("Word count")
         .accessibilityLabel("Word count")
         .accessibilityValue({

@@ -55,7 +55,7 @@ struct DraftSwitcher: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .linkPointer()
         .help(graded ? "\(d.label) is the one you are grading. \u{2318}[ and \u{2318}] move between drafts."
                      : "Show \(d.label). \u{2318}[ and \u{2318}] move between drafts.")
