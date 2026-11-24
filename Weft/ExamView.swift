@@ -152,7 +152,7 @@ struct ExamView: View {
         }
         .animation(.easeOut(duration: 0.2), value: runtime.block)
         .confirmationDialog("Submit your exam?", isPresented: $showSubmitConfirm, titleVisibility: .visible) {
-            Button("Submit exam", role: .destructive) { submit() }
+            Button("Submit exam", role: .destructive) { submit(enforcingWordLimit: true) }
             Button("Keep writing", role: .cancel) { }
         } message: {
             // Own view so the live count does not track on ExamView.body.
@@ -298,24 +298,38 @@ struct ExamView: View {
     /// (the 0:00 force-submit bypasses this — the deadline always wins), then
     /// confirm if the preference is on.
     private func requestSubmit() {
+        // The published count trails typing by the recount debounce, so a
+        // word added (or removed) just before Submit would be judged against
+        // the old count. Recount the live document now; this also makes the
+        // confirmation dialog show what will actually be submitted.
+        controller.recountWords()
         // Past 0:00 the editor is frozen, so "shorten your essay" would be an
         // impossible instruction — the deadline always wins over the limit.
         if !expired, let limit = wordLimit, wordCount > limit {
-            overLimitMessage = "Over the word limit (\(wordCount) / \(limit) words). Shorten your essay before submitting."
+            overLimitMessage = overLimitText(count: wordCount, limit: limit)
             return
         }
         overLimitMessage = nil
         if confirmBeforeSubmit {
             showSubmitConfirm = true
         } else {
-            submit()
+            submit(enforcingWordLimit: true)
         }
+    }
+
+    private func overLimitText(count: Int, limit: Int) -> String {
+        "Over the word limit (\(count) / \(limit) words). Shorten your essay before submitting."
     }
 
     /// Submit = final flush (must succeed) -> DB lock -> leave the exam. A
     /// failed flush keeps the student in the exam with the failed-save label;
     /// their work is intact and Submit can be pressed again.
-    private func submit() {
+    ///
+    /// `enforcingWordLimit` is set by the student's Submit path: the limit is
+    /// re-checked against the exact snapshot being uploaded, so text that
+    /// changed after `requestSubmit` checked cannot slip past it. Deadline and
+    /// session-closed submits leave it off — the deadline always wins.
+    private func submit(enforcingWordLimit: Bool = false) {
         // Single-flight: only one submit may be in flight. A concurrent second
         // call (double-tap, ⌘Return + auto-submit at 0:00, etc.) would re-enter
         // submitExam() after the first nilled the session, manufacture a false
@@ -325,6 +339,14 @@ struct ExamView: View {
         submitting = true
         Task {
             let snap = await controller.htmlAndWordCountOffMain()
+            // `expired` is read after the snapshot await: if the deadline fired
+            // meanwhile, its own submit() was dropped by the single-flight
+            // guard above, so this one must go through as the forced submit.
+            if enforcingWordLimit, !expired, let limit = wordLimit, snap.wordCount > limit {
+                submitting = false
+                overLimitMessage = overLimitText(count: snap.wordCount, limit: limit)
+                return
+            }
             guard await app.submitExam(html: snap.html,
                                        wordCount: snap.wordCount) else {
                 submitting = false
@@ -374,7 +396,7 @@ struct ExamView: View {
                 footnote: "Close it and your writing will resume automatically. Your teacher has been notified.",
                 submitTitle: "Can't close it? Submit and exit",
                 opaque: true,
-                onSubmit: submit
+                onSubmit: { submit() }
             )
             .transition(.opacity)
         case .focusLost:
