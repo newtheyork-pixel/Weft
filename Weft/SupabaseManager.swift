@@ -1055,6 +1055,24 @@ final class SupabaseManager: @unchecked Sendable {
             let title: String; let questions: [Question]
             let time_limit_minutes: Int?; let updated_at: String
             let spellcheck_enabled: Bool; let outline_allowed: Bool
+            enum CodingKeys: String, CodingKey {
+                case title, questions, time_limit_minutes, updated_at
+                case spellcheck_enabled, outline_allowed
+            }
+            // The synthesized encoder omits nil optionals, and an omitted key
+            // in a PATCH leaves the stored value alone: clearing the editor's
+            // Time limit field ("blank = unlimited") kept the old limit.
+            // Send an explicit null so the column is cleared.
+            func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: CodingKeys.self)
+                try c.encode(title, forKey: .title)
+                try c.encode(questions, forKey: .questions)
+                if let time_limit_minutes { try c.encode(time_limit_minutes, forKey: .time_limit_minutes) }
+                else { try c.encodeNil(forKey: .time_limit_minutes) }
+                try c.encode(updated_at, forKey: .updated_at)
+                try c.encode(spellcheck_enabled, forKey: .spellcheck_enabled)
+                try c.encode(outline_allowed, forKey: .outline_allowed)
+            }
         }
         let _: [Assignment] = try await update("tests",
             values: Payload(title: title, questions: questions,
