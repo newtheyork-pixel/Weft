@@ -261,7 +261,7 @@ struct ReturnedWorkView: View {
             )
             .animation(.easeOut(duration: 0.15), value: isActive)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .rowHover()
         .help(essay.title)
         .linkPointer()

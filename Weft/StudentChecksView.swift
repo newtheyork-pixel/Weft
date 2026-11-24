@@ -404,7 +404,7 @@ struct StudentChecksView: View {
             }
 
             Button("Back to home") { app.goToHome() }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .foregroundStyle(Theme.accent)
                 .font(Theme.sans(13))
                 .padding(.top, Theme.Space.xs)

@@ -161,7 +161,7 @@ struct TemplatePickerView: View {
             )
             .animation(.easeOut(duration: 0.16), value: isOn)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .rowHover(corner: Theme.Radius.md)
         .linkPointer()
         .accessibilityAddTraits(isOn ? [.isSelected] : [])
@@ -174,7 +174,7 @@ struct TemplatePickerView: View {
                 .foregroundStyle(Theme.muted)
                 .padding(8)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .padding(Theme.Space.md)
         .help("Close")
         .linkPointer()
@@ -424,7 +424,7 @@ struct AssignmentEditorView: View {
                         .font(Theme.sans(13, .semibold))
                         .foregroundStyle(canSave ? Theme.accent : Theme.muted2)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .disabled(!canSave)
                 .linkPointer()
                 .help("Attach a PDF students can open during the essay (up to 50 MB)")
@@ -468,7 +468,7 @@ struct AssignmentEditorView: View {
                                 .font(Theme.sans(12))
                                 .foregroundStyle(Theme.muted2)
                             Button("Remove") { remove(file) }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.plainHit)
                             .font(Theme.sans(12, .semibold))
                             .foregroundStyle(Theme.bad)
                             .linkPointer()
@@ -512,7 +512,7 @@ struct AssignmentEditorView: View {
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().linkPointer()
                 Text("·").foregroundStyle(Theme.muted2)
                 Button("Add all") { addAllApprovedSites() }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plainHit)
                     .font(Theme.sans(13, .semibold))
                     .foregroundStyle(Theme.accent)
                     .linkPointer()
@@ -633,7 +633,7 @@ struct AssignmentEditorView: View {
                     links.removeAll { $0.id == link.id }
                 }
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plainHit)
             .font(Theme.sans(12, .semibold))
             .foregroundStyle(Theme.bad)
             .linkPointer()
@@ -719,7 +719,7 @@ struct AssignmentEditorView: View {
                 .foregroundStyle(Theme.muted)
                 .padding(8)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .padding(Theme.Space.md)
         .help("Close")
         .linkPointer()

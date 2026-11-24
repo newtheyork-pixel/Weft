@@ -927,7 +927,9 @@ struct RichTextToolbar: View {
     var controller: RichTextController
 
     var body: some View {
-        HStack(spacing: Theme.Space.xs) {
+        // No gaps between buttons: each one carries its own padding, so the
+        // whole bar is clickable without dead strips between targets.
+        HStack(spacing: 0) {
             toolbarButton("bold", label: "Bold (⌘B)") { controller.toggleBold() }
             toolbarButton("italic", label: "Italic (⌘I)") { controller.toggleItalic() }
             toolbarButton("underline", label: "Underline (⌘U)") { controller.toggleUnderline() }
@@ -945,76 +947,53 @@ struct RichTextToolbar: View {
 
             divider
 
-            // Font family menu: "Aa" label, items call setFontFamily.
-            Menu {
-                ForEach(weftFontFamilies, id: \.self) { family in
-                    Button(family) { controller.setFontFamily(family) }
+            // Formatting menus. Real buttons (32 pt targets) that open an
+            // AppKit menu: a SwiftUI Menu is a pop-up sized to its tiny label
+            // and ignores clicks on any padding around it.
+            PopUpMenuButton(label: "Font", entries: {
+                weftFontFamilies.map { family in
+                    .item(family) { controller.setFontFamily(family) }
                 }
-            } label: {
+            }) {
                 Text("Aa")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.inkSoft)
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("Font")
-            .accessibilityLabel("Font")
-            .linkPointer()
 
-            // Font size menu: textformat.size icon.
-            Menu {
-                ForEach(weftFontSizes, id: \.self) { size in
-                    Button("\(Int(size))") { controller.setFontSize(size) }
+            PopUpMenuButton(label: "Size", entries: {
+                weftFontSizes.map { size in
+                    .item("\(Int(size))") { controller.setFontSize(size) }
                 }
-            } label: {
+            }) {
                 Image(systemName: "textformat.size")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.inkSoft)
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("Size")
-            .accessibilityLabel("Size")
-            .linkPointer()
 
-            // Color menu: text colors + highlight colors in two sections.
-            Menu {
-                Section("Text") {
-                    ForEach(weftTextColors, id: \.0) { name, color in
-                        Button(name) { controller.setTextColor(color) }
-                    }
+            PopUpMenuButton(label: "Color", entries: {
+                [.header("Text")]
+                + weftTextColors.map { name, color in
+                    .item(name) { controller.setTextColor(color) }
                 }
-                Section("Highlight") {
-                    ForEach(weftHighlights, id: \.0) { name, color in
-                        Button(name) { controller.setHighlight(color) }
-                    }
+                + [.separator, .header("Highlight")]
+                + weftHighlights.map { name, color in
+                    .item(name) { controller.setHighlight(color) }
                 }
-            } label: {
+            }) {
                 Image(systemName: "paintpalette")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.inkSoft)
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("Color")
-            .accessibilityLabel("Color")
-            .linkPointer()
 
-            // Line spacing menu.
-            Menu {
-                ForEach(weftSpacings, id: \.0) { name, multiple in
-                    Button(name) { controller.setLineSpacing(multiple) }
+            PopUpMenuButton(label: "Line spacing", entries: {
+                weftSpacings.map { name, multiple in
+                    .item(name) { controller.setLineSpacing(multiple) }
                 }
-            } label: {
+            }) {
                 Image(systemName: "arrow.up.and.down.text.horizontal")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.inkSoft)
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("Line Spacing")
-            .accessibilityLabel("Line spacing")
-            .linkPointer()
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)
@@ -1035,11 +1014,9 @@ struct RichTextToolbar: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 14, weight: .medium))
-                .frame(width: 26, height: 26)
                 .foregroundStyle(Theme.inkSoft)
         }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
+        .buttonStyle(.iconHit)
         .help(label)
         .accessibilityLabel(label)
         .linkPointer()
@@ -1052,12 +1029,9 @@ struct RichTextToolbar: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 12, weight: .semibold))
-                .frame(minWidth: 26, minHeight: 26)
-                .padding(.horizontal, 4)
                 .foregroundStyle(Theme.inkSoft)
         }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
+        .buttonStyle(.iconHit)
         .help(label)
         .accessibilityLabel(label)
         .linkPointer()
