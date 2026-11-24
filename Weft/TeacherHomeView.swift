@@ -380,6 +380,12 @@ struct TeacherHomeView: View {
                                     .font(Theme.sans(12.5))
                                     .foregroundStyle(Theme.muted)
                                     .monospacedDigit()
+                                if let note = Self.checkNote(for: s) {
+                                    Text(note.text)
+                                        .font(Theme.sans(12))
+                                        .foregroundStyle(Theme.warn)
+                                        .help(note.help)
+                                }
                             }
                             Spacer()
                             Chip(text: Self.statusLabel(s.status), kind: Self.statusKind(s))
@@ -404,6 +410,23 @@ struct TeacherHomeView: View {
         }
         if words == 0 { return "\(lock) · no words yet" }
         return "\(lock) · \(words) word\(words == 1 ? "" : "s") · \(saved)"
+    }
+
+    /// Why a student's chip is amber, in plain words. Never shows an IP
+    /// address: the server only says whether the student seems to be on the
+    /// classroom network (SAT-8).
+    static func checkNote(for s: RosterStudent) -> (text: String, help: String)? {
+        var parts: [String] = []
+        if s.remote { parts.append("Remote-control app running") }
+        if s.capture { parts.append("Recording or meeting app running") }
+        if s.displays > 1 { parts.append("\(s.displays) displays") }
+        if s.isVM { parts.append("Virtual machine") }
+        if s.networkSame == false { parts.append("May not be on the classroom network") }
+        guard !parts.isEmpty else { return nil }
+        let help = s.networkSame == false
+            ? "Their internet connection differs from most of the class. Often that's a phone hotspot or another Wi-Fi network, not a problem. Weft never shows or stores network addresses."
+            : "Checked on the student's Mac before and during the exam."
+        return (parts.joined(separator: " · "), help)
     }
 
     private static func ago(_ date: Date?) -> String {
