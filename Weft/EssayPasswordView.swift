@@ -64,11 +64,11 @@ struct EssayPasswordView: View {
                         Button(resetting ? "Back" : "Forgot it?") {
                             resetting.toggle(); problem = nil; password = ""; confirm = ""
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.plainHit)
                         .foregroundStyle(Theme.accent)
                     }
                     Button("Sign out") { app.signOut() }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.plainHit)
                         .foregroundStyle(Theme.muted)
                         .padding(.leading, Theme.Space.md)
                 }

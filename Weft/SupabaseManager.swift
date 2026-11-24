@@ -401,6 +401,8 @@ final class SupabaseManager: @unchecked Sendable {
         var comps = URLComponents(url: SupabaseConfig.url.appendingPathComponent("rest/v1/\(table)"),
                                   resolvingAgainstBaseURL: false)!
         comps.queryItems = query
+        // Keep the plus in Postgres timestamp offsets through query decoding.
+        comps.percentEncodedQuery = comps.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
 
         var req = URLRequest(url: comps.url!)
         req.httpMethod = "PATCH"
@@ -893,13 +895,99 @@ final class SupabaseManager: @unchecked Sendable {
         return found.first?.user_id ?? nil
     }
 
+    // MARK: Drafts (a student's earlier and later drafts, while grading)
+
+    /// One test's place in its version group (no questions, no text).
+    func draftTest(id: String) async throws -> DraftTestRow? {
+        let found: [DraftTestRow] = try await rows("tests", query: [
+            URLQueryItem(name: "select", value: "id,version_group_id,version_number"),
+            URLQueryItem(name: "id", value: "eq.\(id)"),
+        ])
+        return found.first
+    }
+
+    /// Every one of the teacher's tests in a version group: the root (its id
+    /// IS the group id, version_group_id may be null) and its drafts.
+    func listVersionGroupTests(groupId: String, teacherUserId: String) async throws -> [DraftTestRow] {
+        try await rows("tests", query: [
+            URLQueryItem(name: "select", value: "id,version_group_id,version_number"),
+            URLQueryItem(name: "or", value: "(id.eq.\(groupId),version_group_id.eq.\(groupId))"),
+            URLQueryItem(name: "teacher_user_id", value: "eq.\(teacherUserId)"),
+        ])
+    }
+
+    /// The teacher's sessions in one class for any of these tests.
+    func listClassSessions(testIds: [String], classId: String,
+                           teacherUserId: String) async throws -> [ExamSession] {
+        guard !testIds.isEmpty else { return [] }
+        return try await rows("sessions", query: [
+            URLQueryItem(name: "select", value: "id,code,test_id,class_id,status,created_at"),
+            URLQueryItem(name: "test_id", value: "in.(" + testIds.joined(separator: ",") + ")"),
+            URLQueryItem(name: "class_id", value: "eq.\(classId)"),
+            URLQueryItem(name: "teacher_user_id", value: "eq.\(teacherUserId)"),
+            URLQueryItem(name: "status", value: "neq.archived"),
+        ])
+    }
+
+    /// One person's students rows (one per session joined) in these sessions.
+    func listStudentRows(userId: String, sessionIds: [String]) async throws -> [DraftStudentRow] {
+        guard !sessionIds.isEmpty else { return [] }
+        return try await rows("students", query: [
+            URLQueryItem(name: "select", value: "id,session_id"),
+            URLQueryItem(name: "user_id", value: "eq.\(userId)"),
+            URLQueryItem(name: "session_id", value: "in.(" + sessionIds.joined(separator: ",") + ")"),
+        ])
+    }
+
+    /// The essays behind these students rows (sealed; opened on this Mac).
+    func listSubmissions(studentIds: [String]) async throws -> [TeacherSubmission] {
+        guard !studentIds.isEmpty else { return [] }
+        let inList = "in.(" + studentIds.joined(separator: ",") + ")"
+        let cipher = "id,session_id,student_id,question_id,content_html,content_cipher,word_count,updated_at,submitted_at"
+        let plain = "id,session_id,student_id,question_id,content_html,word_count,updated_at,submitted_at"
+        do {
+            return try await rows("essay_submissions", query: [
+                URLQueryItem(name: "select", value: cipher),
+                URLQueryItem(name: "student_id", value: inList),
+            ])
+        } catch {
+            return try await rows("essay_submissions", query: [
+                URLQueryItem(name: "select", value: plain),
+                URLQueryItem(name: "student_id", value: inList),
+            ])
+        }
+    }
+
     func listGrades(submissionIds: [String]) async throws -> [EssayGrade] {
         guard !submissionIds.isEmpty else { return [] }
         let inList = "in.(" + submissionIds.joined(separator: ",") + ")"
         return try await rows("essay_grades", query: [
-            URLQueryItem(name: "select", value: "submission_id,points,points_possible,feedback,released_at"),
+            URLQueryItem(name: "select", value: "submission_id,points,points_possible,feedback,feedback_cipher,released_at,updated_at"),
             URLQueryItem(name: "submission_id", value: inList),
         ])
+    }
+
+    func gradeFeedbackStaffKeys(submissionId: String) async throws -> [DevicePublicKey] {
+        try await rpc("get_grade_feedback_staff_keys", params: ["p_submission_id": submissionId])
+    }
+
+    func gradeFeedbackReturnKeys(submissionIds: [String]) async throws -> [String: Data] {
+        guard !submissionIds.isEmpty else { return [:] }
+        struct Row: Decodable {
+            let submission_id: String
+            let key_seed: String
+        }
+        var keys: [String: Data] = [:]
+        for start in stride(from: 0, to: submissionIds.count, by: 100) {
+            let ids = Array(submissionIds[start..<min(start + 100, submissionIds.count)])
+            let found: [Row] = try await rpc("get_grade_feedback_return_keys", params: ["p_submission_ids": ids])
+            for row in found {
+                if let key = Data(base64Encoded: row.key_seed), key.count == 32 {
+                    keys[row.submission_id] = key
+                }
+            }
+        }
+        return keys
     }
 
     // MARK: - Teacher writes
@@ -933,6 +1021,8 @@ final class SupabaseManager: @unchecked Sendable {
     /// version_number = nextVersion, a FRESH essay-question id (each draft's
     /// submissions key on their own question), prompt/limits/files/links
     /// carried over. Launching the clone is the normal launch path.
+    /// A new draft starts each student from their previous draft by default
+    /// (carry_forward, SAT-5); the teacher can switch it off in the editor.
     func createDraftTest(from source: Assignment, teacherUserId: String,
                          nextVersion: Int) async throws -> Assignment? {
         struct Payload: Encodable {
@@ -940,6 +1030,8 @@ final class SupabaseManager: @unchecked Sendable {
             let questions: [Question]; let time_limit_minutes: Int?
             let version_group_id: String; let version_number: Int
             let spellcheck_enabled: Bool; let outline_allowed: Bool
+            /// nil = omitted (a database without the column yet).
+            let carry_forward: Bool?
         }
         // A pre-versioning source row carries NULL version_group_id in the DB
         // (the model coalesces it to the test's own id). Backfill it before
@@ -960,28 +1052,76 @@ final class SupabaseManager: @unchecked Sendable {
                                     prompt: q.prompt, wordLimit: q.wordLimit,
                                     fileIds: q.fileIds, urlIds: q.urlIds)
         }
-        let rows: [Assignment] = try await insert("tests", values: Payload(
-            teacher_user_id: teacherUserId, title: source.title, questions: questions,
-            time_limit_minutes: source.timeLimitMinutes,
-            version_group_id: source.versionGroupId, version_number: nextVersion,
-            spellcheck_enabled: source.spellcheckEnabled,
-            outline_allowed: source.outlineAllowed))
-        return rows.first
+        func payload(carry: Bool?) -> Payload {
+            Payload(teacher_user_id: teacherUserId, title: source.title, questions: questions,
+                    time_limit_minutes: source.timeLimitMinutes,
+                    version_group_id: source.versionGroupId, version_number: nextVersion,
+                    spellcheck_enabled: source.spellcheckEnabled,
+                    outline_allowed: source.outlineAllowed, carry_forward: carry)
+        }
+        do {
+            let rows: [Assignment] = try await insert("tests", values: payload(carry: true))
+            return rows.first
+        } catch let error as SupabaseError where Self.isMissingColumn("carry_forward", error) {
+            // Database not migrated yet: New draft must still work.
+            let rows: [Assignment] = try await insert("tests", values: payload(carry: nil))
+            return rows.first
+        }
     }
 
+    /// True when PostgREST refused a write because `column` isn't in its
+    /// schema (PGRST204), i.e. the migration that adds it isn't applied yet.
+    static func isMissingColumn(_ column: String, _ error: SupabaseError) -> Bool {
+        guard case let .badResponse(_, body) = error else { return false }
+        return body.contains("PGRST204") || (body.contains(column) && body.lowercased().contains("column"))
+    }
+
+    /// `carryForward` nil leaves the column alone (draft 1 never sends it).
     func updateTest(id: String, title: String, questions: [Question], timeLimitMinutes: Int?,
-                    spellcheckEnabled: Bool = true, outlineAllowed: Bool = false) async throws {
+                    spellcheckEnabled: Bool = true, outlineAllowed: Bool = false,
+                    carryForward: Bool? = nil) async throws {
         struct Payload: Encodable {
             let title: String; let questions: [Question]
             let time_limit_minutes: Int?; let updated_at: String
             let spellcheck_enabled: Bool; let outline_allowed: Bool
+            /// nil = key left out, so the column is untouched (draft 1, or a
+            /// database without the column yet).
+            let carry_forward: Bool?
+            enum CodingKeys: String, CodingKey {
+                case title, questions, time_limit_minutes, updated_at
+                case spellcheck_enabled, outline_allowed, carry_forward
+            }
+            // The synthesized encoder omits nil optionals, and an omitted key
+            // in a PATCH leaves the stored value alone: clearing the editor's
+            // Time limit field ("blank = unlimited") kept the old limit.
+            // Send an explicit null so the column is cleared (SAT-35).
+            func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: CodingKeys.self)
+                try c.encode(title, forKey: .title)
+                try c.encode(questions, forKey: .questions)
+                if let time_limit_minutes { try c.encode(time_limit_minutes, forKey: .time_limit_minutes) }
+                else { try c.encodeNil(forKey: .time_limit_minutes) }
+                try c.encode(updated_at, forKey: .updated_at)
+                try c.encode(spellcheck_enabled, forKey: .spellcheck_enabled)
+                try c.encode(outline_allowed, forKey: .outline_allowed)
+                try c.encodeIfPresent(carry_forward, forKey: .carry_forward)
+            }
         }
-        let _: [Assignment] = try await update("tests",
-            values: Payload(title: title, questions: questions,
-                            time_limit_minutes: timeLimitMinutes, updated_at: Self.nowISO(),
-                            spellcheck_enabled: spellcheckEnabled,
-                            outline_allowed: outlineAllowed),
-            query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
+        func send(_ carry: Bool?) async throws {
+            let _: [Assignment] = try await update("tests",
+                values: Payload(title: title, questions: questions,
+                                time_limit_minutes: timeLimitMinutes, updated_at: Self.nowISO(),
+                                spellcheck_enabled: spellcheckEnabled,
+                                outline_allowed: outlineAllowed, carry_forward: carry),
+                query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
+        }
+        do {
+            try await send(carryForward)
+        } catch let error as SupabaseError where carryForward != nil
+                    && Self.isMissingColumn("carry_forward", error) {
+            // Database not migrated yet: save everything else.
+            try await send(nil)
+        }
     }
 
     func deleteTest(id: String) async throws {
@@ -1088,25 +1228,75 @@ final class SupabaseManager: @unchecked Sendable {
         }
     }
 
-    /// Upsert a grade. `essay_grades.session_id` and `student_id` are NOT NULL,
-    /// so they MUST be supplied (mirrors teacher.js). `releasedAt` is the exact
-    /// value to store (the caller decides whether to keep/clear the share time).
-    func upsertGrade(submissionId: String, sessionId: String, studentId: String,
-                     points: Double?, pointsPossible: Double, feedback: String,
-                     releasedAt: String?, studentWrap: WeftEnvelopeWrap? = nil) async throws {
-        struct Payload: Encodable {
-            let submission_id: String; let session_id: String; let student_id: String
-            let points: Double?; let points_possible: Double
-            let feedback: String; let released_at: String?
-            /// Omitted when nil (synthesized encodeIfPresent), so a save
-            /// without a new wrap never erases the one already stored.
-            let student_wrap: WeftEnvelopeWrap?
+    /// Update only the version the grader saw. A concurrent return or edit
+    /// must be reviewed before a stale draft can replace it.
+    func saveGrade(submissionId: String, sessionId: String, studentId: String,
+                   points: Double?, pointsPossible: Double, feedbackCipher: WeftEnvelope?,
+                   feedbackStudentWrap: WeftSealedText?, replaceFeedback: Bool, releasedAt: String?,
+                   studentWrap: WeftEnvelopeWrap?, expectedUpdatedAt: String?) async throws -> EssayGrade {
+        let payload = GradeWrite(submissionId: submissionId, sessionId: sessionId, studentId: studentId,
+                                 points: points, pointsPossible: pointsPossible, feedbackCipher: feedbackCipher,
+                                 feedbackStudentWrap: feedbackStudentWrap, replaceFeedback: replaceFeedback,
+                                 releasedAt: releasedAt, studentWrap: studentWrap)
+        let conflict = SupabaseError.auth("This grade changed while you were editing. Reopen grading and review the latest grade before saving again.")
+        let saved: [EssayGrade]
+        if let expectedUpdatedAt {
+            saved = try await update("essay_grades", values: payload, query: [
+                URLQueryItem(name: "submission_id", value: "eq.\(submissionId)"),
+                URLQueryItem(name: "updated_at", value: "eq.\(expectedUpdatedAt)"),
+            ])
+        } else {
+            do {
+                saved = try await insert("essay_grades", values: payload)
+            } catch SupabaseError.badResponse(_, let body) where Self.isUniqueViolation(body: body) {
+                throw conflict
+            }
         }
-        let _: [EssayGrade] = try await upsert("essay_grades",
-            values: Payload(submission_id: submissionId, session_id: sessionId, student_id: studentId,
-                            points: points, points_possible: pointsPossible, feedback: feedback,
-                            released_at: releasedAt, student_wrap: studentWrap),
-            onConflict: "submission_id", returning: false)
+        guard let grade = saved.first else { throw conflict }
+        return grade
+    }
+
+    private struct GradeWrite: Encodable {
+        let submissionId: String
+        let sessionId: String
+        let studentId: String
+        let points: Double?
+        let pointsPossible: Double
+        let feedbackCipher: WeftEnvelope?
+        let feedbackStudentWrap: WeftSealedText?
+        let replaceFeedback: Bool
+        let releasedAt: String?
+        let studentWrap: WeftEnvelopeWrap?
+
+        enum CodingKeys: String, CodingKey {
+            case submissionId = "submission_id"
+            case sessionId = "session_id"
+            case studentId = "student_id"
+            case points
+            case pointsPossible = "points_possible"
+            case feedback
+            case feedbackCipher = "feedback_cipher"
+            case feedbackStudentWrap = "feedback_student_wrap"
+            case releasedAt = "released_at"
+            case studentWrap = "student_wrap"
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var row = encoder.container(keyedBy: CodingKeys.self)
+            try row.encode(submissionId, forKey: .submissionId)
+            try row.encode(sessionId, forKey: .sessionId)
+            try row.encode(studentId, forKey: .studentId)
+            try row.encode(points, forKey: .points)
+            try row.encode(pointsPossible, forKey: .pointsPossible)
+            if replaceFeedback {
+                // Clear the legacy column atomically with the ciphertext write.
+                try row.encode("", forKey: .feedback)
+                try row.encode(feedbackCipher, forKey: .feedbackCipher)
+                try row.encode(feedbackStudentWrap, forKey: .feedbackStudentWrap)
+            }
+            try row.encodeIfPresent(releasedAt, forKey: .releasedAt)
+            try row.encodeIfPresent(studentWrap, forKey: .studentWrap)
+        }
     }
 
     // MARK: - School admin (SAT-20; RLS lets only admins past these)
@@ -1228,6 +1418,30 @@ final class SupabaseManager: @unchecked Sendable {
         let rows: [SubmittedEssay] = try await rpc("get_my_submission",
                                                    params: ["p_version_group_id": versionGroupId])
         return rows.first
+    }
+
+    /// One of the caller's own submitted essays from an earlier draft of the
+    /// same assignment (list_my_earlier_drafts, SAT-5). Metadata only.
+    struct EarlierDraft: Decodable, Sendable {
+        let submissionId: String
+        let versionNumber: Int
+        let submittedAt: Date?
+        let releasedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case submissionId = "submission_id"
+            case versionNumber = "version_number"
+            case submittedAt = "submitted_at"
+            case releasedAt = "released_at"
+        }
+    }
+
+    /// The caller's submitted essays from drafts numbered below `testId`, in
+    /// the same version group, newest draft first. SECURITY DEFINER keyed on
+    /// auth.uid(): students can't read sessions, so they can't map their own
+    /// essay_submissions rows to a draft number without it. No essay body.
+    func listMyEarlierDrafts(testId: String) async throws -> [EarlierDraft] {
+        try await rpc("list_my_earlier_drafts", params: ["p_test_id": testId])
     }
 
     struct StudentRowID: Decodable, Sendable { let id: String }
@@ -1409,6 +1623,33 @@ final class SupabaseManager: @unchecked Sendable {
             print("submit_essay lock failed: \(error)")
             return false
         }
+    }
+
+    /// This attempt's row id and whether `submit_essay` has already stamped it.
+    /// nil = no row yet. Lets a retried Submit recognise a lock that committed
+    /// on the server while its response was lost (SAT-34): re-uploading would
+    /// only hit the "submitted essays are read-only" refusal forever.
+    /// submitted_at is read as a raw string: only its presence matters, and a
+    /// date-format surprise must not turn "submitted" into a thrown error.
+    func getMySubmissionState(sessionId: String, studentId: String,
+                              questionId: String) async throws -> (id: String, submitted: Bool)? {
+        struct Row: Decodable {
+            let id: String
+            let submittedAt: String?
+            enum CodingKeys: String, CodingKey {
+                case id
+                case submittedAt = "submitted_at"
+            }
+        }
+        let rows: [Row] = try await self.rows("essay_submissions", query: [
+            URLQueryItem(name: "select", value: "id,submitted_at"),
+            URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+            URLQueryItem(name: "student_id", value: "eq.\(studentId)"),
+            URLQueryItem(name: "question_id", value: "eq.\(questionId)"),
+            URLQueryItem(name: "limit", value: "1"),
+        ])
+        guard let row = rows.first else { return nil }
+        return (row.id, row.submittedAt != nil)
     }
 
     /// students.status transition (joined -> writing -> submitted). Best-effort,
@@ -1909,6 +2150,9 @@ struct ReturnedWorkItem: Identifiable, Decodable, Hashable, Sendable {
     var points: Double?
     var pointsPossible: Double
     var feedback: String
+    var feedbackCipher: WeftEnvelope?
+    var feedbackStudentWrap: WeftSealedText?
+    var feedbackUnavailable = false
     var releasedAt: Date?
     var comments: [ReturnedComment]
 
@@ -1923,6 +2167,8 @@ struct ReturnedWorkItem: Identifiable, Decodable, Hashable, Sendable {
         case points
         case pointsPossible = "points_possible"
         case feedback
+        case feedbackCipher = "feedback_cipher"
+        case feedbackStudentWrap = "feedback_student_wrap"
         case releasedAt = "released_at"
         case comments
     }
@@ -1937,6 +2183,8 @@ struct ReturnedWorkItem: Identifiable, Decodable, Hashable, Sendable {
         points = try c.decodeIfPresent(Double.self, forKey: .points)
         pointsPossible = try c.decodeIfPresent(Double.self, forKey: .pointsPossible) ?? 0
         feedback = try c.decodeIfPresent(String.self, forKey: .feedback) ?? ""
+        feedbackCipher = try c.decodeIfPresent(WeftEnvelope.self, forKey: .feedbackCipher)
+        feedbackStudentWrap = try c.decodeIfPresent(WeftSealedText.self, forKey: .feedbackStudentWrap)
         releasedAt = try c.decodeIfPresent(Date.self, forKey: .releasedAt)
         comments = try c.decodeIfPresent([ReturnedComment].self, forKey: .comments) ?? []
     }

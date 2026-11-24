@@ -35,6 +35,9 @@ struct ExamView: View {
     /// True only in the real student flow. Gates the kiosk lock + monitor so QA
     /// previews don't take over the screen.
     var lockdown: Bool = false
+    /// Preview only (dev gallery): show a Draft 2 that starts from the
+    /// student's returned Draft 1 (SAT-5) instead of the filler essay.
+    var previewCarryForward: Bool = false
 
     @Environment(AppState.self) private var app
 
@@ -51,6 +54,9 @@ struct ExamView: View {
     @State private var draftReady = false
     @State private var didSeedPreview = false
     @State private var lastSavedHTML: String?
+    /// One calm line about carry forward (SAT-5), shown above the editor
+    /// until the student hides it.
+    @State private var carryNote: String?
 
     /// Filler text shown ONLY in the preview/gallery (lockdown == false) so the
     /// screen reads as a real writing session for QA. A real exam starts blank.
@@ -120,7 +126,16 @@ struct ExamView: View {
                     onHide: { toggleReferences() },
                     onRetryMaterials: { Task { await app.retryExamMaterials() } },
                     onInsertQuote: { text, cite in
-                        controller.insertQuote(text, citation: cite)
+                        // Locked while submitting or after time is up: the
+                        // quote must not land after the submit snapshot.
+                        guard controller.insertQuote(text, citation: cite) else {
+                            if expired {
+                                refStore.post(notice: "Time is up. Your essay can't be changed.")
+                            } else if submitting {
+                                refStore.post(notice: "Your essay is locked while it's being submitted.")
+                            }
+                            return
+                        }
                         refStore.post(notice: "Quoted into your essay.")
                         scheduleSave()
                         app.markWriting()
@@ -152,7 +167,7 @@ struct ExamView: View {
         }
         .animation(.easeOut(duration: 0.2), value: runtime.block)
         .confirmationDialog("Submit your exam?", isPresented: $showSubmitConfirm, titleVisibility: .visible) {
-            Button("Submit exam", role: .destructive) { submit() }
+            Button("Submit exam", role: .destructive) { submit(enforcingWordLimit: true) }
             Button("Keep writing", role: .cancel) { }
         } message: {
             // Own view so the live count does not track on ExamView.body.
@@ -166,14 +181,22 @@ struct ExamView: View {
             if lockdown {
                 deadline = app.examDeadline
                 countdownAnchor = Date()
+                let carried = app.examDraftCarried
                 if let html = app.examDraftHTML, !html.isEmpty {
                     controller.setContent(RichTextHTML.attributed(fromHTML: html))
-                    lastSavedHTML = html
+                    // A carried-forward draft isn't saved for this draft yet.
+                    lastSavedHTML = carried ? "" : html
                 } else {
                     lastSavedHTML = ""
                 }
+                carryNote = app.examCarryNote
                 app.examDraftHTML = nil
+                app.examDraftCarried = false
+                app.examCarryNote = nil
                 draftReady = true
+                // Save the carried text now, through the normal sealed
+                // autosave, so this draft holds it from the first second.
+                if carried { scheduleSave() }
             } else if deadline == nil {
                 deadline = Date().addingTimeInterval(45 * 60)
                 countdownAnchor = Date()
@@ -181,9 +204,15 @@ struct ExamView: View {
             }
             if !lockdown && !didSeedPreview {
                 didSeedPreview = true
-                controller.setContent(NSAttributedString(
-                    string: previewEssay,
-                    attributes: RichTextStyle.body.attributes()))
+                if previewCarryForward {
+                    controller.setContent(RichTextHTML.attributed(
+                        fromHTML: CarryForwardPreview.draft1HTML))
+                    carryNote = AppState.carriedNote(version: 1)
+                } else {
+                    controller.setContent(NSAttributedString(
+                        string: previewEssay,
+                        attributes: RichTextStyle.body.attributes()))
+                }
             }
             armExpiry()
         }
@@ -298,24 +327,41 @@ struct ExamView: View {
     /// (the 0:00 force-submit bypasses this — the deadline always wins), then
     /// confirm if the preference is on.
     private func requestSubmit() {
+        // The published count trails typing by the recount debounce, so a
+        // word added (or removed) just before Submit would be judged against
+        // the old count. Recount the live document now; this also makes the
+        // confirmation dialog show what will actually be submitted.
+        controller.recountWords()
         // Past 0:00 the editor is frozen, so "shorten your essay" would be an
         // impossible instruction — the deadline always wins over the limit.
         if !expired, let limit = wordLimit, wordCount > limit {
-            overLimitMessage = "Over the word limit (\(wordCount) / \(limit) words). Shorten your essay before submitting."
+            overLimitMessage = overLimitText(count: wordCount, limit: limit)
             return
         }
         overLimitMessage = nil
         if confirmBeforeSubmit {
             showSubmitConfirm = true
         } else {
-            submit()
+            submit(enforcingWordLimit: true)
         }
     }
 
-    /// Submit = final flush (must succeed) -> DB lock -> leave the exam. A
-    /// failed flush keeps the student in the exam with the failed-save label;
-    /// their work is intact and Submit can be pressed again.
-    private func submit() {
+    private func overLimitText(count: Int, limit: Int) -> String {
+        "Over the word limit (\(count) / \(limit) words). Shorten your essay before submitting."
+    }
+
+    /// Submit = freeze editor -> final flush (must succeed) -> DB lock ->
+    /// leave the exam. A failed flush keeps the student in the exam with the
+    /// failed-save label and unfreezes the editor (unless time is up); their
+    /// work is intact and Submit can be pressed again. A retry after a lock
+    /// whose reply was lost succeeds: submitExam checks the server's submitted
+    /// state before flushing again (SAT-34).
+    ///
+    /// `enforcingWordLimit` is set by the student's Submit path: the limit is
+    /// re-checked against the exact snapshot being uploaded, so text that
+    /// changed after `requestSubmit` checked cannot slip past it. Deadline and
+    /// session-closed submits leave it off — the deadline always wins.
+    private func submit(enforcingWordLimit: Bool = false) {
         // Single-flight: only one submit may be in flight. A concurrent second
         // call (double-tap, ⌘Return + auto-submit at 0:00, etc.) would re-enter
         // submitExam() after the first nilled the session, manufacture a false
@@ -323,10 +369,25 @@ struct ExamView: View {
         // view tears down); reset to false on every failure return.
         guard !submitting else { return }
         submitting = true
+        // Freeze the document before the snapshot, synchronously. The editor's
+        // `isEditable` also folds in `submitting`, but that only reaches the
+        // text view on SwiftUI's next update, and the snapshot is taken after
+        // a hop; anything typed in between would be visible on screen and
+        // missing from the submission (success cancels the pending autosave).
+        controller.freezeEditing()
         Task {
             let snap = await controller.htmlAndWordCountOffMain()
+            // `expired` is read after the snapshot await: if the deadline fired
+            // meanwhile, its own submit() was dropped by the single-flight
+            // guard above, so this one must go through as the forced submit.
+            if enforcingWordLimit, !expired, let limit = wordLimit, snap.wordCount > limit {
+                submitting = false
+                overLimitMessage = overLimitText(count: snap.wordCount, limit: limit)
+                return
+            }
             guard await app.submitExam(html: snap.html,
                                        wordCount: snap.wordCount) else {
+                // Unfreezes the editor through `isEditable` unless `expired`.
                 submitting = false
                 runtime.saveState = .failed
                 // Past the hard deadline nothing else would ever fire (the
@@ -374,7 +435,7 @@ struct ExamView: View {
                 footnote: "Close it and your writing will resume automatically. Your teacher has been notified.",
                 submitTitle: "Can't close it? Submit and exit",
                 opaque: true,
-                onSubmit: submit
+                onSubmit: { submit() }
             )
             .transition(.opacity)
         case .focusLost:
@@ -384,6 +445,9 @@ struct ExamView: View {
                 detail: nil,
                 footnote: "Leaving the exam is logged for your teacher. Resume when you're ready.",
                 submitTitle: "Resume writing",
+                // Not red: red is the destructive action (Submit and exit), and
+                // resuming is the calm way back to the essay.
+                buttonTint: Theme.accent,
                 onSubmit: resumeFromFocusLoss
             )
             .transition(.opacity)
@@ -396,16 +460,24 @@ struct ExamView: View {
     private var editorColumn: some View {
         VStack(spacing: 0) {
             header
+            if let note = carryNote { carryNoteRow(note) }
             toolbarRow
-            // Locked while the breathing guide covers it, so nothing typed
-            // then can land in the essay unseen.
-            RichTextEditor(controller: controller, isEditable: !expired && !showBreath,
+            // Locked while the breathing guide covers it, while a blackout
+            // (screen-sharing detected or focus lost) is up, so "Writing
+            // paused" really means paused, and while a submit is in flight,
+            // so nothing typed lands after the submitted snapshot.
+            RichTextEditor(controller: controller,
+                           isEditable: !expired && !showBreath && runtime.block == nil && !submitting,
                            spellcheckEnabled: assignment.spellcheckEnabled,
                            onEdit: { scheduleSave(); app.markWriting() })
                 .accessibilityLabel("Essay")
                 .accessibilityHint(expired
                     ? "Time is up. The essay can no longer be edited."
-                    : "Write your response to the prompt.")
+                    : submitting
+                        ? "Submitting. The essay can't be edited right now."
+                        : runtime.block != nil
+                            ? "Writing is paused. The essay can no longer be edited."
+                            : "Write your response to the prompt.")
                 .background(Color.white)
                 .padding(.horizontal, Theme.Space.xl)
             footerBar
@@ -435,6 +507,35 @@ struct ExamView: View {
         .padding(.bottom, Theme.Space.md)
     }
 
+    /// Carry forward (SAT-5): one calm line, hidden with a click.
+    private func carryNoteRow(_ note: String) -> some View {
+        HStack(spacing: Theme.Space.sm) {
+            Image(systemName: "doc.text")
+                .foregroundStyle(Theme.accent)
+            Text(note)
+                .foregroundStyle(Theme.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button {
+                carryNote = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.muted)
+            }
+            .buttonStyle(IconHitButtonStyle(minSize: 24))
+            .help("Hide this note")
+            .accessibilityLabel("Hide this note")
+            .linkPointer()
+        }
+        .font(Theme.sans(13))
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Theme.accent.opacity(0.07),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.horizontal, Theme.Space.xl)
+        .padding(.bottom, Theme.Space.sm)
+    }
+
     private var breatheButton: some View {
         Button(action: openBreath) {
             Label("Breathe", systemImage: "wind")
@@ -443,7 +544,7 @@ struct ExamView: View {
                 .background(Theme.accent.opacity(0.10), in: Capsule())
                 .foregroundStyle(Theme.accent)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .disabled(expired || submitting)
         .help("Take 30 seconds to breathe. Your time keeps running.")
         .linkPointer()
@@ -464,9 +565,9 @@ struct ExamView: View {
         }
     }
 
-    /// Two-line clock: time left (ticking, fixed-width digits) over the real
-    /// end time. Hiding it hides only the countdown; the end time stays, so
-    /// students still know when the exam ends without watching seconds.
+    /// The clock: time left (ticking, fixed-width digits). One line only; the
+    /// "Ends at" line was cut as clutter (SAT-39). VoiceOver still reads the
+    /// end time.
     @ViewBuilder private var countdown: some View {
         if let deadline {
             TimelineView(.periodic(from: countdownAnchor, by: 1)) { context in
@@ -478,7 +579,7 @@ struct ExamView: View {
                     // In the last five minutes the clock always shows.
                     if !soon { hideTimer.toggle() }
                 } label: {
-                    VStack(alignment: .leading, spacing: 1) {
+                    Group {
                         if hidden {
                             Label("Show time", systemImage: "eye")
                                 .font(Theme.sans(13, .semibold))
@@ -491,17 +592,13 @@ struct ExamView: View {
                                 Image(systemName: "clock")
                             }
                         }
-                        Text(ExamClock.endsText(deadline: deadline))
-                            .font(Theme.sans(11.5))
-                            .foregroundStyle(soon ? Theme.warn : Theme.muted)
-                            .padding(.leading, 22)
                     }
                     .foregroundStyle(tint)
                     .fixedSize()
-                    .padding(.horizontal, 12).padding(.vertical, 5)
-                    .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(tint.opacity(0.10), in: Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .help(soon ? "Time remaining"
                       : hidden ? "Show the time left. It also comes back by itself for the last 5 minutes."
                                : "Hide the time left. It comes back by itself for the last 5 minutes.")
@@ -515,6 +612,7 @@ struct ExamView: View {
         HStack(spacing: Theme.Space.md) {
             RichTextToolbar(controller: controller)
                 .fixedSize()
+                .disabled(expired || submitting)
             Spacer()
             // Own view: a word-count publish must not rebuild this column.
             WordCountLabel(controller: controller, limit: wordLimit) { newCount in
@@ -527,7 +625,7 @@ struct ExamView: View {
             } label: {
                 Image(systemName: referencesVisible ? "sidebar.right" : "sidebar.left")
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.iconHit)
             .keyboardShortcut("r", modifiers: [.command, .shift])
             .help(referencesVisible ? "Hide references, write only (⌘⇧R)" : "Show references (⌘⇧R)")
             .accessibilityLabel(referencesVisible ? "Hide references" : "Show references")
@@ -568,9 +666,9 @@ struct ExamView: View {
                 .linkPointer()
                 Spacer()
                 // Own view: flipping "Saving…" must not rebuild the editor.
-                SaveLabel(runtime: runtime)
+                SaveLabel(runtime: runtime, submitting: submitting)
                 Spacer()
-                Button("Submit") { requestSubmit() }
+                Button(submitting ? "Submitting…" : "Submit") { requestSubmit() }
                     .buttonStyle(.glassProminent).tint(Theme.accent)
                     .keyboardShortcut("\r", modifiers: [.command])
                     .disabled(submitting)
@@ -659,6 +757,8 @@ private struct WordCountLabel: View {
         }
         .font(.system(size: 12, weight: .medium, design: .rounded))
         .monospacedDigit()
+        .lineLimit(1)
+        .fixedSize()
         .help("Word count")
         .accessibilityLabel("Word count")
         .accessibilityValue({
@@ -675,10 +775,16 @@ private struct WordCountLabel: View {
 /// redraws this label and nothing above it.
 private struct SaveLabel: View {
     var runtime: ExamRuntime
+    /// A submit is in flight: the editor is frozen and the student is waiting
+    /// on the final save, so that is the state worth showing.
+    var submitting = false
 
     var body: some View {
         HStack(spacing: 6) {
-            if runtime.saveState == .saving {
+            if submitting {
+                ProgressView().controlSize(.small).scaleEffect(0.7)
+                Text("Submitting your essay…")
+            } else if runtime.saveState == .saving {
                 ProgressView().controlSize(.small).scaleEffect(0.7)
                 Text("Saving…")
             } else if runtime.saveState == .failed {

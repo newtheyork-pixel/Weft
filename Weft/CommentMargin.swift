@@ -187,8 +187,9 @@ struct MarginedPaper: View {
         return out
     }
 
-    // Measurements that follow the room available.
-    private struct Metrics {
+    // Measurements that follow the room available. Shared with the
+    // read-only draft views so the paper stays put when switching drafts.
+    struct Metrics {
         var paperWidth: CGFloat
         var padH: CGFloat
         var padV: CGFloat
@@ -197,6 +198,10 @@ struct MarginedPaper: View {
     }
 
     private func metrics(for width: CGFloat) -> Metrics {
+        Self.metrics(for: width, canComment: canComment)
+    }
+
+    static func metrics(for width: CGFloat, canComment: Bool) -> Metrics {
         let avail = max(320, width - 2 * Theme.Space.lg)
         let column: CGFloat = avail >= 980 ? 288 : (avail >= 700 ? 248 : (avail >= 560 ? 212 : 188))
         let gutter: CGFloat = canComment ? (avail >= 640 ? 40 : 32) : 20
@@ -280,7 +285,7 @@ struct MarginedPaper: View {
                     .overlay(Circle().stroke(Color.black.opacity(0.12), lineWidth: 1))
                     .shadow(color: Color.black.opacity(0.14), radius: 3, x: 0, y: 1)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plainHit)
             .keyboardShortcut("m", modifiers: [.command, .option])
             .help("Add a comment (\u{2325}\u{2318}M)")
             .accessibilityLabel("Add comment on the selected text")
@@ -305,7 +310,7 @@ struct MarginedPaper: View {
                         Button(showResolved ? "Hide resolved" : "Show resolved (\(resolvedCount))") {
                             withAnimation(.easeOut(duration: 0.18)) { showResolved.toggle() }
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.plainHit)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.accent)
                         .linkPointer()
@@ -550,7 +555,7 @@ struct CommentCardView: View {
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .rowHover(corner: 6, strength: 0.08)
         .help(label)
         .accessibilityLabel(label)
@@ -568,7 +573,7 @@ struct CommentCardView: View {
             }
             .foregroundStyle(item.isPrivate ? Theme.muted : Theme.good)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .linkPointer()
         .help(item.isPrivate
               ? "Only teachers see this. Click to show it to the student."
@@ -667,7 +672,7 @@ struct DraftCommentCard: View {
                 }
                 .foregroundStyle(isPrivate ? Theme.muted : Theme.good)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plainHit)
             .linkPointer()
             .help(isPrivate ? "Only teachers will see this. Click to show it to the student."
                             : "The student sees this when you share the grade. Click to make it private.")

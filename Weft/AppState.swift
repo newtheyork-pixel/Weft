@@ -154,6 +154,13 @@ final class AppState {
     var examMaterialsFailed = false
     /// HTML of an in-progress draft to restore into ExamView. Consumed once.
     var examDraftHTML: String?
+    /// True when examDraftHTML is the student's previous draft carried
+    /// forward (SAT-5), not saved work for this draft: ExamView saves it at
+    /// once through the normal sealed autosave. Consumed with examDraftHTML.
+    var examDraftCarried = false
+    /// One calm line for the top of the editor about carry forward ("Your
+    /// Draft 1 is in the editor..."). Consumed once by ExamView.
+    var examCarryNote: String?
     /// Session code used to resolve the active exam (retry after a failed lookup).
     var examResolveCode: String?
     /// Last flags written to the students row, so the 5s monitor does not PATCH
@@ -241,6 +248,14 @@ final class AppState {
     var gradingOutlines: [OutlineUpload] = []
     /// Margin comments for the session being graded, keyed by submission id.
     var gradingComments: [String: [EssayComment]] = [:]
+    /// A student's drafts across the graded assignment's version group,
+    /// keyed by "<student user id>|<version group id>" (DraftHistory.swift).
+    var draftHistories: [String: DraftHistoryState] = [:]
+    /// Which draftHistories key a graded submission resolved to.
+    var draftKeyBySubmission: [String: String] = [:]
+    /// The graded session's version group and its class sessions, keyed by
+    /// the graded session id. Same for every student, so resolved once.
+    var draftGroups: [String: DraftGroup] = [:]
     /// The teacher's essay key this exam's essay is sealed to (the
     /// student's own key is added by sealHTML).
     var examRecipientKeys: [DevicePublicKey] = []
@@ -415,6 +430,8 @@ final class AppState {
         examMaterialsLoading = false
         examMaterialsFailed = false
         examDraftHTML = nil
+        examDraftCarried = false
+        examCarryNote = nil
         examResolveCode = nil
         lastProctorFlags = nil
         classWorkByClass = [:]
@@ -433,6 +450,7 @@ final class AppState {
         classRoster = []; rosterClassId = nil; rosterClassName = ""
         gradingSubmissions = []; grades = [:]
         gradingComments = [:]
+        clearDraftHistory()
         examRecipientKeys = []
         examLockState = nil
         pendingKeyTrust = nil
@@ -473,6 +491,8 @@ final class AppState {
         examLinks = []
         examMaterialsFailed = false
         examDraftHTML = nil
+        examDraftCarried = false
+        examCarryNote = nil
         examResolveCode = nil
         lastProctorFlags = nil
         classWorkByClass = [:]
@@ -506,6 +526,7 @@ final class AppState {
         adminRosters = [:]
         adminLoaded = false
         adminTeacherNames = [:]
+        clearDraftHistory()
     }
 
     // MARK: - Auth
@@ -1212,6 +1233,7 @@ final class AppState {
     /// so the student portal never has to fetch it.
     func loadReturnedWork() async {
         guard signedIn else { return }
+        let actor = userId
         if essayKeyState != .ready { await checkEssayKey() }
         do {
             var items = try await supabase.getMyReturnedWork()
@@ -1238,6 +1260,11 @@ final class AppState {
                     items[i].contentCipher = env
                 }
             }
+            let feedbackIds = items.compactMap { item in
+                item.feedbackStudentWrap == nil ? nil : item.submissionId
+            }
+            let feedbackKeys = (try? await supabase.gradeFeedbackReturnKeys(submissionIds: feedbackIds)) ?? [:]
+            guard signedIn, userId == actor, !Task.isCancelled else { return }
             returnedWork = items.map { item in
                 var copy = item
                 copy.contentHtml = revealHTML(item.contentHtml, cipher: item.contentCipher)
@@ -1253,9 +1280,19 @@ final class AppState {
                             qc, underEssay: essay, userId: userId, aad: aad)
                     }
                 }
+                if let cipher = item.feedbackCipher {
+                    var opened: String?
+                    if let wrap = item.feedbackStudentWrap, let key = feedbackKeys[item.submissionId] {
+                        opened = try? WeftContentSeal.openReturnedGradeFeedback(
+                            cipher, studentWrap: wrap, submissionId: item.submissionId, studentReturnKey: key)
+                    }
+                    copy.feedback = opened ?? ""
+                    copy.feedbackUnavailable = opened == nil
+                }
                 return copy
             }
         } catch {
+            guard signedIn, userId == actor, !Task.isCancelled else { return }
             errorMessage = describe(error)
         }
     }
@@ -1460,8 +1497,11 @@ final class AppState {
     /// existing files alone, for callers that don't manage attachments).
     /// `removedFiles` are files the teacher detached: destroyed only once the
     /// saved question no longer references them.
+    /// `carryForward` is nil for draft 1 and new assignments (the switch is
+    /// only shown from draft 2 on); nil leaves the stored value alone.
     func saveAssignment(title: String, prompt: String, wordLimit: Int?, timeLimitMinutes: Int?,
                         spellcheckEnabled: Bool = true, outlineAllowed: Bool = false,
+                        carryForward: Bool? = nil,
                         links: [(name: String, href: String)] = [],
                         fileIds: [String]? = nil,
                         removedFiles: [TeacherFile] = []) async {
@@ -1487,7 +1527,8 @@ final class AppState {
                     versionGroupId: assignments[idx].versionGroupId,
                     versionNumber: assignments[idx].versionNumber,
                     questions: [q], timeLimitMinutes: timeLimitMinutes,
-                    spellcheckEnabled: spellcheckEnabled, outlineAllowed: outlineAllowed)
+                    spellcheckEnabled: spellcheckEnabled, outlineAllowed: outlineAllowed,
+                    carryForward: carryForward ?? assignments[idx].carryForward)
             } else {
                 assignments.append(Assignment(id: "local-\(UUID().uuidString.prefix(6))", title: t,
                     versionGroupId: "g-\(UUID().uuidString.prefix(6))", versionNumber: 1,
@@ -1513,7 +1554,8 @@ final class AppState {
                 try await supabase.updateTest(id: id, title: t, questions: [q],
                                              timeLimitMinutes: timeLimitMinutes,
                                              spellcheckEnabled: spellcheckEnabled,
-                                             outlineAllowed: outlineAllowed)
+                                             outlineAllowed: outlineAllowed,
+                                             carryForward: carryForward)
             } else {
                 _ = try await supabase.createTest(teacherUserId: userId, title: t,
                                                   questions: [q],
@@ -1702,7 +1744,8 @@ final class AppState {
                                    questions: source.questions,
                                    timeLimitMinutes: source.timeLimitMinutes,
                                    spellcheckEnabled: source.spellcheckEnabled,
-                                   outlineAllowed: source.outlineAllowed)
+                                   outlineAllowed: source.outlineAllowed,
+                                   carryForward: true)
             assignments.append(clone)
             pickedAssignmentId = clone.id
             openEditAssignment(clone)
@@ -1970,6 +2013,7 @@ final class AppState {
         gradingOutlines = []
         gradingComments = [:]
         gradingTest = nil
+        clearDraftHistory()
         gradesFresh = false
     }
 
@@ -1978,10 +2022,7 @@ final class AppState {
         // sessions stay gradeable forever. nil (dev gallery / #Preview) keeps
         // the silent no-op so the grading screen's mock fallback renders.
         guard let sid = gradingSession?.id else { return }
-        // Do not clear gradesFresh here: saveGrade reloads after every
-        // write, and flipping it false would paint "Loading submissions"
-        // over the essay the teacher is in the middle of scoring.
-        // openGrading already set it false for a first open.
+        // openGrading already clears gradesFresh on the first load.
         if !signedIn {
             gradingSubmissions = []
             grades = [:]
@@ -1989,6 +2030,7 @@ final class AppState {
             gradingComments = [:]
             return
         }
+        let actor = userId
         errorMessage = nil
         do {
             let subs = try await supabase.listSessionSubmissions(sessionId: sid)
@@ -2001,7 +2043,7 @@ final class AppState {
             let comments = (try? await supabase.listEssayComments(sessionId: sid)) ?? []
             // The teacher may have opened a DIFFERENT session while we loaded;
             // a stale payload must never overwrite it or set gradesFresh.
-            guard gradingSession?.id == sid else { return }
+            guard gradingSession?.id == sid, signedIn, userId == actor, !Task.isCancelled else { return }
             gradingSubmissions = subs.map { sub in
                 var copy = sub
                 copy.contentHtml = revealHTML(sub.contentHtml ?? "", cipher: sub.contentCipher)
@@ -2025,7 +2067,14 @@ final class AppState {
                 bySub[sid, default: []].append(c)
             }
             gradingComments = bySub
-            grades = Dictionary(uniqueKeysWithValues: g.map { ($0.submissionId, $0) })
+            grades = Dictionary(uniqueKeysWithValues: g.map { grade in
+                var copy = grade
+                if let cipher = grade.feedbackCipher {
+                    copy.feedback = try? WeftContentSeal.openGradeFeedback(
+                        cipher, submissionId: grade.submissionId, userId: actor)
+                }
+                return (copy.submissionId, copy)
+            })
             gradesFresh = true   // grades cache now reflects the DB for THIS session
             // Another teacher's session (admin grading): its test is not in
             // `assignments`, so fetch it for the prompt. Best effort.
@@ -2036,7 +2085,7 @@ final class AppState {
                 gradingTest = test
             }
         } catch {
-            guard gradingSession?.id == sid else { return }
+            guard gradingSession?.id == sid, signedIn, userId == actor, !Task.isCancelled else { return }
             errorMessage = describe(error)
         }
     }
@@ -2058,64 +2107,74 @@ final class AppState {
             errorMessage = "This submission is missing its session or student."
             return false
         }
+        guard gradesFresh, gradingSession?.id == sid else {
+            errorMessage = "Reopen grading to load the current grade before saving."
+            return false
+        }
+        let actor = userId
+        let existing = grades[submission.id]
+        let firstRelease = share && existing?.isReleased != true
+        let isReturning = share || existing?.isReleased == true
+        let feedbackLocked = existing?.isFeedbackLocked == true
+        // A score edit can preserve locked feedback. First release must also
+        // wrap the feedback key for the student, which requires an unlocked key.
+        guard !feedbackLocked || (feedback.isEmpty && !firstRelease) else {
+            errorMessage = "Unlock your essay key and reopen grading to edit or return the saved feedback."
+            return false
+        }
         errorMessage = nil
-        let cached = grades[submission.id]?.releasedAt
-        // Trust the "first release" decision only if the grades cache we're
-        // reading from was loaded successfully (not stale/failed).
-        let wasFresh = gradesFresh
-        // upsertGrade writes released_at verbatim (no DB-side COALESCE), so the
-        // value we send IS the new server state. The in-memory cache can be
-        // stale (e.g. the grade was released on another device/session since we
-        // loaded), and clearing released_at would silently retract a grade the
-        // student already sees. Make the non-share path server-authoritative:
-        // re-fetch this submission's current released_at right before the write
-        // so a save-without-sharing can never un-share. Fall back to the cache
-        // only if the fetch fails (then we keep whatever we last knew, never a
-        // worse-than-cache nil).
-        let existing: Date?
-        if share {
-            existing = cached
-        } else if let fetched = try? await supabase.listGrades(submissionIds: [submission.id]).first {
-            existing = fetched.releasedAt
-        } else {
-            existing = cached
-        }
-        let releasedAt: String?
-        if share {
-            releasedAt = SupabaseDate.fractional.string(from: existing ?? Date())
-        } else {
-            releasedAt = existing.map { SupabaseDate.fractional.string(from: $0) }
-        }
-        // Returned: let the student open the essay (SAT-24). Best effort: the
-        // grade still saves if the student has no key yet.
-        var studentWrap: WeftEnvelopeWrap?
-        var wrapProblem = false
-        if releasedAt != nil, let env = submission.contentCipher {
-            studentWrap = await returnWrap(envelope: env, studentId: stid)
-            wrapProblem = studentWrap == nil
-        }
         do {
-            try await supabase.upsertGrade(submissionId: submission.id, sessionId: sid, studentId: stid,
-                                           points: points, pointsPossible: pointsPossible,
-                                           feedback: feedback, releasedAt: releasedAt,
-                                           studentWrap: studentWrap)
-            if wrapProblem, share {
+            var feedbackCipher: WeftEnvelope?
+            var feedbackStudentWrap: WeftSealedText?
+            if !feedback.isEmpty {
+                let staff = try await supabase.gradeFeedbackStaffKeys(submissionId: submission.id)
+                guard let local = WeftContentSeal.publishableKey(userId: actor),
+                      staff.contains(where: { $0.userId == actor && $0.kid == local.kid }) else {
+                    throw SupabaseError.auth("Unlock your essay key on this Mac to seal the feedback.")
+                }
+                var feedbackReturnKey: Data?
+                if isReturning {
+                    guard let keys = try? await supabase.gradeFeedbackReturnKeys(submissionIds: [submission.id]),
+                          let key = keys[submission.id] else {
+                        throw SupabaseError.auth("The student’s feedback key is unavailable. Try sharing again.")
+                    }
+                    feedbackReturnKey = key
+                }
+                do {
+                    (feedbackCipher, feedbackStudentWrap) = try WeftContentSeal.sealGradeFeedback(
+                        feedback, submissionId: submission.id, staffKeys: staff, studentReturnKey: feedbackReturnKey)
+                } catch {
+                    // A staff key that isn't a genuine essay-password key, or a
+                    // malformed student key. Never seal past it; keep the text.
+                    throw SupabaseError.auth("Weft couldn't seal this feedback to the class's staff keys, so nothing was saved. Your comment is still here; try again, or ask your school admin to check the staff keys.")
+                }
+            }
+            // The return wrap for the essay is independent of the feedback.
+            var essayStudentWrap: WeftEnvelopeWrap?
+            if isReturning, let envelope = submission.contentCipher {
+                essayStudentWrap = await returnWrap(envelope: envelope, studentId: stid)
+            }
+            guard signedIn, userId == actor else { return false }
+            var saved = try await supabase.saveGrade(
+                submissionId: submission.id, sessionId: sid, studentId: stid, points: points,
+                pointsPossible: pointsPossible, feedbackCipher: feedbackCipher,
+                feedbackStudentWrap: feedbackStudentWrap, replaceFeedback: !feedbackLocked,
+                releasedAt: firstRelease ? SupabaseManager.nowISO() : nil,
+                studentWrap: essayStudentWrap, expectedUpdatedAt: existing?.updatedAt)
+            guard signedIn, userId == actor else { return true }
+            if gradingSession?.id == sid {
+                saved.feedback = feedbackLocked ? nil : feedback
+                grades[submission.id] = saved
+            }
+            if share, submission.contentCipher != nil, essayStudentWrap == nil, gradingSession?.id == sid {
                 errorMessage = "Shared. Weft couldn't unlock the paper for the student yet, so they'll see the grade but not the essay. Share again in a moment; if it keeps happening, the student needs to sign in to Weft once."
             }
-            let releasedDate: Date? = releasedAt.flatMap { SupabaseDate.fractional.date(from: $0) }
-            grades[submission.id] = EssayGrade(submissionId: submission.id, points: points,
-                                               pointsPossible: pointsPossible, feedback: feedback,
-                                               releasedAt: releasedDate)
-            gradesFresh = true
-            // Notify the student only on the first release (sharing for the first
-            // time, off a known-fresh cache), never on re-saves of already-shared
-            // work, and never with the score in the email.
-            if share, existing == nil, wasFresh {
+            if firstRelease {
                 Task { await supabase.notify("grades_published", body: ["submission_id": submission.id]) }
             }
             return true
         } catch {
-            errorMessage = describe(error)
+            if signedIn, userId == actor { errorMessage = describe(error) }
             return false
         }
     }
@@ -2230,16 +2289,21 @@ final class AppState {
     /// from the work row so the exam screen reads correctly.
     func startWriting(_ item: ClassWorkItem) {
         errorMessage = nil
+        // Signed in, the real test replaces this placeholder before Begin.
+        // Signed out, a later draft carries forward the mock returned Draft 1
+        // so SAT-5 is demoable without a backend.
+        let version = item.activeVersion ?? 1
         activeAssignment = Assignment(
             id: item.activeSessionId ?? item.id,
             title: item.title,
             versionGroupId: item.versionGroupId,
-            versionNumber: 1,
+            versionNumber: version,
             questions: [Question(id: "q", kind: "essay",
                                  prompt: Assignment.sample.questions.first?.prompt
                                      ?? "Respond to the prompt your teacher set.",
                                  wordLimit: 600)],
-            timeLimitMinutes: nil)
+            timeLimitMinutes: nil,
+            carryForward: !signedIn && version > 1)
         // Seed empty when signed in (loadExamMaterials fills in the teacher's
         // real files/links); the bundled samples are for the not-signed-in
         // preview only. Seeding samples for a signed-in student would leak fake
@@ -2253,6 +2317,8 @@ final class AppState {
         examDeadline = nil
         markedWriting = false
         examDraftHTML = nil
+        examDraftCarried = false
+        examCarryNote = nil
         examMaterialsFailed = false
         examLockState = nil
         pendingKeyTrust = nil
@@ -2452,7 +2518,17 @@ final class AppState {
     /// errorMessage set) means stay on the checks screen.
     func beginExam(screenCapture: Bool, remote: Bool, displayCount: Int?,
                    isVM: Bool?) async -> Bool {
-        guard signedIn else { enterExam(); return true }   // preview path
+        guard signedIn else {   // preview path
+            examDraftCarried = false
+            examCarryNote = nil
+            if let a = activeAssignment, a.carryForward, a.versionNumber > 1 {
+                examDraftHTML = CarryForwardPreview.draft1HTML
+                examDraftCarried = true
+                examCarryNote = Self.carriedNote(version: a.versionNumber - 1)
+            }
+            enterExam()
+            return true
+        }
         guard let session = activeExamSession else {
             errorMessage = "Couldn't reach this assignment's session. Go back and try again."
             return false
@@ -2529,6 +2605,9 @@ final class AppState {
             }
             let local = ExamDraftStore.load(userId: userId, sessionId: session.id)
             if let remote { activeSubmissionId = remote.id } else { activeSubmissionId = nil }
+            examDraftCarried = false
+            examCarryNote = nil
+            var startsBlank = false
             switch (local, remote) {
             case let (local?, remote?):
                 let revealed = revealHTML(remote.html, cipher: remote.cipher)
@@ -2566,6 +2645,21 @@ final class AppState {
                 examDraftHTML = revealed.isEmpty ? nil : revealed
             case (nil, nil):
                 examDraftHTML = nil
+                startsBlank = true
+            }
+            // Carry forward (SAT-5): only onto a blank page. Work already saved
+            // for this draft, on this Mac or the server, is never replaced.
+            if startsBlank, let test = activeAssignment, test.carryForward, test.versionNumber > 1 {
+                let carried = await carryForwardPreviousDraft(test: test)
+                // The lookup is a few more round-trips: same late-success
+                // guard as above.
+                guard studentScreen == .checks, activeExamSession?.id == session.id else {
+                    activeStudentId = nil
+                    return false
+                }
+                examDraftHTML = carried.html
+                examDraftCarried = carried.html != nil
+                examCarryNote = carried.note
             }
             guard examCanSeal, !examRecipientKeys.isEmpty else {
                 activeStudentId = nil
@@ -2582,6 +2676,57 @@ final class AppState {
             errorMessage = describe(error)
             return false
         }
+    }
+
+    static func carriedNote(version: Int) -> String {
+        "Your Draft \(version) is in the editor. Keep what works and revise."
+    }
+
+    /// The student's own previous draft for a carry-forward draft (SAT-5):
+    /// the most recent earlier draft they submitted, opened only if the
+    /// teacher has returned it. A returned essay is sealed to the teacher;
+    /// the teacher's Mac added a wrap for this student's key on return
+    /// (essay_grades.student_wrap), and appending it here is the same step
+    /// Returned work takes. Nothing is sent anywhere: the body is read from
+    /// the student's own row and opened on this Mac. Never throws and never
+    /// blocks the exam: on any failure the page starts blank with a note.
+    private func carryForwardPreviousDraft(test: Assignment) async -> (html: String?, note: String?) {
+        let earlier: [SupabaseManager.EarlierDraft]
+        do {
+            earlier = try await supabase.listMyEarlierDrafts(testId: test.id)
+        } catch {
+            return (nil, "Your earlier draft couldn't be loaded, so you're starting from a blank page.")
+        }
+        // Newest draft first. A skipped draft simply has no row, so this is
+        // the latest draft the student actually handed in.
+        guard let prev = earlier
+            .filter({ $0.versionNumber < test.versionNumber && $0.submittedAt != nil })
+            .max(by: { ($0.versionNumber, $0.submittedAt ?? .distantPast)
+                     < ($1.versionNumber, $1.submittedAt ?? .distantPast) })
+        else {
+            return (nil, "There's no earlier draft of yours to bring in, so you're starting from a blank page.")
+        }
+        let label = "Draft \(prev.versionNumber)"
+        guard prev.releasedAt != nil else {
+            return (nil, "Your \(label) hasn't been returned yet, so you're starting from a blank page.")
+        }
+        let unreadable = "Your \(label) couldn't be opened on this Mac, so you're starting from a blank page."
+        if essayKeyState != .ready { await checkEssayKey() }
+        guard let body = try? await supabase.listOwnSubmissionBodies(ids: [prev.submissionId]).first
+        else { return (nil, unreadable) }
+        var cipher = body.contentCipher
+        if var env = cipher,
+           let wraps = try? await supabase.listMyReturnWraps(submissionIds: [prev.submissionId]),
+           let w = wraps[prev.submissionId],
+           !env.wraps.contains(where: { $0.recipientKid == w.recipientKid }) {
+            env.wraps.append(w)
+            cipher = env
+        }
+        let html = revealHTML(body.contentHtml, cipher: cipher)
+        guard !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nil, unreadable)
+        }
+        return (html, Self.carriedNote(version: prev.versionNumber))
     }
 
     /// Move this attempt's roster row from "joined" to "writing" on the first
@@ -2667,12 +2812,24 @@ final class AppState {
     /// the server, so the caller must NOT exit the exam (the work would be
     /// lost, or an older copy would be locked in). Does NOT route; the exam
     /// view orchestrates kiosk exit + finishExam on success.
+    ///
+    /// Idempotent across a lost response (SAT-34): if an earlier attempt's
+    /// submit_essay committed but the reply never arrived, the row is already
+    /// locked and every re-upload is refused. So the server is asked first,
+    /// and again after a failed lock, and an already-submitted essay counts
+    /// as success. A retry whose first attempt never reached the server
+    /// finds the row unsubmitted and takes the normal flush + lock path.
     func submitExam(html: String, wordCount: Int) async -> Bool {
         if signedIn {
-            let saved = await saveEssay(html: html, wordCount: wordCount)
-            guard saved.uploaded else { return false }
-            guard let submissionId = activeSubmissionId else { return false }
-            guard await supabase.submitEssay(submissionId: submissionId) else { return false }
+            if (await essayAlreadySubmitted()) != true {
+                let saved = await saveEssay(html: html, wordCount: wordCount)
+                guard saved.uploaded else { return false }
+                guard let submissionId = activeSubmissionId else { return false }
+                if !(await supabase.submitEssay(submissionId: submissionId)) {
+                    // The lock may have committed with only the reply lost.
+                    guard (await essayAlreadySubmitted()) == true else { return false }
+                }
+            }
             if let studentId = activeStudentId {
                 await supabase.updateStudentStatus(id: studentId, status: "submitted")
             }
@@ -2687,6 +2844,25 @@ final class AppState {
         markedWriting = false
         allowFreshOverUnreadable = false
         return true
+    }
+
+    /// Server truth for this attempt's lock: true = submit_essay already
+    /// stamped it, false = not submitted (or no row yet), nil = couldn't ask
+    /// (network). nil is treated like false by the caller: the normal flush
+    /// path runs and fails or succeeds on its own, as it did before.
+    private func essayAlreadySubmitted() async -> Bool? {
+        guard let session = activeExamSession,
+              let studentId = activeStudentId,
+              let questionId = activeAssignment?.questions.first?.id else { return nil }
+        do {
+            guard let state = try await supabase.getMySubmissionState(
+                sessionId: session.id, studentId: studentId, questionId: questionId)
+            else { return false }
+            activeSubmissionId = state.id
+            return state.submitted
+        } catch {
+            return nil
+        }
     }
 
     /// True while the attempt's session is still open. lookup_session_by_code
@@ -2786,6 +2962,8 @@ final class AppState {
         activeAssignment = nil
         examDeadline = nil
         examDraftHTML = nil
+        examDraftCarried = false
+        examCarryNote = nil
         examResolveCode = nil
         lastProctorFlags = nil
         studentScreen = .done

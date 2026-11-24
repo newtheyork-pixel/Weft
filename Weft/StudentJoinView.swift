@@ -203,7 +203,7 @@ struct StudentJoinView: View {
                 .font(Theme.sans(13, .semibold))
                 .foregroundStyle(Theme.accent)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .linkPointer()
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.top, Theme.Space.xs)

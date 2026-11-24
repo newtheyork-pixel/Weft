@@ -15,6 +15,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
     case join
     case checks
     case exam
+    case examCarried
     case done
     case blocked
     case recovery
@@ -22,6 +23,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
     case teacher
     case templates
     case editor
+    case editorDraft
     case grading
     case adminSidebar
     case keyGuard
@@ -36,6 +38,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .join:        return "Student · Join a class"
         case .checks:      return "Student · Pre-exam + privacy"
         case .exam:        return "Student · Exam (writing)"
+        case .examCarried: return "Student · Exam (Draft 2, carried forward)"
         case .done:        return "Student · Done + ledger"
         case .blocked:     return "Student · Blocked (sharing)"
         case .recovery:    return "Student · Recovery prompt"
@@ -43,6 +46,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .teacher:     return "Teacher · Classes"
         case .templates:   return "Teacher · Templates"
         case .editor:      return "Teacher · Assignment editor"
+        case .editorDraft: return "Teacher · Assignment editor (Draft 2)"
         case .grading:     return "Teacher · Grading"
         case .adminSidebar:  return "Admin"
         case .keyGuard:    return "Dev · Key guard tester"
@@ -58,6 +62,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .join:        return ["join"]
         case .checks:      return ["checks", "precheck", "privacy"]
         case .exam:        return ["exam", "writing", "write"]
+        case .examCarried: return ["carried", "carry", "examcarried"]
         case .done:        return ["done", "ledger", "submitted"]
         case .blocked:     return ["blocked", "sharing"]
         case .recovery:    return ["recovery", "recover"]
@@ -65,6 +70,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .teacher:     return ["teacher", "build", "live"]
         case .templates:   return ["templates", "template"]
         case .editor:      return ["editor", "assignment"]
+        case .editorDraft: return ["editordraft", "draft2"]
         case .grading:     return ["grading", "grade", "review"]
         case .adminSidebar:  return ["admin", "admina"]
         case .keyGuard:    return ["keyguard", "keys"]
@@ -78,6 +84,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .join:        StudentJoinView()
         case .checks:      StudentChecksView()
         case .exam:        ExamView()
+        case .examCarried: ExamView(previewCarryForward: true)
         case .done:        StudentDoneView()
         case .blocked:     StudentBlockedView()
         case .recovery:    RecoveryPromptView()
@@ -85,6 +92,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .teacher:     TeacherHomeView()
         case .templates:   TemplatePickerView()
         case .editor:      AssignmentEditorView()
+        case .editorDraft: DraftEditorPreview()
         case .grading:     ReviewGradingView()
         case .adminSidebar:  AdminFlowView()
         case .keyGuard:    KeyGuardTesterView()
@@ -115,6 +123,27 @@ struct DevGalleryView: View {
             (screen ?? .signIn).view
                 .id(screen)
         }
+    }
+}
+
+/// The assignment editor on a Draft 2 (SAT-5 carry-forward switch showing).
+/// Stages the draft before the editor primes from `app.editingAssignment`.
+private struct DraftEditorPreview: View {
+    @Environment(AppState.self) private var app
+    @State private var staged = false
+
+    var body: some View {
+        Group {
+            if staged {
+                AssignmentEditorView()
+            } else {
+                Color.clear.onAppear {
+                    app.editingAssignment = .sampleDraft2
+                    staged = true
+                }
+            }
+        }
+        .onDisappear { app.editingAssignment = nil }
     }
 }
 

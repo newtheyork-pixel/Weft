@@ -116,7 +116,7 @@ struct ExamReferencePanel: View {
                     Label("Quote", systemImage: "text.quote")
                         .font(Theme.sans(12, .semibold))
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.iconHit)
                 .help("Insert the selected passage into your essay")
                 .accessibilityLabel("Quote from passage")
                 .accessibilityHint("Inserts the selected text from the reference into your essay")
@@ -128,7 +128,7 @@ struct ExamReferencePanel: View {
                 } label: {
                     Image(systemName: store.splitActive ? "rectangle" : "rectangle.split.1x2")
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.iconHit)
                 .help(store.splitActive ? "Back to one pane"
                                         : "Split: pin this on top, browse another below")
                 .accessibilityLabel(store.splitActive ? "Back to one pane" : "Split reference panes")
@@ -137,7 +137,7 @@ struct ExamReferencePanel: View {
             Button(action: onHide) {
                 Image(systemName: "sidebar.right")
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.iconHit)
             .help("Hide references, write only (⌘⇧R)")
             .accessibilityLabel("Hide references")
             .linkPointer()
@@ -172,7 +172,7 @@ struct ExamReferencePanel: View {
                         in: Capsule())
             .foregroundStyle(active ? Theme.accent : Theme.ink)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plainHit)
         .pointerStyle(.link)
         .help(pinned ? "\(m.title): pinned on top. Click to swap the panes." : m.title)
     }
@@ -360,7 +360,7 @@ struct ExamReferencePanel: View {
                 Button { tab.reload() } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .semibold))
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(IconHitButtonStyle(minSize: 26))
                 .help("Reload this page")
                 .linkPointer()
             }

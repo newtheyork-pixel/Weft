@@ -97,7 +97,7 @@ struct SignInView: View {
                         radius: googleHovering ? 7 : 4, y: googleHovering ? 3 : 2)
                 .scaleEffect((googlePressed && !busy) ? 0.98 : 1)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plainHit)
             .disabled(busy)
             .onChange(of: busy) { _, b in if b { googlePressed = false } }
             .pointerStyle(.link)
@@ -128,7 +128,7 @@ struct SignInView: View {
                 // callback returns, the token-exchange tail can't be aborted, so
                 // Cancel is hidden rather than left inert.
                 Button("Cancel") { app.cancelSignIn() }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.plainHit)
                     .font(Theme.sans(12.5, .semibold))
                     .foregroundStyle(Theme.accent)
                     .pointerStyle(.link)
@@ -216,7 +216,7 @@ struct SignInView: View {
             }
 
             Button("Not you? Sign out") { app.signOut() }
-                .buttonStyle(.plain)
+                .buttonStyle(.plainHit)
                 .font(Theme.sans(12))
                 .foregroundStyle(Theme.muted)
                 .pointerStyle(.link)
