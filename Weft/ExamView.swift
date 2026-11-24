@@ -314,7 +314,9 @@ struct ExamView: View {
 
     /// Submit = final flush (must succeed) -> DB lock -> leave the exam. A
     /// failed flush keeps the student in the exam with the failed-save label;
-    /// their work is intact and Submit can be pressed again.
+    /// their work is intact and Submit can be pressed again. A retry after a
+    /// lock whose reply was lost succeeds: submitExam checks the server's
+    /// submitted state before flushing again (SAT-34).
     private func submit() {
         // Single-flight: only one submit may be in flight. A concurrent second
         // call (double-tap, ⌘Return + auto-submit at 0:00, etc.) would re-enter
