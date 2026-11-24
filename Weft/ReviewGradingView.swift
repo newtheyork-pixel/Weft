@@ -251,7 +251,9 @@ struct ReviewGradingView: View {
             return "Analyze the use of light and dark imagery in the assigned passage. Support your claim with specific textual evidence."
         }
         guard let tid = app.gradingSession?.testId,
-              let p = app.assignments.first(where: { $0.id == tid })?.questions.first?.prompt,
+              let test = app.assignments.first(where: { $0.id == tid })
+                ?? (app.gradingTest?.id == tid ? app.gradingTest : nil),
+              let p = test.questions.first?.prompt,
               !p.isEmpty else { return nil }
         return p
     }
@@ -470,7 +472,7 @@ struct ReviewGradingView: View {
                 // the Back/Next/roster-tap handlers — closing is the natural
                 // "finished this student" gesture and must not drop the edit.
                 flushIfDirty()
-                app.teacherGoHome()
+                app.closeGrading()
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 13, weight: .semibold))
@@ -479,7 +481,7 @@ struct ReviewGradingView: View {
             }
             .buttonStyle(.glass)
             .clipShape(Circle())
-            .help("Close grading and return to the teacher view")
+            .help("Close grading")
             .accessibilityLabel("Close")
             .linkPointer()
         }

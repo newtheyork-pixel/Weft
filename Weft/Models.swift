@@ -721,3 +721,180 @@ struct EssayGrade: Identifiable, Codable, Hashable, Sendable {
         case updatedAt = "updated_at"
     }
 }
+
+// MARK: - School admin (SAT-20)
+
+/// One `school_staff` row: a teacher or admin, by email. A row can exist
+/// before that person ever signs in; the email is stored lower-case.
+struct StaffMember: Identifiable, Codable, Hashable, Sendable {
+    var email: String
+    var role: UserRole
+    var addedBy: String?
+    var addedAt: Date?
+
+    var id: String { email }
+
+    enum CodingKeys: String, CodingKey {
+        case email, role
+        case addedBy = "added_by"
+        case addedAt = "added_at"
+    }
+
+    init(email: String, role: UserRole, addedBy: String? = nil, addedAt: Date? = nil) {
+        self.email = email; self.role = role; self.addedBy = addedBy; self.addedAt = addedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        email = try c.decode(String.self, forKey: .email)
+        role = (try? c.decode(UserRole.self, forKey: .role)) ?? .teacher
+        addedBy = try? c.decode(String.self, forKey: .addedBy)
+        addedAt = try? c.decode(Date.self, forKey: .addedAt)
+    }
+
+    static let sample: [StaffMember] = [
+        StaffMember(email: "principal@school.org", role: .admin,
+                    addedAt: Date(timeIntervalSinceNow: -60 * 86400)),
+        StaffMember(email: "j.lee@school.org", role: .teacher,
+                    addedAt: Date(timeIntervalSinceNow: -40 * 86400)),
+        StaffMember(email: "m.garcia@school.org", role: .teacher,
+                    addedAt: Date(timeIntervalSinceNow: -12 * 86400)),
+        StaffMember(email: "new.teacher@school.org", role: .teacher,
+                    addedAt: Date(timeIntervalSinceNow: -1 * 86400)),
+    ]
+}
+
+/// A class anywhere in the school (admin view), with its active student
+/// count when the server returned one.
+struct SchoolClass: Identifiable, Decodable, Hashable, Sendable {
+    let id: String
+    var name: String
+    var joinCode: String
+    var teacherUserId: String?
+    var archivedAt: Date?
+    /// Students not removed. nil = the count did not come back.
+    var studentCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case joinCode = "join_code"
+        case teacherUserId = "teacher_user_id"
+        case archivedAt = "archived_at"
+        case enrollments = "class_enrollments"
+    }
+    private struct Count: Decodable { let count: Int }
+
+    init(id: String, name: String, joinCode: String, teacherUserId: String?,
+         archivedAt: Date? = nil, studentCount: Int?) {
+        self.id = id; self.name = name; self.joinCode = joinCode
+        self.teacherUserId = teacherUserId; self.archivedAt = archivedAt
+        self.studentCount = studentCount
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = (try? c.decode(String.self, forKey: .name)) ?? "Class"
+        joinCode = (try? c.decode(String.self, forKey: .joinCode)) ?? ""
+        teacherUserId = try? c.decode(String.self, forKey: .teacherUserId)
+        archivedAt = try? c.decode(Date.self, forKey: .archivedAt)
+        studentCount = (try? c.decode([Count].self, forKey: .enrollments))?.first?.count
+    }
+
+    static let sample: [SchoolClass] = [
+        SchoolClass(id: ClassRoom.sample.id, name: ClassRoom.sample.name,
+                    joinCode: ClassRoom.sample.joinCode, teacherUserId: "t1", studentCount: 3),
+        SchoolClass(id: ClassRoom.sample2.id, name: ClassRoom.sample2.name,
+                    joinCode: ClassRoom.sample2.joinCode, teacherUserId: "t2", studentCount: 2),
+        SchoolClass(id: "c3", name: "World History", joinCode: "HIS482",
+                    teacherUserId: "t1", studentCount: 1),
+    ]
+}
+
+/// A session anywhere in the school (admin view): its assignment title and
+/// how many students submitted.
+struct SchoolSession: Identifiable, Decodable, Hashable, Sendable {
+    let id: String
+    var code: String
+    var classId: String?
+    var testId: String?
+    var teacherUserId: String?
+    var status: String
+    var createdAt: Date?
+    var testTitle: String?
+    var testVersion: Int?
+    /// Submitted essays. nil = the count did not come back.
+    var submittedCount: Int?
+
+    /// Same shape as the teacher's session titles: title, plus vN when > 1.
+    var title: String {
+        let t = testTitle ?? "Assignment"
+        if let v = testVersion, v > 1 { return "\(t) · v\(v)" }
+        return t
+    }
+
+    /// The session as the grading flow knows it.
+    var examSession: ExamSession {
+        ExamSession(id: id, code: code, testId: testId, classId: classId,
+                    status: status, createdAt: createdAt)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, code, status
+        case classId = "class_id"
+        case testId = "test_id"
+        case teacherUserId = "teacher_user_id"
+        case createdAt = "created_at"
+        case tests
+        case submissions = "essay_submissions"
+    }
+    private struct TestInfo: Decodable {
+        let title: String?
+        let version_number: Int?
+    }
+    private struct Count: Decodable { let count: Int }
+
+    init(id: String, code: String, classId: String?, testId: String?, teacherUserId: String?,
+         status: String, createdAt: Date?, testTitle: String?, testVersion: Int? = nil,
+         submittedCount: Int?) {
+        self.id = id; self.code = code; self.classId = classId; self.testId = testId
+        self.teacherUserId = teacherUserId; self.status = status; self.createdAt = createdAt
+        self.testTitle = testTitle; self.testVersion = testVersion
+        self.submittedCount = submittedCount
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        code = (try? c.decode(String.self, forKey: .code)) ?? ""
+        status = (try? c.decode(String.self, forKey: .status)) ?? "closed"
+        classId = try? c.decode(String.self, forKey: .classId)
+        testId = try? c.decode(String.self, forKey: .testId)
+        teacherUserId = try? c.decode(String.self, forKey: .teacherUserId)
+        createdAt = try? c.decode(Date.self, forKey: .createdAt)
+        let test = try? c.decode(TestInfo.self, forKey: .tests)
+        testTitle = test?.title
+        testVersion = test?.version_number
+        submittedCount = (try? c.decode([Count].self, forKey: .submissions))?.first?.count
+    }
+
+    static let sample: [SchoolSession] = [
+        SchoolSession(id: ExamSession.sampleOpen.id, code: ExamSession.sampleOpen.code,
+                      classId: ClassRoom.sample.id, testId: Assignment.sample.id, teacherUserId: "t1",
+                      status: "open", createdAt: ExamSession.sampleOpen.createdAt,
+                      testTitle: Assignment.sample.title, submittedCount: 1),
+        SchoolSession(id: "local-closed-1", code: "K7M2PQ", classId: ClassRoom.sample.id,
+                      testId: Assignment.sample2.id, teacherUserId: "t1", status: "closed",
+                      createdAt: Date(timeIntervalSinceNow: -3 * 86400),
+                      testTitle: Assignment.sample2.title, submittedCount: 3),
+        SchoolSession(id: "local-closed-2", code: "B4N8RT", classId: ClassRoom.sample2.id,
+                      testId: "t3", teacherUserId: "t2", status: "closed",
+                      createdAt: Date(timeIntervalSinceNow: -9 * 86400),
+                      testTitle: "Photosynthesis short essay", submittedCount: 2),
+        SchoolSession(id: "local-closed-3", code: "Q2W6ZX", classId: "c3",
+                      testId: "t4", teacherUserId: "t1", status: "archived",
+                      createdAt: Date(timeIntervalSinceNow: -30 * 86400),
+                      testTitle: "Causes of the First World War", testVersion: 2,
+                      submittedCount: 1),
+    ]
+}

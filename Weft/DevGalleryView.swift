@@ -25,6 +25,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
     case editor
     case editorDraft
     case grading
+    case adminSidebar
     case keyGuard
 
     var id: String { rawValue }
@@ -47,6 +48,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .editor:      return "Teacher · Assignment editor"
         case .editorDraft: return "Teacher · Assignment editor (Draft 2)"
         case .grading:     return "Teacher · Grading"
+        case .adminSidebar:  return "Admin"
         case .keyGuard:    return "Dev · Key guard tester"
         }
     }
@@ -70,6 +72,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .editor:      return ["editor", "assignment"]
         case .editorDraft: return ["editordraft", "draft2"]
         case .grading:     return ["grading", "grade", "review"]
+        case .adminSidebar:  return ["admin", "admina"]
         case .keyGuard:    return ["keyguard", "keys"]
         }
     }
@@ -91,6 +94,7 @@ enum DevScreen: String, CaseIterable, Identifiable {
         case .editor:      AssignmentEditorView()
         case .editorDraft: DraftEditorPreview()
         case .grading:     ReviewGradingView()
+        case .adminSidebar:  AdminFlowView()
         case .keyGuard:    KeyGuardTesterView()
         }
     }
