@@ -165,7 +165,7 @@ struct StudentClassHomeView: View {
                 .foregroundStyle(Theme.inkSoft)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
-            if app.pendingTeacherKey != nil {
+            if app.pendingKeyTrust != nil {
                 Button("Trust new lock") { Task { await app.trustNewTeacherKey() } }
                     .buttonStyle(.plainHit)
                     .font(Theme.sans(12.5, .semibold))
