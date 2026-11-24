@@ -154,6 +154,13 @@ final class AppState {
     var examMaterialsFailed = false
     /// HTML of an in-progress draft to restore into ExamView. Consumed once.
     var examDraftHTML: String?
+    /// True when examDraftHTML is the student's previous draft carried
+    /// forward (SAT-5), not saved work for this draft: ExamView saves it at
+    /// once through the normal sealed autosave. Consumed with examDraftHTML.
+    var examDraftCarried = false
+    /// One calm line for the top of the editor about carry forward ("Your
+    /// Draft 1 is in the editor..."). Consumed once by ExamView.
+    var examCarryNote: String?
     /// Session code used to resolve the active exam (retry after a failed lookup).
     var examResolveCode: String?
     /// Last flags written to the students row, so the 5s monitor does not PATCH
@@ -379,6 +386,8 @@ final class AppState {
         examMaterialsLoading = false
         examMaterialsFailed = false
         examDraftHTML = nil
+        examDraftCarried = false
+        examCarryNote = nil
         examResolveCode = nil
         lastProctorFlags = nil
         classWorkByClass = [:]
@@ -429,6 +438,8 @@ final class AppState {
         examLinks = []
         examMaterialsFailed = false
         examDraftHTML = nil
+        examDraftCarried = false
+        examCarryNote = nil
         examResolveCode = nil
         lastProctorFlags = nil
         classWorkByClass = [:]
@@ -1431,8 +1442,11 @@ final class AppState {
     /// existing files alone, for callers that don't manage attachments).
     /// `removedFiles` are files the teacher detached: destroyed only once the
     /// saved question no longer references them.
+    /// `carryForward` is nil for draft 1 and new assignments (the switch is
+    /// only shown from draft 2 on); nil leaves the stored value alone.
     func saveAssignment(title: String, prompt: String, wordLimit: Int?, timeLimitMinutes: Int?,
                         spellcheckEnabled: Bool = true, outlineAllowed: Bool = false,
+                        carryForward: Bool? = nil,
                         links: [(name: String, href: String)] = [],
                         fileIds: [String]? = nil,
                         removedFiles: [TeacherFile] = []) async {
@@ -1458,7 +1472,8 @@ final class AppState {
                     versionGroupId: assignments[idx].versionGroupId,
                     versionNumber: assignments[idx].versionNumber,
                     questions: [q], timeLimitMinutes: timeLimitMinutes,
-                    spellcheckEnabled: spellcheckEnabled, outlineAllowed: outlineAllowed)
+                    spellcheckEnabled: spellcheckEnabled, outlineAllowed: outlineAllowed,
+                    carryForward: carryForward ?? assignments[idx].carryForward)
             } else {
                 assignments.append(Assignment(id: "local-\(UUID().uuidString.prefix(6))", title: t,
                     versionGroupId: "g-\(UUID().uuidString.prefix(6))", versionNumber: 1,
@@ -1484,7 +1499,8 @@ final class AppState {
                 try await supabase.updateTest(id: id, title: t, questions: [q],
                                              timeLimitMinutes: timeLimitMinutes,
                                              spellcheckEnabled: spellcheckEnabled,
-                                             outlineAllowed: outlineAllowed)
+                                             outlineAllowed: outlineAllowed,
+                                             carryForward: carryForward)
             } else {
                 _ = try await supabase.createTest(teacherUserId: userId, title: t,
                                                   questions: [q],
@@ -1673,7 +1689,8 @@ final class AppState {
                                    questions: source.questions,
                                    timeLimitMinutes: source.timeLimitMinutes,
                                    spellcheckEnabled: source.spellcheckEnabled,
-                                   outlineAllowed: source.outlineAllowed)
+                                   outlineAllowed: source.outlineAllowed,
+                                   carryForward: true)
             assignments.append(clone)
             pickedAssignmentId = clone.id
             openEditAssignment(clone)
@@ -2184,16 +2201,21 @@ final class AppState {
     /// from the work row so the exam screen reads correctly.
     func startWriting(_ item: ClassWorkItem) {
         errorMessage = nil
+        // Signed in, the real test replaces this placeholder before Begin.
+        // Signed out, a later draft carries forward the mock returned Draft 1
+        // so SAT-5 is demoable without a backend.
+        let version = item.activeVersion ?? 1
         activeAssignment = Assignment(
             id: item.activeSessionId ?? item.id,
             title: item.title,
             versionGroupId: item.versionGroupId,
-            versionNumber: 1,
+            versionNumber: version,
             questions: [Question(id: "q", kind: "essay",
                                  prompt: Assignment.sample.questions.first?.prompt
                                      ?? "Respond to the prompt your teacher set.",
                                  wordLimit: 600)],
-            timeLimitMinutes: nil)
+            timeLimitMinutes: nil,
+            carryForward: !signedIn && version > 1)
         // Seed empty when signed in (loadExamMaterials fills in the teacher's
         // real files/links); the bundled samples are for the not-signed-in
         // preview only. Seeding samples for a signed-in student would leak fake
@@ -2207,6 +2229,8 @@ final class AppState {
         examDeadline = nil
         markedWriting = false
         examDraftHTML = nil
+        examDraftCarried = false
+        examCarryNote = nil
         examMaterialsFailed = false
         examLockState = nil
         pendingTeacherKey = nil
@@ -2366,7 +2390,17 @@ final class AppState {
     /// errorMessage set) means stay on the checks screen.
     func beginExam(screenCapture: Bool, remote: Bool, displayCount: Int?,
                    isVM: Bool?) async -> Bool {
-        guard signedIn else { enterExam(); return true }   // preview path
+        guard signedIn else {   // preview path
+            examDraftCarried = false
+            examCarryNote = nil
+            if let a = activeAssignment, a.carryForward, a.versionNumber > 1 {
+                examDraftHTML = CarryForwardPreview.draft1HTML
+                examDraftCarried = true
+                examCarryNote = Self.carriedNote(version: a.versionNumber - 1)
+            }
+            enterExam()
+            return true
+        }
         guard let session = activeExamSession else {
             errorMessage = "Couldn't reach this assignment's session. Go back and try again."
             return false
@@ -2443,6 +2477,9 @@ final class AppState {
             }
             let local = ExamDraftStore.load(userId: userId, sessionId: session.id)
             if let remote { activeSubmissionId = remote.id } else { activeSubmissionId = nil }
+            examDraftCarried = false
+            examCarryNote = nil
+            var startsBlank = false
             switch (local, remote) {
             case let (local?, remote?):
                 let revealed = revealHTML(remote.html, cipher: remote.cipher)
@@ -2480,6 +2517,21 @@ final class AppState {
                 examDraftHTML = revealed.isEmpty ? nil : revealed
             case (nil, nil):
                 examDraftHTML = nil
+                startsBlank = true
+            }
+            // Carry forward (SAT-5): only onto a blank page. Work already saved
+            // for this draft, on this Mac or the server, is never replaced.
+            if startsBlank, let test = activeAssignment, test.carryForward, test.versionNumber > 1 {
+                let carried = await carryForwardPreviousDraft(test: test)
+                // The lookup is a few more round-trips: same late-success
+                // guard as above.
+                guard studentScreen == .checks, activeExamSession?.id == session.id else {
+                    activeStudentId = nil
+                    return false
+                }
+                examDraftHTML = carried.html
+                examDraftCarried = carried.html != nil
+                examCarryNote = carried.note
             }
             guard examCanSeal, !examRecipientKeys.isEmpty else {
                 activeStudentId = nil
@@ -2496,6 +2548,57 @@ final class AppState {
             errorMessage = describe(error)
             return false
         }
+    }
+
+    static func carriedNote(version: Int) -> String {
+        "Your Draft \(version) is in the editor. Keep what works and revise."
+    }
+
+    /// The student's own previous draft for a carry-forward draft (SAT-5):
+    /// the most recent earlier draft they submitted, opened only if the
+    /// teacher has returned it. A returned essay is sealed to the teacher;
+    /// the teacher's Mac added a wrap for this student's key on return
+    /// (essay_grades.student_wrap), and appending it here is the same step
+    /// Returned work takes. Nothing is sent anywhere: the body is read from
+    /// the student's own row and opened on this Mac. Never throws and never
+    /// blocks the exam: on any failure the page starts blank with a note.
+    private func carryForwardPreviousDraft(test: Assignment) async -> (html: String?, note: String?) {
+        let earlier: [SupabaseManager.EarlierDraft]
+        do {
+            earlier = try await supabase.listMyEarlierDrafts(testId: test.id)
+        } catch {
+            return (nil, "Your earlier draft couldn't be loaded, so you're starting from a blank page.")
+        }
+        // Newest draft first. A skipped draft simply has no row, so this is
+        // the latest draft the student actually handed in.
+        guard let prev = earlier
+            .filter({ $0.versionNumber < test.versionNumber && $0.submittedAt != nil })
+            .max(by: { ($0.versionNumber, $0.submittedAt ?? .distantPast)
+                     < ($1.versionNumber, $1.submittedAt ?? .distantPast) })
+        else {
+            return (nil, "There's no earlier draft of yours to bring in, so you're starting from a blank page.")
+        }
+        let label = "Draft \(prev.versionNumber)"
+        guard prev.releasedAt != nil else {
+            return (nil, "Your \(label) hasn't been returned yet, so you're starting from a blank page.")
+        }
+        let unreadable = "Your \(label) couldn't be opened on this Mac, so you're starting from a blank page."
+        if essayKeyState != .ready { await checkEssayKey() }
+        guard let body = try? await supabase.listOwnSubmissionBodies(ids: [prev.submissionId]).first
+        else { return (nil, unreadable) }
+        var cipher = body.contentCipher
+        if var env = cipher,
+           let wraps = try? await supabase.listMyReturnWraps(submissionIds: [prev.submissionId]),
+           let w = wraps[prev.submissionId],
+           !env.wraps.contains(where: { $0.recipientKid == w.recipientKid }) {
+            env.wraps.append(w)
+            cipher = env
+        }
+        let html = revealHTML(body.contentHtml, cipher: cipher)
+        guard !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nil, unreadable)
+        }
+        return (html, Self.carriedNote(version: prev.versionNumber))
     }
 
     /// Move this attempt's roster row from "joined" to "writing" on the first
@@ -2731,6 +2834,8 @@ final class AppState {
         activeAssignment = nil
         examDeadline = nil
         examDraftHTML = nil
+        examDraftCarried = false
+        examCarryNote = nil
         examResolveCode = nil
         lastProctorFlags = nil
         studentScreen = .done

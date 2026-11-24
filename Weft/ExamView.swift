@@ -35,6 +35,9 @@ struct ExamView: View {
     /// True only in the real student flow. Gates the kiosk lock + monitor so QA
     /// previews don't take over the screen.
     var lockdown: Bool = false
+    /// Preview only (dev gallery): show a Draft 2 that starts from the
+    /// student's returned Draft 1 (SAT-5) instead of the filler essay.
+    var previewCarryForward: Bool = false
 
     @Environment(AppState.self) private var app
 
@@ -51,6 +54,9 @@ struct ExamView: View {
     @State private var draftReady = false
     @State private var didSeedPreview = false
     @State private var lastSavedHTML: String?
+    /// One calm line about carry forward (SAT-5), shown above the editor
+    /// until the student hides it.
+    @State private var carryNote: String?
 
     /// Filler text shown ONLY in the preview/gallery (lockdown == false) so the
     /// screen reads as a real writing session for QA. A real exam starts blank.
@@ -175,14 +181,22 @@ struct ExamView: View {
             if lockdown {
                 deadline = app.examDeadline
                 countdownAnchor = Date()
+                let carried = app.examDraftCarried
                 if let html = app.examDraftHTML, !html.isEmpty {
                     controller.setContent(RichTextHTML.attributed(fromHTML: html))
-                    lastSavedHTML = html
+                    // A carried-forward draft isn't saved for this draft yet.
+                    lastSavedHTML = carried ? "" : html
                 } else {
                     lastSavedHTML = ""
                 }
+                carryNote = app.examCarryNote
                 app.examDraftHTML = nil
+                app.examDraftCarried = false
+                app.examCarryNote = nil
                 draftReady = true
+                // Save the carried text now, through the normal sealed
+                // autosave, so this draft holds it from the first second.
+                if carried { scheduleSave() }
             } else if deadline == nil {
                 deadline = Date().addingTimeInterval(45 * 60)
                 countdownAnchor = Date()
@@ -190,9 +204,15 @@ struct ExamView: View {
             }
             if !lockdown && !didSeedPreview {
                 didSeedPreview = true
-                controller.setContent(NSAttributedString(
-                    string: previewEssay,
-                    attributes: RichTextStyle.body.attributes()))
+                if previewCarryForward {
+                    controller.setContent(RichTextHTML.attributed(
+                        fromHTML: CarryForwardPreview.draft1HTML))
+                    carryNote = AppState.carriedNote(version: 1)
+                } else {
+                    controller.setContent(NSAttributedString(
+                        string: previewEssay,
+                        attributes: RichTextStyle.body.attributes()))
+                }
             }
             armExpiry()
         }
@@ -440,6 +460,7 @@ struct ExamView: View {
     private var editorColumn: some View {
         VStack(spacing: 0) {
             header
+            if let note = carryNote { carryNoteRow(note) }
             toolbarRow
             // Locked while the breathing guide covers it, while a blackout
             // (screen-sharing detected or focus lost) is up, so "Writing
@@ -484,6 +505,35 @@ struct ExamView: View {
         .padding(.horizontal, Theme.Space.xl)
         .padding(.top, Theme.Space.xl)
         .padding(.bottom, Theme.Space.md)
+    }
+
+    /// Carry forward (SAT-5): one calm line, hidden with a click.
+    private func carryNoteRow(_ note: String) -> some View {
+        HStack(spacing: Theme.Space.sm) {
+            Image(systemName: "doc.text")
+                .foregroundStyle(Theme.accent)
+            Text(note)
+                .foregroundStyle(Theme.inkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button {
+                carryNote = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.muted)
+            }
+            .buttonStyle(IconHitButtonStyle(minSize: 24))
+            .help("Hide this note")
+            .accessibilityLabel("Hide this note")
+            .linkPointer()
+        }
+        .font(Theme.sans(13))
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Theme.accent.opacity(0.07),
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.horizontal, Theme.Space.xl)
+        .padding(.bottom, Theme.Space.sm)
     }
 
     private var breatheButton: some View {

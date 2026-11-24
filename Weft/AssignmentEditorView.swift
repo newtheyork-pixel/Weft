@@ -211,6 +211,9 @@ struct AssignmentEditorView: View {
     /// Primed from the existing assignment in prime() so editing round-trips
     /// the value faithfully.
     @State private var outlineAllowed: Bool = false
+    /// Draft 2 and later only (SAT-5): each student starts from their own
+    /// previous draft once it's returned. Primed from the saved draft.
+    @State private var carryForward: Bool = false
     /// The real `test_files` rows attached to this assignment's question.
     @State private var files: [TeacherFile] = []
     @State private var links: [EditorLink] = []
@@ -236,6 +239,8 @@ struct AssignmentEditorView: View {
     @State private var linkError: String?
 
     private var isNew: Bool { app.editingAssignment == nil }
+    /// Draft 1 (and a brand-new assignment) never shows carry forward.
+    private var isLaterDraft: Bool { (app.editingAssignment?.versionNumber ?? 1) > 1 }
     private var heading: String { isNew ? "New assignment" : "Edit assignment" }
     /// Never save on top of attachments we haven't got: a load still in flight
     /// (or one that failed) would be written out as "no files, no websites".
@@ -266,6 +271,7 @@ struct AssignmentEditorView: View {
                         timeLimitField
                         spellcheckToggle
                         outlineToggle
+                        if isLaterDraft { carryForwardToggle }
                         filesSection
                         websitesSection
                     }
@@ -406,6 +412,20 @@ struct AssignmentEditorView: View {
                 .toggleStyle(.switch)
                 .help("When on, students can attach an outline from the class home before they start")
             Text("Students may upload a PDF or Word outline until they begin writing.")
+                .font(Theme.sans(11))
+                .foregroundStyle(Theme.muted2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var carryForwardToggle: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Start each student from their previous draft", isOn: $carryForward)
+                .font(Theme.sans(14))
+                .foregroundStyle(Theme.inkSoft)
+                .toggleStyle(.switch)
+                .help("When on, each student's last draft is already in the editor when they begin")
+            Text("Works once you've returned their earlier draft. Anyone whose draft isn't returned yet starts from a blank page.")
                 .font(Theme.sans(11))
                 .foregroundStyle(Theme.muted2)
                 .fixedSize(horizontal: false, vertical: true)
@@ -807,6 +827,7 @@ struct AssignmentEditorView: View {
         // on a re-edit.
         spellcheckEnabled = existing.spellcheckEnabled
         outlineAllowed = existing.outlineAllowed
+        carryForward = existing.carryForward
         // Load the saved files AND websites before either list is editable, and
         // keep Save shut until they land: a save inside this window used to
         // write an empty allow list over the whitelist the locked browser
@@ -929,6 +950,7 @@ struct AssignmentEditorView: View {
                 timeLimitMinutes: minutes,
                 spellcheckEnabled: spellcheckEnabled,
                 outlineAllowed: outlineAllowed,
+                carryForward: isLaterDraft ? carryForward : nil,
                 links: links.map { (name: $0.name, href: $0.href) },
                 fileIds: files.map(\.id),
                 removedFiles: removedFiles

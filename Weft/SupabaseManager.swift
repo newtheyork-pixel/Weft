@@ -1013,6 +1013,8 @@ final class SupabaseManager: @unchecked Sendable {
     /// version_number = nextVersion, a FRESH essay-question id (each draft's
     /// submissions key on their own question), prompt/limits/files/links
     /// carried over. Launching the clone is the normal launch path.
+    /// A new draft starts each student from their previous draft by default
+    /// (carry_forward, SAT-5); the teacher can switch it off in the editor.
     func createDraftTest(from source: Assignment, teacherUserId: String,
                          nextVersion: Int) async throws -> Assignment? {
         struct Payload: Encodable {
@@ -1020,6 +1022,8 @@ final class SupabaseManager: @unchecked Sendable {
             let questions: [Question]; let time_limit_minutes: Int?
             let version_group_id: String; let version_number: Int
             let spellcheck_enabled: Bool; let outline_allowed: Bool
+            /// nil = omitted (a database without the column yet).
+            let carry_forward: Bool?
         }
         // A pre-versioning source row carries NULL version_group_id in the DB
         // (the model coalesces it to the test's own id). Backfill it before
@@ -1040,29 +1044,49 @@ final class SupabaseManager: @unchecked Sendable {
                                     prompt: q.prompt, wordLimit: q.wordLimit,
                                     fileIds: q.fileIds, urlIds: q.urlIds)
         }
-        let rows: [Assignment] = try await insert("tests", values: Payload(
-            teacher_user_id: teacherUserId, title: source.title, questions: questions,
-            time_limit_minutes: source.timeLimitMinutes,
-            version_group_id: source.versionGroupId, version_number: nextVersion,
-            spellcheck_enabled: source.spellcheckEnabled,
-            outline_allowed: source.outlineAllowed))
-        return rows.first
+        func payload(carry: Bool?) -> Payload {
+            Payload(teacher_user_id: teacherUserId, title: source.title, questions: questions,
+                    time_limit_minutes: source.timeLimitMinutes,
+                    version_group_id: source.versionGroupId, version_number: nextVersion,
+                    spellcheck_enabled: source.spellcheckEnabled,
+                    outline_allowed: source.outlineAllowed, carry_forward: carry)
+        }
+        do {
+            let rows: [Assignment] = try await insert("tests", values: payload(carry: true))
+            return rows.first
+        } catch let error as SupabaseError where Self.isMissingColumn("carry_forward", error) {
+            // Database not migrated yet: New draft must still work.
+            let rows: [Assignment] = try await insert("tests", values: payload(carry: nil))
+            return rows.first
+        }
     }
 
+    /// True when PostgREST refused a write because `column` isn't in its
+    /// schema (PGRST204), i.e. the migration that adds it isn't applied yet.
+    static func isMissingColumn(_ column: String, _ error: SupabaseError) -> Bool {
+        guard case let .badResponse(_, body) = error else { return false }
+        return body.contains("PGRST204") || (body.contains(column) && body.lowercased().contains("column"))
+    }
+
+    /// `carryForward` nil leaves the column alone (draft 1 never sends it).
     func updateTest(id: String, title: String, questions: [Question], timeLimitMinutes: Int?,
-                    spellcheckEnabled: Bool = true, outlineAllowed: Bool = false) async throws {
+                    spellcheckEnabled: Bool = true, outlineAllowed: Bool = false,
+                    carryForward: Bool? = nil) async throws {
         struct Payload: Encodable {
             let title: String; let questions: [Question]
             let time_limit_minutes: Int?; let updated_at: String
             let spellcheck_enabled: Bool; let outline_allowed: Bool
+            /// nil = key left out, so the column is untouched (draft 1, or a
+            /// database without the column yet).
+            let carry_forward: Bool?
             enum CodingKeys: String, CodingKey {
                 case title, questions, time_limit_minutes, updated_at
-                case spellcheck_enabled, outline_allowed
+                case spellcheck_enabled, outline_allowed, carry_forward
             }
             // The synthesized encoder omits nil optionals, and an omitted key
             // in a PATCH leaves the stored value alone: clearing the editor's
             // Time limit field ("blank = unlimited") kept the old limit.
-            // Send an explicit null so the column is cleared.
+            // Send an explicit null so the column is cleared (SAT-35).
             func encode(to encoder: Encoder) throws {
                 var c = encoder.container(keyedBy: CodingKeys.self)
                 try c.encode(title, forKey: .title)
@@ -1072,14 +1096,24 @@ final class SupabaseManager: @unchecked Sendable {
                 try c.encode(updated_at, forKey: .updated_at)
                 try c.encode(spellcheck_enabled, forKey: .spellcheck_enabled)
                 try c.encode(outline_allowed, forKey: .outline_allowed)
+                try c.encodeIfPresent(carry_forward, forKey: .carry_forward)
             }
         }
-        let _: [Assignment] = try await update("tests",
-            values: Payload(title: title, questions: questions,
-                            time_limit_minutes: timeLimitMinutes, updated_at: Self.nowISO(),
-                            spellcheck_enabled: spellcheckEnabled,
-                            outline_allowed: outlineAllowed),
-            query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
+        func send(_ carry: Bool?) async throws {
+            let _: [Assignment] = try await update("tests",
+                values: Payload(title: title, questions: questions,
+                                time_limit_minutes: timeLimitMinutes, updated_at: Self.nowISO(),
+                                spellcheck_enabled: spellcheckEnabled,
+                                outline_allowed: outlineAllowed, carry_forward: carry),
+                query: [URLQueryItem(name: "id", value: "eq.\(id)")], returning: false)
+        }
+        do {
+            try await send(carryForward)
+        } catch let error as SupabaseError where carryForward != nil
+                    && Self.isMissingColumn("carry_forward", error) {
+            // Database not migrated yet: save everything else.
+            try await send(nil)
+        }
     }
 
     func deleteTest(id: String) async throws {
@@ -1266,6 +1300,30 @@ final class SupabaseManager: @unchecked Sendable {
         let rows: [SubmittedEssay] = try await rpc("get_my_submission",
                                                    params: ["p_version_group_id": versionGroupId])
         return rows.first
+    }
+
+    /// One of the caller's own submitted essays from an earlier draft of the
+    /// same assignment (list_my_earlier_drafts, SAT-5). Metadata only.
+    struct EarlierDraft: Decodable, Sendable {
+        let submissionId: String
+        let versionNumber: Int
+        let submittedAt: Date?
+        let releasedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case submissionId = "submission_id"
+            case versionNumber = "version_number"
+            case submittedAt = "submitted_at"
+            case releasedAt = "released_at"
+        }
+    }
+
+    /// The caller's submitted essays from drafts numbered below `testId`, in
+    /// the same version group, newest draft first. SECURITY DEFINER keyed on
+    /// auth.uid(): students can't read sessions, so they can't map their own
+    /// essay_submissions rows to a draft number without it. No essay body.
+    func listMyEarlierDrafts(testId: String) async throws -> [EarlierDraft] {
+        try await rpc("list_my_earlier_drafts", params: ["p_test_id": testId])
     }
 
     struct StudentRowID: Decodable, Sendable { let id: String }
