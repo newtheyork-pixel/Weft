@@ -176,6 +176,11 @@ private struct ReviewEntry: Identifiable {
 private struct PendingGrade: Equatable {
     var score: String
     var comment: String
+    /// Whether this write shares the grade with the student. Kept with the
+    /// text because a failed first share leaves the server grade unreleased,
+    /// so the release state can't tell a retry what the teacher asked for
+    /// (SAT-38).
+    var share: Bool
 }
 
 // MARK: - The screen
@@ -1202,7 +1207,7 @@ struct ReviewGradingView: View {
                     .monospacedDigit()
                     .foregroundStyle(Theme.inkSoft)
                     .multilineTextAlignment(.leading)
-                    .onSubmit { saveCurrentGrade(share: false) }
+                    .onSubmit { saveCurrentGrade(share: pendingShare(current.id)) }
                     .frame(width: 72)
                     .padding(.vertical, 4)
                     .padding(.horizontal, 8)
@@ -1468,7 +1473,7 @@ struct ReviewGradingView: View {
                     .foregroundStyle(Theme.muted)
                     .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Retry save") { saveCurrentGrade(share: current.returned) }
+                Button("Retry save") { saveCurrentGrade(share: pendingShare(current.id)) }
                     .buttonStyle(.glass)
                     .font(Theme.sans(12, .semibold))
                     .disabled(savingIds.contains(current.id))
@@ -1514,8 +1519,17 @@ struct ReviewGradingView: View {
     /// score/comment and then paging to another student never loses it.
     private func flushIfDirty() {
         guard isLive, gradeDirty else { return }
-        let alreadyReleased = app.grades[current.id]?.isReleased ?? false
-        saveCurrentGrade(share: alreadyReleased)
+        saveCurrentGrade(share: pendingShare(current.id))
+    }
+
+    /// The sharing for a save the teacher didn't press a button for (Retry, the
+    /// Score field's Return, the flush on paging away): whatever the unsaved
+    /// request it replaces asked for. A failed Share with student retries as a
+    /// share instead of quietly landing as a private save (SAT-38). Only the
+    /// explicit buttons change it. A grade that is already shared stays shared
+    /// either way (see saveCurrentGrade).
+    private func pendingShare(_ id: String) -> Bool {
+        pendingGrades[id]?.share ?? false
     }
 
     /// The current entry's comment text for the placeholder check, regardless of path.
@@ -1551,18 +1565,20 @@ struct ReviewGradingView: View {
         // a save is in flight (the Score field's onSubmit saves, and so does
         // Save without sharing), so the completion below clears the pending
         // text and the dirty flag only if the buffers still hold this text.
-        let sent = PendingGrade(score: scoreText, comment: commentText)
+        // Saving without sharing never un-shares, so an already-shared grade
+        // always writes as shared.
+        let sent = PendingGrade(score: scoreText, comment: commentText,
+                                share: share || (app.grades[id]?.isReleased ?? false))
         pendingGrades[id] = sent
         // One write per student at a time: each write names the grade version
         // it replaces (SAT-13), so two in flight would conflict. This request
         // stays in pendingGrades and goes out when the current write lands.
         guard !savingIds.contains(id) else { return }
-        writeGrade(submission, sent: sent, pointsPossible: pointsPossible,
-                   share: share || (app.grades[id]?.isReleased ?? false))
+        writeGrade(submission, sent: sent, pointsPossible: pointsPossible)
     }
 
     private func writeGrade(_ submission: TeacherSubmission, sent: PendingGrade,
-                            pointsPossible possible: Double, share: Bool) {
+                            pointsPossible possible: Double) {
         let id = submission.id
         let points: Double?
         switch Self.scoreInput(sent.score) {
@@ -1585,7 +1601,7 @@ struct ReviewGradingView: View {
                                             points: points,
                                             pointsPossible: possible,
                                             feedback: sent.comment,
-                                            share: share)
+                                            share: sent.share)
             savingIds.remove(id)
             if saved {
                 // Anything typed during the round-trip stays pending and dirty,
@@ -1599,10 +1615,10 @@ struct ReviewGradingView: View {
                 }
                 // A save asked for while this one was in flight (often a flush
                 // on the way to the next student) goes out now, against the
-                // version this write just stored.
+                // version this write just stored, with the sharing it asked
+                // for (a Share pressed during a private save still shares).
                 if let queued = pendingGrades[id] {
-                    writeGrade(submission, sent: queued, pointsPossible: possible,
-                               share: app.grades[id]?.isReleased ?? false)
+                    writeGrade(submission, sent: queued, pointsPossible: possible)
                 }
             } else {
                 saveErrors[id] = app.errorMessage
