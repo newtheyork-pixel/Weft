@@ -1449,6 +1449,33 @@ final class SupabaseManager: @unchecked Sendable {
         }
     }
 
+    /// This attempt's row id and whether `submit_essay` has already stamped it.
+    /// nil = no row yet. Lets a retried Submit recognise a lock that committed
+    /// on the server while its response was lost (SAT-34): re-uploading would
+    /// only hit the "submitted essays are read-only" refusal forever.
+    /// submitted_at is read as a raw string: only its presence matters, and a
+    /// date-format surprise must not turn "submitted" into a thrown error.
+    func getMySubmissionState(sessionId: String, studentId: String,
+                              questionId: String) async throws -> (id: String, submitted: Bool)? {
+        struct Row: Decodable {
+            let id: String
+            let submittedAt: String?
+            enum CodingKeys: String, CodingKey {
+                case id
+                case submittedAt = "submitted_at"
+            }
+        }
+        let rows: [Row] = try await self.rows("essay_submissions", query: [
+            URLQueryItem(name: "select", value: "id,submitted_at"),
+            URLQueryItem(name: "session_id", value: "eq.\(sessionId)"),
+            URLQueryItem(name: "student_id", value: "eq.\(studentId)"),
+            URLQueryItem(name: "question_id", value: "eq.\(questionId)"),
+            URLQueryItem(name: "limit", value: "1"),
+        ])
+        guard let row = rows.first else { return nil }
+        return (row.id, row.submittedAt != nil)
+    }
+
     /// students.status transition (joined -> writing -> submitted). Best-effort,
     /// but the Bool is reported: the caller retries the writing transition on
     /// the next edit rather than leaving the teacher's monitor saying "Joined"

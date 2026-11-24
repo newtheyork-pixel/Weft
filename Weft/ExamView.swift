@@ -333,7 +333,9 @@ struct ExamView: View {
     /// Submit = freeze editor -> final flush (must succeed) -> DB lock ->
     /// leave the exam. A failed flush keeps the student in the exam with the
     /// failed-save label and unfreezes the editor (unless time is up); their
-    /// work is intact and Submit can be pressed again.
+    /// work is intact and Submit can be pressed again. A retry after a lock
+    /// whose reply was lost succeeds: submitExam checks the server's submitted
+    /// state before flushing again (SAT-34).
     ///
     /// `enforcingWordLimit` is set by the student's Submit path: the limit is
     /// re-checked against the exact snapshot being uploaded, so text that

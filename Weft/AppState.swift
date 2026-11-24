@@ -2581,12 +2581,24 @@ final class AppState {
     /// the server, so the caller must NOT exit the exam (the work would be
     /// lost, or an older copy would be locked in). Does NOT route; the exam
     /// view orchestrates kiosk exit + finishExam on success.
+    ///
+    /// Idempotent across a lost response (SAT-34): if an earlier attempt's
+    /// submit_essay committed but the reply never arrived, the row is already
+    /// locked and every re-upload is refused. So the server is asked first,
+    /// and again after a failed lock, and an already-submitted essay counts
+    /// as success. A retry whose first attempt never reached the server
+    /// finds the row unsubmitted and takes the normal flush + lock path.
     func submitExam(html: String, wordCount: Int) async -> Bool {
         if signedIn {
-            let saved = await saveEssay(html: html, wordCount: wordCount)
-            guard saved.uploaded else { return false }
-            guard let submissionId = activeSubmissionId else { return false }
-            guard await supabase.submitEssay(submissionId: submissionId) else { return false }
+            if (await essayAlreadySubmitted()) != true {
+                let saved = await saveEssay(html: html, wordCount: wordCount)
+                guard saved.uploaded else { return false }
+                guard let submissionId = activeSubmissionId else { return false }
+                if !(await supabase.submitEssay(submissionId: submissionId)) {
+                    // The lock may have committed with only the reply lost.
+                    guard (await essayAlreadySubmitted()) == true else { return false }
+                }
+            }
             if let studentId = activeStudentId {
                 await supabase.updateStudentStatus(id: studentId, status: "submitted")
             }
@@ -2601,6 +2613,25 @@ final class AppState {
         markedWriting = false
         allowFreshOverUnreadable = false
         return true
+    }
+
+    /// Server truth for this attempt's lock: true = submit_essay already
+    /// stamped it, false = not submitted (or no row yet), nil = couldn't ask
+    /// (network). nil is treated like false by the caller: the normal flush
+    /// path runs and fails or succeeds on its own, as it did before.
+    private func essayAlreadySubmitted() async -> Bool? {
+        guard let session = activeExamSession,
+              let studentId = activeStudentId,
+              let questionId = activeAssignment?.questions.first?.id else { return nil }
+        do {
+            guard let state = try await supabase.getMySubmissionState(
+                sessionId: session.id, studentId: studentId, questionId: questionId)
+            else { return false }
+            activeSubmissionId = state.id
+            return state.submitted
+        } catch {
+            return nil
+        }
     }
 
     /// True while the attempt's session is still open. lookup_session_by_code
