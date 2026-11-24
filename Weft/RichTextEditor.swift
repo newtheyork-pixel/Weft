@@ -108,11 +108,30 @@ final class RichTextController {
         return result
     }
 
+    /// Stop all edits to the live document right now, on the main actor,
+    /// before a final snapshot is taken. Synchronous on purpose: waiting for
+    /// SwiftUI to push `isEditable: false` through updateNSView leaves a
+    /// window where keystrokes land after the snapshot and are never
+    /// submitted. An open IME composition is committed first so the snapshot
+    /// holds exactly what the student sees. Every mutator below checks
+    /// `isEditable`, so toolbar buttons and shortcuts are frozen too; the
+    /// editor's next `isEditable: true` from SwiftUI unfreezes it.
+    func freezeEditing() {
+        guard let tv = textView else { return }
+        if tv.hasMarkedText() {
+            tv.unmarkText()
+            tv.inputContext?.discardMarkedText()
+        }
+        tv.isEditable = false
+    }
+
     /// Drop a source quotation at the caret: italic indented paragraph plus
     /// a citation (page or URL). The student never leaves the lock to retype.
-    func insertQuote(_ text: String, citation: String) {
+    /// False when nothing was inserted (empty quote, or the editor is locked).
+    @discardableResult
+    func insertQuote(_ text: String, citation: String) -> Bool {
         let quote = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
-        guard !quote.isEmpty, let tv = textView, let storage = tv.textStorage else { return }
+        guard !quote.isEmpty, let tv = textView, tv.isEditable, let storage = tv.textStorage else { return false }
         let para = NSMutableParagraphStyle()
         para.lineHeightMultiple = RichTextStyle.defaultLineHeightMultiple
         para.firstLineHeadIndent = 28
@@ -129,12 +148,13 @@ final class RichTextController {
             .paragraphStyle: para,
         ])
         let range = tv.selectedRange
-        guard tv.shouldChangeText(in: range, replacementString: attr.string) else { return }
+        guard tv.shouldChangeText(in: range, replacementString: attr.string) else { return false }
         storage.replaceCharacters(in: range, with: attr)
         tv.setSelectedRange(NSRange(location: range.location + attr.length, length: 0))
         tv.typingAttributes = RichTextStyle.body.attributes()
         tv.didChangeText()
         recountWords()
+        return true
     }
 
     /// Bumped by every recount. An in-flight count from an older snapshot
@@ -179,6 +199,11 @@ final class RichTextController {
     init() {}
 
     // MARK: Inline character formatting
+    //
+    // Every mutator below writes the text storage directly, which NSTextView's
+    // own `isEditable` does not stop. Each one bails when the view is not
+    // editable, so a frozen essay (submitting, time up, breathing guide) can't
+    // be reformatted from the toolbar or a shortcut.
 
     /// Bold / Italic toggle the matching symbolic trait on the selection's font
     /// (or the typing attributes when the selection is empty), so the behavior
@@ -190,7 +215,7 @@ final class RichTextController {
 
     /// Underline toggles the .underlineStyle attribute on the selection.
     func toggleUnderline() {
-        guard let tv = textView, let storage = tv.textStorage else { return }
+        guard let tv = textView, tv.isEditable, let storage = tv.textStorage else { return }
         let range = tv.selectedRange()
 
         if range.length == 0 {
@@ -215,7 +240,7 @@ final class RichTextController {
     /// Flip a symbolic font trait (bold/italic) across the selection or, when
     /// empty, on the typing attributes.
     private func toggleTrait(_ trait: NSFontDescriptor.SymbolicTraits) {
-        guard let tv = textView, let storage = tv.textStorage else { return }
+        guard let tv = textView, tv.isEditable, let storage = tv.textStorage else { return }
         let range = tv.selectedRange()
 
         if range.length == 0 {
@@ -277,7 +302,7 @@ final class RichTextController {
     /// (the reapplied paragraph style rides along and the next toggle resets it).
     /// Numbering restarts at 1 for each toggle; renumber-on-edit is deferred (TODO).
     private func toggleList(_ format: NSTextList.MarkerFormat) {
-        guard let tv = textView, let storage = tv.textStorage else { return }
+        guard let tv = textView, tv.isEditable, let storage = tv.textStorage else { return }
         let ns = storage.string as NSString
         let pRange = ns.paragraphRange(for: tv.selectedRange())
         let paragraphs = Self.paragraphRanges(of: ns, in: pRange)
@@ -389,7 +414,7 @@ final class RichTextController {
 
     /// Return on an EMPTY list item ends the list (Google Docs). True = handled.
     func endListIfEmptyItem() -> Bool {
-        guard let tv = textView, let storage = tv.textStorage else { return false }
+        guard let tv = textView, tv.isEditable, let storage = tv.textStorage else { return false }
         let ns = storage.string as NSString
         let p = ns.paragraphRange(for: tv.selectedRange())
         guard p.length > 0,
@@ -428,7 +453,7 @@ final class RichTextController {
     /// super). Splitting mid-item carries the tail into the new item, like
     /// Google Docs. Downstream items are not renumbered (deferred: TODO).
     func insertListNewline() -> Bool {
-        guard let tv = textView, let storage = tv.textStorage else { return false }
+        guard let tv = textView, tv.isEditable, let storage = tv.textStorage else { return false }
         let ns = storage.string as NSString
         let sel = tv.selectedRange()
         let p = ns.paragraphRange(for: sel)
@@ -510,7 +535,7 @@ final class RichTextController {
     /// True = the selection was in a list and the Tab was consumed. Pure
     /// attribute change, so the nil replacementString declaration is correct.
     func changeListLevel(by delta: Int) -> Bool {
-        guard let tv = textView, let storage = tv.textStorage else { return false }
+        guard let tv = textView, tv.isEditable, let storage = tv.textStorage else { return false }
         let range = (storage.string as NSString).paragraphRange(for: tv.selectedRange())
         guard range.length > 0,
               let style = storage.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle,
@@ -556,7 +581,7 @@ final class RichTextController {
 
     /// Shared font-run mutator (selection or typing attributes).
     private func mutateFonts(_ transform: (NSFont) -> NSFont) {
-        guard let tv = textView, let storage = tv.textStorage else { return }
+        guard let tv = textView, tv.isEditable, let storage = tv.textStorage else { return }
         let range = tv.selectedRange()
         if range.length == 0 {
             var typing = tv.typingAttributes
@@ -586,7 +611,7 @@ final class RichTextController {
     }
 
     private func mutateAttribute(_ key: NSAttributedString.Key, value: Any?) {
-        guard let tv = textView, let storage = tv.textStorage else { return }
+        guard let tv = textView, tv.isEditable, let storage = tv.textStorage else { return }
         let range = tv.selectedRange()
         if range.length == 0 {
             var typing = tv.typingAttributes
@@ -608,7 +633,7 @@ final class RichTextController {
     /// Line spacing (paragraph-level, like Google Docs): applies the multiple
     /// to every paragraph touching the selection and to typing attributes.
     func setLineSpacing(_ multiple: CGFloat) {
-        guard let tv = textView, let storage = tv.textStorage else { return }
+        guard let tv = textView, tv.isEditable, let storage = tv.textStorage else { return }
         let range = (storage.string as NSString).paragraphRange(for: tv.selectedRange())
         let apply: (NSParagraphStyle) -> NSParagraphStyle = { s in
             let m = (s.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
@@ -640,7 +665,7 @@ final class RichTextController {
     /// wholesale-restyle the paragraph anyway, exactly like the previous
     /// setAttributes did).
     private func applyHeading(_ style: RichTextStyle) {
-        guard let tv = textView, let storage = tv.textStorage else { return }
+        guard let tv = textView, tv.isEditable, let storage = tv.textStorage else { return }
         let ns = storage.string as NSString
         let range = ns.paragraphRange(for: tv.selectedRange())
         guard range.length > 0 || tv.string.isEmpty else {

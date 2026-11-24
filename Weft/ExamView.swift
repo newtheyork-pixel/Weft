@@ -120,7 +120,16 @@ struct ExamView: View {
                     onHide: { toggleReferences() },
                     onRetryMaterials: { Task { await app.retryExamMaterials() } },
                     onInsertQuote: { text, cite in
-                        controller.insertQuote(text, citation: cite)
+                        // Locked while submitting or after time is up: the
+                        // quote must not land after the submit snapshot.
+                        guard controller.insertQuote(text, citation: cite) else {
+                            if expired {
+                                refStore.post(notice: "Time is up. Your essay can't be changed.")
+                            } else if submitting {
+                                refStore.post(notice: "Your essay is locked while it's being submitted.")
+                            }
+                            return
+                        }
                         refStore.post(notice: "Quoted into your essay.")
                         scheduleSave()
                         app.markWriting()
@@ -321,9 +330,10 @@ struct ExamView: View {
         "Over the word limit (\(count) / \(limit) words). Shorten your essay before submitting."
     }
 
-    /// Submit = final flush (must succeed) -> DB lock -> leave the exam. A
-    /// failed flush keeps the student in the exam with the failed-save label;
-    /// their work is intact and Submit can be pressed again.
+    /// Submit = freeze editor -> final flush (must succeed) -> DB lock ->
+    /// leave the exam. A failed flush keeps the student in the exam with the
+    /// failed-save label and unfreezes the editor (unless time is up); their
+    /// work is intact and Submit can be pressed again.
     ///
     /// `enforcingWordLimit` is set by the student's Submit path: the limit is
     /// re-checked against the exact snapshot being uploaded, so text that
@@ -337,6 +347,12 @@ struct ExamView: View {
         // view tears down); reset to false on every failure return.
         guard !submitting else { return }
         submitting = true
+        // Freeze the document before the snapshot, synchronously. The editor's
+        // `isEditable` also folds in `submitting`, but that only reaches the
+        // text view on SwiftUI's next update, and the snapshot is taken after
+        // a hop; anything typed in between would be visible on screen and
+        // missing from the submission (success cancels the pending autosave).
+        controller.freezeEditing()
         Task {
             let snap = await controller.htmlAndWordCountOffMain()
             // `expired` is read after the snapshot await: if the deadline fired
@@ -349,6 +365,7 @@ struct ExamView: View {
             }
             guard await app.submitExam(html: snap.html,
                                        wordCount: snap.wordCount) else {
+                // Unfreezes the editor through `isEditable` unless `expired`.
                 submitting = false
                 runtime.saveState = .failed
                 // Past the hard deadline nothing else would ever fire (the
@@ -420,14 +437,18 @@ struct ExamView: View {
             header
             toolbarRow
             // Locked while the breathing guide covers it, so nothing typed
-            // then can land in the essay unseen.
-            RichTextEditor(controller: controller, isEditable: !expired && !showBreath,
+            // then can land in the essay unseen, and while a submit is in
+            // flight, so nothing typed lands after the submitted snapshot.
+            RichTextEditor(controller: controller,
+                           isEditable: !expired && !showBreath && !submitting,
                            spellcheckEnabled: assignment.spellcheckEnabled,
                            onEdit: { scheduleSave(); app.markWriting() })
                 .accessibilityLabel("Essay")
                 .accessibilityHint(expired
                     ? "Time is up. The essay can no longer be edited."
-                    : "Write your response to the prompt.")
+                    : submitting
+                        ? "Submitting. The essay can't be edited right now."
+                        : "Write your response to the prompt.")
                 .background(Color.white)
                 .padding(.horizontal, Theme.Space.xl)
             footerBar
@@ -533,6 +554,7 @@ struct ExamView: View {
         HStack(spacing: Theme.Space.md) {
             RichTextToolbar(controller: controller)
                 .fixedSize()
+                .disabled(expired || submitting)
             Spacer()
             // Own view: a word-count publish must not rebuild this column.
             WordCountLabel(controller: controller, limit: wordLimit) { newCount in
@@ -586,9 +608,9 @@ struct ExamView: View {
                 .linkPointer()
                 Spacer()
                 // Own view: flipping "Saving…" must not rebuild the editor.
-                SaveLabel(runtime: runtime)
+                SaveLabel(runtime: runtime, submitting: submitting)
                 Spacer()
-                Button("Submit") { requestSubmit() }
+                Button(submitting ? "Submitting…" : "Submit") { requestSubmit() }
                     .buttonStyle(.glassProminent).tint(Theme.accent)
                     .keyboardShortcut("\r", modifiers: [.command])
                     .disabled(submitting)
@@ -695,10 +717,16 @@ private struct WordCountLabel: View {
 /// redraws this label and nothing above it.
 private struct SaveLabel: View {
     var runtime: ExamRuntime
+    /// A submit is in flight: the editor is frozen and the student is waiting
+    /// on the final save, so that is the state worth showing.
+    var submitting = false
 
     var body: some View {
         HStack(spacing: 6) {
-            if runtime.saveState == .saving {
+            if submitting {
+                ProgressView().controlSize(.small).scaleEffect(0.7)
+                Text("Submitting your essay…")
+            } else if runtime.saveState == .saving {
                 ProgressView().controlSize(.small).scaleEffect(0.7)
                 Text("Saving…")
             } else if runtime.saveState == .failed {
