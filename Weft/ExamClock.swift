@@ -1,9 +1,7 @@
 //
 //  ExamClock.swift
-//  Weft — the text of the two-line exam clock:
-//
-//      12:08 left
-//      Ends at 10:42 AM
+//  Weft — the text of the exam clock ("12:08 left") and what VoiceOver
+//  reads for it (which still includes "Ends at 10:42 AM").
 //
 //  Pure functions, so the wording can be tested without the app.
 //
@@ -21,7 +19,7 @@ enum ExamClock {
         return String(format: "%d:%02d left", m, s)
     }
 
-    /// Bottom line: the real end time, in the Mac's own 12/24-hour style.
+    /// The real end time, in the Mac's own 12/24-hour style (spoken only).
     static func endsText(deadline: Date, locale: Locale = .autoupdatingCurrent,
                          timeZone: TimeZone = .autoupdatingCurrent) -> String {
         var style = Date.FormatStyle(date: .omitted, time: .shortened)

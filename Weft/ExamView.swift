@@ -464,9 +464,9 @@ struct ExamView: View {
         }
     }
 
-    /// Two-line clock: time left (ticking, fixed-width digits) over the real
-    /// end time. Hiding it hides only the countdown; the end time stays, so
-    /// students still know when the exam ends without watching seconds.
+    /// The clock: time left (ticking, fixed-width digits). One line only; the
+    /// "Ends at" line was cut as clutter (SAT-39). VoiceOver still reads the
+    /// end time.
     @ViewBuilder private var countdown: some View {
         if let deadline {
             TimelineView(.periodic(from: countdownAnchor, by: 1)) { context in
@@ -478,7 +478,7 @@ struct ExamView: View {
                     // In the last five minutes the clock always shows.
                     if !soon { hideTimer.toggle() }
                 } label: {
-                    VStack(alignment: .leading, spacing: 1) {
+                    Group {
                         if hidden {
                             Label("Show time", systemImage: "eye")
                                 .font(Theme.sans(13, .semibold))
@@ -491,15 +491,11 @@ struct ExamView: View {
                                 Image(systemName: "clock")
                             }
                         }
-                        Text(ExamClock.endsText(deadline: deadline))
-                            .font(Theme.sans(11.5))
-                            .foregroundStyle(soon ? Theme.warn : Theme.muted)
-                            .padding(.leading, 22)
                     }
                     .foregroundStyle(tint)
                     .fixedSize()
-                    .padding(.horizontal, 12).padding(.vertical, 5)
-                    .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(tint.opacity(0.10), in: Capsule())
                 }
                 .buttonStyle(.plainHit)
                 .help(soon ? "Time remaining"
