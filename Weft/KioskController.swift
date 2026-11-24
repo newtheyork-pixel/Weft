@@ -121,8 +121,58 @@ final class KioskController {
     /// Kept in sync with the Electron KIOSK_SETTLE_MS so behaviour matches.
     private let settleInterval: TimeInterval = 5.0
 
-    /// True while we are still inside the post-entry settle window.
-    private var settling: Bool { Date().timeIntervalSince(enteredAt) < settleInterval }
+    /// True while we are still inside the post-entry settle window, or still
+    /// working to get the window into full screen.
+    private var settling: Bool {
+        enteringFullScreen || Date().timeIntervalSince(enteredAt) < settleInterval
+    }
+
+    /// True from `enterKiosk` until the window is in full screen (or covers
+    /// the screen as a fallback). While true, the enter chain owns the window.
+    private var enteringFullScreen = false
+
+    /// Set by willEnterFullScreen: a transition is running, don't toggle again.
+    private var fullScreenTransitionStarted = false
+    private var transitionStartedAt: Date = .distantPast
+
+    /// Bumped each time an enter chain starts, so only the newest one runs.
+    private var enterChainID = 0
+
+    /// Set when native full screen never took and the window was stretched
+    /// over the whole screen instead.
+    private var coveringFallback = false
+    private var savedFrame: NSRect?
+    private var savedMovable = true
+
+    /// Rechecks of the enter chain (~0.25-1 s each) before falling back to
+    /// covering the screen.
+    private let maxEnterAttempts = 24
+
+    /// The lock surface. Inside a full-screen space macOS requires
+    /// `.fullScreen` in the set, and without `.hideMenuBar` it would show the
+    /// menu bar (and the clock) when the pointer touches the top edge.
+    private static func lockOptions(fullScreen: Bool) -> NSApplication.PresentationOptions {
+        var options: NSApplication.PresentationOptions = [
+            .hideDock,
+            .hideMenuBar,
+            .disableProcessSwitching,
+            .disableForceQuit,
+            .disableSessionTermination,
+            .disableHideApplication,
+            .disableAppleMenu,
+        ]
+        if fullScreen { options.insert(.fullScreen) }
+        return options
+    }
+
+    /// True when the window is locked over the whole screen, natively or by
+    /// the fallback. Only then may it be raised to the screen-saver level:
+    /// macOS refuses to take a raised window full screen once another app
+    /// has had focus (the 0.3.12 "exam stayed windowed" bug, seen after
+    /// Begin closed the other apps).
+    private func isCovering(_ window: NSWindow) -> Bool {
+        window.styleMask.contains(.fullScreen) || coveringFallback
+    }
 
     // MARK: Proctor hooks (the file-header TODO, wired)
 
@@ -176,22 +226,17 @@ final class KioskController {
         // native equivalent of Electron's setKiosk + hide-dock/menubar AND the
         // bulk of its globalShortcut grabs: AppKit swallows Cmd+Tab (process
         // switching), Cmd+Q / Force-Quit, the Apple menu, and app hide for us.
-        NSApp.presentationOptions = [
-            .hideDock,
-            .hideMenuBar,
-            .disableProcessSwitching,
-            .disableForceQuit,
-            .disableSessionTermination,
-            .disableHideApplication,
-            .disableAppleMenu,
-        ]
+        NSApp.presentationOptions = Self.lockOptions(fullScreen: window.styleMask.contains(.fullScreen))
 
-        // Pin the window above normal windows, screen-saver-ish, matching
-        // Electron's setAlwaysOnTop(true, 'screen-saver'). Save the old level
-        // so exit can restore it. We use a high named level rather than a raw
-        // CGWindowLevel constant so the value stays valid across SDK changes.
+        // The window is pinned above everything (.screenSaver, matching
+        // Electron's setAlwaysOnTop(true, 'screen-saver')) only once it covers
+        // the screen; see isCovering. Save the old level so exit can restore it.
         if freshLock { savedLevel = window.level }
-        window.level = .screenSaver
+        // Full screen needs the window to allow it; a raised window must come
+        // down to normal first or macOS ignores the request.
+        window.collectionBehavior.remove([.fullScreenNone, .fullScreenAuxiliary])
+        window.collectionBehavior.insert(.fullScreenPrimary)
+        if !isCovering(window) { window.level = .normal }
 
         // Content protection is OFF during the exam. Local screenshots and
         // screen recordings (⌘⇧3/4/5, QuickTime, Loom, …) are allowed; the
@@ -204,24 +249,108 @@ final class KioskController {
         // through. Fail-open: no-op unless trusted for Accessibility.
         keyGuard.start()
 
-        // Take the window full-screen. toggleFullScreen drives the native
-        // full-screen SPACE (its own Space), which is what we want for kiosk:
-        // it removes the title bar and prevents the window from being dragged
-        // out from under the lock. Only toggle if we are not already there, or
-        // we would toggle straight back OUT.
-        //
-        // NOTE: this kicks off the settle-window animation described in the file
-        // header. The resign-key handler below MUST NOT re-key during it.
-        if !window.styleMask.contains(.fullScreen) {
-            window.toggleFullScreen(nil)
-        }
+        installFightBack(for: window)
 
-        // Bring the window to the front ONCE, now, before the animation begins.
-        // We deliberately do NOT re-key from the resign handler during settle.
+        // Take the window full-screen: the native full-screen SPACE removes
+        // the title bar and keeps the window from being dragged out from
+        // under the lock. macOS silently ignores the request when Weft is not
+        // the active app (Begin just quit the other apps, and one of them may
+        // have taken focus to ask about saving), so the chain below first
+        // waits for Weft to be active with the exam window key, then toggles,
+        // then checks it took.
+        //
+        // NOTE: entering plays the settle-window animation described in the
+        // file header. The resign-key handler MUST NOT re-key during it;
+        // `settling` stays true for the whole chain.
+        coveringFallback = false
+        if window.styleMask.contains(.fullScreen) {
+            didCover(window)
+        } else {
+            startEnterChain(window)
+        }
+    }
+
+    /// Starts (or restarts) the verified full-screen entry.
+    private func startEnterChain(_ window: NSWindow) {
+        enteringFullScreen = true
+        fullScreenTransitionStarted = false
+        enterChainID += 1
+        enterFullScreenChain(window, attempt: 0, chain: enterChainID)
+    }
+
+    // MARK: Full-screen entry (verified)
+
+    /// One step of the verified full-screen entry. Ends when the window is in
+    /// full screen (didEnterFullScreen -> didCover), when the lock ends, or
+    /// after `maxEnterAttempts`, when it covers the screen instead.
+    private func enterFullScreenChain(_ window: NSWindow, attempt: Int, chain: Int) {
+        guard inTest, lockedWindow === window, enteringFullScreen, chain == enterChainID else { return }
+        if window.styleMask.contains(.fullScreen) {
+            didCover(window)
+            return
+        }
+        if attempt >= maxEnterAttempts {
+            coverScreenFallback(window)
+            return
+        }
+        // A transition that never finished (macOS gave up) must not stall
+        // the chain: after 3 s, toggle again.
+        if fullScreenTransitionStarted, Date().timeIntervalSince(transitionStartedAt) > 3 {
+            fullScreenTransitionStarted = false
+        }
+        let delay: TimeInterval
+        if fullScreenTransitionStarted {
+            // A transition is running; give it time to finish.
+            delay = 0.5
+        } else if NSApp.isActive && window.isKeyWindow {
+            window.level = .normal
+            window.toggleFullScreen(nil)
+            delay = 1.0
+        } else {
+            // Ask for focus back, then look again shortly.
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            delay = 0.25
+        }
+        Task { @MainActor [weak window] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let window else { return }
+            self.enterFullScreenChain(window, attempt: attempt + 1, chain: chain)
+        }
+    }
+
+    /// The window now covers the screen: raise it and re-apply the lock for
+    /// the full-screen space. Restarts the settle window, because the end of
+    /// the space animation churns focus too.
+    private func didCover(_ window: NSWindow) {
+        guard inTest, lockedWindow === window else { return }
+        enteringFullScreen = false
+        fullScreenTransitionStarted = false
+        enteredAt = Date()
+        window.level = .screenSaver
+        NSApp.presentationOptions = Self.lockOptions(fullScreen: window.styleMask.contains(.fullScreen))
+    }
+
+    /// Last resort when native full screen never took: stretch the window
+    /// over the whole screen, hide its buttons and pin it. Still covers the
+    /// desktop, and the dock and menu bar stay hidden by the lock options.
+    private func coverScreenFallback(_ window: NSWindow) {
+        guard let screen = window.screen ?? NSScreen.main else { return }
+        coveringFallback = true
+        savedFrame = window.frame
+        savedMovable = window.isMovable
+        window.isMovable = false
+        setWindowButtonsHidden(window, true)
+        window.setFrame(screen.frame, display: true)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        didCover(window)
+    }
 
-        installFightBack(for: window)
+    private func setWindowButtonsHidden(_ window: NSWindow, _ hidden: Bool) {
+        for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(kind)?.isHidden = hidden
+        }
     }
 
     // MARK: Exit
@@ -236,8 +365,19 @@ final class KioskController {
     /// releases the observers.
     func exitKiosk(window: NSWindow) {
         inTest = false
+        enteringFullScreen = false
+        fullScreenTransitionStarted = false
         ExamAppCloser.stopWatching()
         teardownObservers()
+
+        // Undo the cover-the-screen fallback, if it was used.
+        if coveringFallback {
+            coveringFallback = false
+            setWindowButtonsHidden(window, false)
+            window.isMovable = savedMovable
+            if let frame = savedFrame { window.setFrame(frame, display: true) }
+            savedFrame = nil
+        }
 
         // Restore the global presentation surface. Empty == normal desktop:
         // dock back, menu bar back, Cmd+Tab / Cmd+Q / Apple menu live again.
@@ -336,7 +476,31 @@ final class KioskController {
             }
         }
 
-        observers = [resign, appResign, leaveFS]
+        // A full-screen transition started: the enter chain must not toggle
+        // again until it ends (a second toggle would turn it straight back).
+        let willEnter = nc.addObserver(
+            forName: NSWindow.willEnterFullScreenNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.fullScreenTransitionStarted = true
+                self?.transitionStartedAt = Date()
+            }
+        }
+
+        // Full screen reached (first entry or a re-entry): raise + re-lock.
+        let didEnter = nc.addObserver(
+            forName: NSWindow.didEnterFullScreenNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.didCover(window)
+            }
+        }
+
+        observers = [resign, appResign, leaveFS, willEnter, didEnter]
     }
 
     /// Focus was lost. Re-assert the lock. During the settle window we ONLY
@@ -347,18 +511,11 @@ final class KioskController {
     private func handleFocusLost(window: NSWindow) {
         guard inTest, lockedWindow === window else { return }
 
-        // Always re-pin the level and presentation options — cheap, and it is
-        // the part that does not churn the first responder / caret.
-        window.level = .screenSaver
-        NSApp.presentationOptions = [
-            .hideDock,
-            .hideMenuBar,
-            .disableProcessSwitching,
-            .disableForceQuit,
-            .disableSessionTermination,
-            .disableHideApplication,
-            .disableAppleMenu,
-        ]
+        // Always re-pin the presentation options, and the level once the
+        // window covers the screen (raising it earlier blocks full screen).
+        // Cheap, and it does not churn the first responder / caret.
+        if isCovering(window) { window.level = .screenSaver }
+        NSApp.presentationOptions = Self.lockOptions(fullScreen: window.styleMask.contains(.fullScreen))
 
         // Settle window: the resign-key is the full-screen animation, not a
         // real theft. Re-keying here is exactly what killed the caret in the
@@ -391,10 +548,15 @@ final class KioskController {
         // it. (TODO(proctor): also raise a richer violation to the exam layer.)
         if !settling { onBlackout?() }
 
-        // Re-enter full-screen if we are out of it. Guard on the style mask so
-        // we do not toggle ourselves back OUT of a space we are still in.
-        if !window.styleMask.contains(.fullScreen) {
-            window.toggleFullScreen(nil)
+        // Out of the space: drop to the windowed lock set (.fullScreen is
+        // only valid inside a space) and lower the window so it can re-enter.
+        NSApp.presentationOptions = Self.lockOptions(fullScreen: false)
+
+        // Re-enter full screen through the verified chain (it lowers the
+        // level, waits for focus, toggles and checks). Never toggles while
+        // still in the space, so we cannot toggle ourselves back OUT.
+        if !window.styleMask.contains(.fullScreen), !enteringFullScreen, !coveringFallback {
+            startEnterChain(window)
         }
     }
 
