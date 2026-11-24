@@ -20,6 +20,7 @@ struct StudentChecksView: View {
     @State private var closingApps = false
     @State private var keyGuardTrusted = ExamKeyGuard.isTrusted
     @State private var showBreath = false
+    @State private var showCheckDetails = false
 
     /// "What it checks" — grounded in runChecks()/monitorTick() and the in-exam
     /// loops. Honest, plain-language copy ported from renderTrustLabel().
@@ -225,35 +226,52 @@ struct StudentChecksView: View {
     }
 
     // MARK: Privacy nutrition label
+    /// Short by default (two plain lines); the full checks / never-does list
+    /// stays one click away so nothing is hidden.
     private var nutritionLabel: some View {
         GlassCard {
-            VStack(alignment: .leading, spacing: Theme.Space.md) {
-                // Head
+            VStack(alignment: .leading, spacing: Theme.Space.sm) {
                 HStack(spacing: 9) {
                     glyph
-                    Text("What Weft checks during this exam")
+                    Text("Before you begin")
                         .font(Theme.sans(16, .semibold))
                         .foregroundStyle(Theme.inkSoft)
                 }
-                Text("So your teacher can trust the work is yours, done here, on your own. Nothing here is secret.")
+                Text("Weft closes your other apps when you begin. Save your work in them first.")
+                    .font(Theme.sans(13.5))
+                    .foregroundStyle(Theme.inkSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("While you write, it checks for remote-control apps and extra screens. It never records audio or video of you or your screen.")
                     .font(Theme.sans(13))
                     .foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
 
-                // Two honest columns
-                HStack(alignment: .top, spacing: Theme.Space.xl) {
-                    column(label: "What it checks", items: checks, mark: .check)
-                    column(label: "What it never does", items: neverDoes, mark: .minus)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { showCheckDetails.toggle() }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(showCheckDetails ? "Hide details" : "Show details")
+                        Image(systemName: showCheckDetails ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                    }
+                    .font(Theme.sans(12.5, .medium))
+                    .foregroundStyle(Theme.accent)
                 }
-                .padding(.top, Theme.Space.xs)
+                .buttonStyle(.plain)
+                .padding(.top, 2)
 
-                // Retention footer
-                Divider().opacity(0.4)
+                if showCheckDetails {
+                    HStack(alignment: .top, spacing: Theme.Space.xl) {
+                        column(label: "What it checks", items: checks, mark: .check)
+                        column(label: "What it never does", items: neverDoes, mark: .minus)
+                    }
                     .padding(.top, Theme.Space.xs)
-                Text("Everything stays inside your school's Weft account, visible to your teacher. It is kept while the assignment is open and graded, then cleared on your school's schedule.")
-                    .font(Theme.sans(11.5))
-                    .foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
+                    Text("Everything stays inside your school's Weft account, visible to your teacher. It is kept while the assignment is open and graded, then cleared on your school's schedule.")
+                        .font(Theme.sans(11.5))
+                        .foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .transition(.opacity)
+                }
             }
         }
     }
