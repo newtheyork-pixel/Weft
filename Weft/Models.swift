@@ -95,6 +95,12 @@ struct Assignment: Identifiable, Codable, Hashable, Sendable {
     /// Teacher-controlled per assignment; default false — outlines are opt-in,
     /// so existing rows (and editors that never send the column) stay outline-free.
     var outlineAllowed: Bool
+    /// Teacher-controlled per draft (SAT-5): a student beginning this draft
+    /// with no work yet starts from their own previous draft, once the
+    /// teacher has returned it. Only meaningful from draft 2 on. Default
+    /// false keeps existing rows and editors that never send the column
+    /// unchanged; New draft turns it on.
+    var carryForward: Bool
 
     var isVersioned: Bool { versionNumber > 1 }
 
@@ -105,16 +111,18 @@ struct Assignment: Identifiable, Codable, Hashable, Sendable {
         case timeLimitMinutes = "time_limit_minutes"
         case spellcheckEnabled = "spellcheck_enabled"
         case outlineAllowed = "outline_allowed"
+        case carryForward = "carry_forward"
     }
 
     init(id: String, title: String, versionGroupId: String, versionNumber: Int,
          questions: [Question], timeLimitMinutes: Int?, spellcheckEnabled: Bool = true,
-         outlineAllowed: Bool = false) {
+         outlineAllowed: Bool = false, carryForward: Bool = false) {
         self.id = id; self.title = title; self.versionGroupId = versionGroupId
         self.versionNumber = versionNumber; self.questions = questions
         self.timeLimitMinutes = timeLimitMinutes
         self.spellcheckEnabled = spellcheckEnabled
         self.outlineAllowed = outlineAllowed
+        self.carryForward = carryForward
     }
 
     /// Tolerant decode from a `tests` row: version_group_id/version_number may be
@@ -129,6 +137,7 @@ struct Assignment: Identifiable, Codable, Hashable, Sendable {
         timeLimitMinutes = try? c.decode(Int.self, forKey: .timeLimitMinutes)
         spellcheckEnabled = (try? c.decode(Bool.self, forKey: .spellcheckEnabled)) ?? true
         outlineAllowed = (try? c.decode(Bool.self, forKey: .outlineAllowed)) ?? false
+        carryForward = (try? c.decode(Bool.self, forKey: .carryForward)) ?? false
     }
 
     static let sample = Assignment(
@@ -141,6 +150,17 @@ struct Assignment: Identifiable, Codable, Hashable, Sendable {
         id: "t2", title: "Cellular Respiration Quiz", versionGroupId: "g2", versionNumber: 1,
         questions: [Question(id: "q2", kind: "essay", prompt: "Explain glycolysis.", wordLimit: 300)],
         timeLimitMinutes: nil)
+    /// Signed-out preview of a second draft that starts from the student's
+    /// returned first draft (SAT-5).
+    static let sampleDraft2 = Assignment(
+        id: "t1-v2", title: "Lit essay 1", versionGroupId: "g1", versionNumber: 2,
+        questions: sample.questions, timeLimitMinutes: 45, carryForward: true)
+}
+
+/// Signed-out preview text for carry forward (SAT-5): the student's returned
+/// Draft 1 of `Assignment.sample`, seeded into the Draft 2 editor.
+enum CarryForwardPreview {
+    static let draft1HTML = "<p>The interplay of light and shadow works as more than scenery in the passage. The author never lets one exist without the other: every lit window implies a surrounding dark, and every shadow is measured against the nearest lamp.</p><p>What makes this technique effective is its restraint. The imagery is never labelled or explained; it accumulates until the reader is doing the interpretation themselves.</p>"
 }
 
 // MARK: - Live session (a `sessions` row)
