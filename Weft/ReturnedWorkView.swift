@@ -526,10 +526,7 @@ private extension ReturnedWorkView {
             paragraphs: PaperText.paragraphs(fromHTML: item.contentHtml),
             feedback: item.feedback,
             feedbackUnavailable: item.feedbackUnavailable,
-            // Shared only (the server returns nothing else); resolved ones are
-            // hidden when the server says so.
-            comments: item.comments
-                .filter { ($0.visibility ?? "shared") == "shared" && $0.resolvedAt == nil }
+            comments: item.sharedComments
                 .map { c in
                     InlineComment(id: c.id, quote: c.quote ?? "", body: c.body,
                                   rangeStart: c.rangeStart ?? 0, rangeEnd: c.rangeEnd ?? 0,

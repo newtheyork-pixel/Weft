@@ -197,7 +197,7 @@ struct StudentClassHomeView: View {
                     .foregroundStyle(Theme.muted)
             }
             Spacer(minLength: 0)
-            Button("Begin") { app.enterLiveExam(offer) }
+            Button(offer.item.draftLabel == nil ? "Begin" : "Open revision") { app.enterLiveExam(offer) }
                 .buttonStyle(.glassProminent)
                 .tint(Theme.accent)
                 .linkPointer()
@@ -284,14 +284,15 @@ struct StudentClassHomeView: View {
             Spacer()
             switch item.section {
             case .active:
-                Button("Start writing") { app.startWriting(item) }
+                Button(item.draftLabel == nil ? "Start writing" : "Open revision") { app.startWriting(item) }
                     .buttonStyle(.glassProminent)
                     .tint(Theme.accent)
                     .linkPointer()
             case .graded:
                 HStack(spacing: 14) {
-                    Text("\(fmt(item.myPoints)) / \(fmt(item.myPointsPossible))")
-                        .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                    Text(scoreLabel(item))
+                        .font(Theme.sans(15, .semibold))
+                        .monospacedDigit()
                         .foregroundStyle(Theme.inkSoft)
                     Button {
                         app.openReturnedWork()
@@ -424,8 +425,13 @@ struct StudentClassHomeView: View {
         case nil:     return ""
         }
     }
-    private func fmt(_ d: Double?) -> String {
-        guard let d else { return "0" }
+    private func scoreLabel(_ item: ClassWorkItem) -> String {
+        guard let points = item.myPoints else { return "Feedback only" }
+        guard let possible = item.myPointsPossible else { return fmt(points) }
+        return "\(fmt(points)) / \(fmt(possible))"
+    }
+
+    private func fmt(_ d: Double) -> String {
         return d == d.rounded() ? String(Int(d)) : String(format: "%.1f", d)
     }
     private func shortDate(_ d: Date?) -> String {

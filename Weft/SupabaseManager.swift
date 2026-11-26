@@ -494,6 +494,14 @@ final class SupabaseManager: @unchecked Sendable {
         try await rpc("get_my_returned_work")
     }
 
+    /// The released feedback for exactly one of the student's submissions.
+    func returnedWork(submissionId: String) async throws -> ReturnedWorkItem? {
+        let items: [ReturnedWorkItem] = try await rows("rpc/get_my_returned_work", query: [
+            URLQueryItem(name: "submission_id", value: "eq.\(submissionId)"),
+        ])
+        return items.first { $0.submissionId == submissionId && $0.releasedAt != nil }
+    }
+
     /// The caller's own essay bodies, gated by RLS. Used by the Mac app after
     /// `get_my_returned_work` so the student portal never has to see the paper.
     func listOwnSubmissionBodies(ids: [String]) async throws -> [OwnSubmissionBody] {
@@ -676,6 +684,20 @@ final class SupabaseManager: @unchecked Sendable {
         ])
     }
 
+    struct RevisionLaunch: Decodable, Sendable {
+        let session: ExamSession
+        let assignment: Assignment
+        let didLaunch: Bool
+        enum CodingKeys: String, CodingKey {
+            case session, assignment
+            case didLaunch = "did_launch"
+        }
+    }
+
+    func startClassRevision(sessionId: String) async throws -> RevisionLaunch {
+        try await rpcOne("start_class_revision", params: ["p_session_id": sessionId])
+    }
+
     /// All sessions ever run for a class (any status), newest first. This is
     /// what makes closed-session essays reachable again: grading is entered
     /// from these rows, not from the live session. The teacher filter is
@@ -687,7 +709,7 @@ final class SupabaseManager: @unchecked Sendable {
             URLQueryItem(name: "class_id", value: "eq.\(classId)"),
             URLQueryItem(name: "teacher_user_id", value: "eq.\(teacherUserId)"),
             URLQueryItem(name: "status", value: "neq.archived"),
-            URLQueryItem(name: "order", value: "created_at.desc.nullslast"),
+            URLQueryItem(name: "order", value: "created_at.desc.nullslast,id.desc"),
         ])
     }
 
@@ -1318,12 +1340,13 @@ final class SupabaseManager: @unchecked Sendable {
         }
     }
 
-    /// The caller's submitted essays from drafts numbered below `testId`, in
-    /// the same version group, newest draft first. SECURITY DEFINER keyed on
-    /// auth.uid(): students can't read sessions, so they can't map their own
-    /// essay_submissions rows to a draft number without it. No essay body.
-    func listMyEarlierDrafts(testId: String) async throws -> [EarlierDraft] {
-        try await rpc("list_my_earlier_drafts", params: ["p_test_id": testId])
+    /// The lookup is scoped to the current class, ordered by draft number and
+    /// submission time. A student can have the same assignment in two classes.
+    func previousDraft(testId: String, sessionId: String) async throws -> EarlierDraft? {
+        let drafts: [EarlierDraft] = try await rpc("list_my_earlier_drafts", params: [
+            "p_test_id": testId, "p_session_id": sessionId,
+        ])
+        return drafts.first
     }
 
     struct StudentRowID: Decodable, Sendable { let id: String }
@@ -1402,7 +1425,7 @@ final class SupabaseManager: @unchecked Sendable {
         let rows: [Row]
         do {
             rows = try await self.rows("essay_submissions", query: query(selectCipher))
-        } catch {
+        } catch let error as SupabaseError where Self.isMissingColumn("content_cipher", error) {
             rows = try await self.rows("essay_submissions", query: query(selectPlain))
         }
         guard let row = rows.first else { return nil }
@@ -2039,6 +2062,10 @@ struct ReturnedWorkItem: Identifiable, Decodable, Hashable, Sendable {
     var comments: [ReturnedComment]
 
     var id: String { submissionId }
+    nonisolated var sharedComments: [ReturnedComment] {
+        // Older returned-work RPCs already filter to shared comments and omit visibility.
+        comments.filter { ($0.visibility ?? "shared") == "shared" && $0.resolvedAt == nil }
+    }
 
     enum CodingKeys: String, CodingKey {
         case submissionId = "submission_id"
