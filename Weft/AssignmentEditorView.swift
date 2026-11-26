@@ -241,7 +241,10 @@ struct AssignmentEditorView: View {
     private var isNew: Bool { app.editingAssignment == nil }
     /// Draft 1 (and a brand-new assignment) never shows carry forward.
     private var isLaterDraft: Bool { (app.editingAssignment?.versionNumber ?? 1) > 1 }
-    private var heading: String { isNew ? "New assignment" : "Edit assignment" }
+    private var heading: String {
+        if let a = app.editingAssignment, a.isVersioned { return "Edit Draft \(a.versionNumber)" }
+        return isNew ? "New assignment" : "Edit assignment"
+    }
     /// Never save on top of attachments we haven't got: a load still in flight
     /// (or one that failed) would be written out as "no files, no websites".
     private var canSave: Bool { attachmentsLoaded && !attachmentsFailed && uploadingName == nil }
@@ -425,7 +428,7 @@ struct AssignmentEditorView: View {
                 .foregroundStyle(Theme.inkSoft)
                 .toggleStyle(.switch)
                 .help("When on, each student's last draft is already in the editor when they begin")
-            Text("Works once you've returned their earlier draft. Anyone whose draft isn't returned yet starts from a blank page.")
+            Text("In Review essays, choose Share with student to return their draft and comments. Students whose previous draft hasn’t been returned start with a blank page.")
                 .font(Theme.sans(11))
                 .foregroundStyle(Theme.muted2)
                 .fixedSize(horizontal: false, vertical: true)

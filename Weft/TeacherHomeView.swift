@@ -12,12 +12,13 @@ struct TeacherHomeView: View {
     @Environment(AppState.self) private var app
     @State private var newClassName = ""
     @State private var showNewClass = false
+    @State private var pendingRevision: AppState.ClassRevision?
     @State private var sessionToArchive: ExamSession?
     @State private var sessionToDelete: ExamSession?
 
     /// The picked assignment's title (from grouped rows), falling back gracefully when nothing is set.
     private var pickedAssignmentTitle: String {
-        app.groupedAssignments.first(where: { $0.id == app.pickedAssignmentId })?.title ?? "an assignment"
+        app.groupedAssignments.first(where: { $0.id == app.pickedAssignmentId })?.draftTitle ?? "an assignment"
     }
 
     var body: some View {
@@ -58,6 +59,21 @@ struct TeacherHomeView: View {
             Button("Cancel", role: .cancel) { newClassName = "" }
         } message: {
             Text("Give the class a name. Students join with the class code.")
+        }
+        .confirmationDialog(
+            "Start Draft \(pendingRevision?.number ?? 2) for \(app.selectedTeacherClass?.name ?? "this class")?",
+            isPresented: Binding(get: { pendingRevision != nil }, set: { if !$0 { pendingRevision = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingRevision
+        ) { revision in
+            Button("Start Draft \(revision.number)") {
+                Task { await app.startRevision(revision) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { revision in
+            Text(revision.carryForward
+                 ? "Return work in Review essays → Share with student. When “\(revision.title)” opens, students revise their returned essays alongside your comments. Students awaiting a return start with a blank page."
+                 : "“\(revision.title)” is set to start with a blank page. Students can refer to comments you return in Review essays → Share with student.")
         }
         .confirmationDialog(
             sessionToArchive?.status == "open" ? "Archive this live session?" : "Archive this session?",
@@ -519,7 +535,7 @@ struct TeacherHomeView: View {
                         .foregroundStyle(Theme.muted)
                     idPicker("Assignment", value: pickedAssignmentTitle,
                              items: app.groupedAssignments.map { a in
-                                 (a.id, a.versionNumber > 1 ? "\(a.title) · v\(a.versionNumber)" : a.title)
+                                 (a.id, a.draftTitle)
                              }) { app.pickedAssignmentId = $0 }
                     Toggle("Schedule a start time", isOn: $app.scheduleLaunch)
                         .font(Theme.sans(13))
@@ -587,18 +603,41 @@ struct TeacherHomeView: View {
     }
 
     private func sessionRow(_ s: ExamSession) -> some View {
-        HStack(spacing: Theme.Space.md) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(app.sessionTitle(s)).font(Theme.sans(15, .semibold)).foregroundStyle(Theme.inkSoft)
-                Text(meta(for: s)).font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: Theme.Space.md) {
+                sessionLabel(s).fixedSize()
+                Spacer()
+                sessionActions(s)
             }
-            Spacer()
+            VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                sessionLabel(s)
+                sessionActions(s)
+            }
+        }
+    }
+
+    private func sessionLabel(_ s: ExamSession) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(app.sessionTitle(s)).font(Theme.sans(15, .semibold)).foregroundStyle(Theme.inkSoft)
+            Text(meta(for: s)).font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
+        }
+    }
+
+    private func sessionActions(_ s: ExamSession) -> some View {
+        HStack(spacing: Theme.Space.sm) {
             Chip(text: sessionChip(s).text, kind: sessionChip(s).kind)
             Button("Review essays") {
                 app.openGrading(session: s, title: app.sessionTitle(s))
             }
             .buttonStyle(.glass)
             .linkPointer()
+            if let revision = app.revision(for: s) {
+                Button("Start Draft \(revision.number)…") { pendingRevision = revision }
+                    .buttonStyle(.glass)
+                    .disabled(app.liveSession != nil || app.isLoading)
+                    .help(app.liveSession == nil ? "Open the next revision for this class" : "End the live session first")
+                    .linkPointer()
+            }
             Menu {
                 Button("Archive") { sessionToArchive = s }
                 if s.status != "open" {

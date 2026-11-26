@@ -140,6 +140,8 @@ struct Assignment: Identifiable, Codable, Hashable, Sendable {
         carryForward = (try? c.decode(Bool.self, forKey: .carryForward)) ?? false
     }
 
+    var draftTitle: String { versionNumber > 1 ? "\(title) · Draft \(versionNumber)" : title }
+
     static let sample = Assignment(
         id: "t1", title: "Lit essay 1", versionGroupId: "g1", versionNumber: 1,
         questions: [Question(id: "q1", kind: "essay",
@@ -638,6 +640,13 @@ struct TeacherSubmission: Identifiable, Codable, Hashable, Sendable {
         case submittedAt = "submitted_at"
         case updatedAt = "updated_at"
     }
+}
+
+enum RevisionFeedbackState {
+    case loading
+    case unavailable(String)
+    case failed(String)
+    case returned(version: Int, work: ReturnedWorkItem)
 }
 
 // MARK: - A submitted (not necessarily graded) essay, via get_my_submission

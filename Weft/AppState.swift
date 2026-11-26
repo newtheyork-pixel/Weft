@@ -161,6 +161,9 @@ final class AppState {
     /// One calm line for the top of the editor about carry forward ("Your
     /// Draft 1 is in the editor..."). Consumed once by ExamView.
     var examCarryNote: String?
+    var examRevisionFeedback: RevisionFeedbackState = .loading
+    /// Pins the feedback to the submission actually copied into this attempt.
+    private var carriedSource: SupabaseManager.EarlierDraft?
     /// Session code used to resolve the active exam (retry after a failed lookup).
     var examResolveCode: String?
     /// Last flags written to the students row, so the 5s monitor does not PATCH
@@ -388,6 +391,8 @@ final class AppState {
         examDraftHTML = nil
         examDraftCarried = false
         examCarryNote = nil
+        examRevisionFeedback = .loading
+        carriedSource = nil
         examResolveCode = nil
         lastProctorFlags = nil
         classWorkByClass = [:]
@@ -440,6 +445,8 @@ final class AppState {
         examDraftHTML = nil
         examDraftCarried = false
         examCarryNote = nil
+        examRevisionFeedback = .loading
+        carriedSource = nil
         examResolveCode = nil
         lastProctorFlags = nil
         classWorkByClass = [:]
@@ -1181,65 +1188,111 @@ final class AppState {
         let actor = userId
         if essayKeyState != .ready { await checkEssayKey() }
         do {
-            var items = try await supabase.getMyReturnedWork()
-            if let bodies = try? await supabase.listOwnSubmissionBodies(ids: items.map(\.submissionId)) {
-                let byId = Dictionary(uniqueKeysWithValues: bodies.map { ($0.id, $0) })
-                for i in items.indices {
-                    guard let body = byId[items[i].submissionId] else { continue }
-                    if items[i].contentHtml.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        items[i].contentHtml = body.contentHtml
-                    }
-                    if items[i].contentCipher == nil {
-                        items[i].contentCipher = body.contentCipher
-                    }
-                }
-            }
-            // The essay was sealed to the teacher; on return the teacher's
-            // Mac added a wrap for this student's key (SAT-24).
-            if let wraps = try? await supabase.listMyReturnWraps(submissionIds: items.map(\.submissionId)) {
-                for i in items.indices {
-                    guard let w = wraps[items[i].submissionId], var env = items[i].contentCipher,
-                          !env.wraps.contains(where: { $0.recipientKid == w.recipientKid })
-                    else { continue }
-                    env.wraps.append(w)
-                    items[i].contentCipher = env
-                }
-            }
-            let feedbackIds = items.compactMap { item in
-                item.feedbackStudentWrap == nil ? nil : item.submissionId
-            }
-            let feedbackKeys = (try? await supabase.gradeFeedbackReturnKeys(submissionIds: feedbackIds)) ?? [:]
+            let items = try await supabase.getMyReturnedWork()
+            let opened = await openReturnedWork(items, for: actor, includePaper: true)
             guard signedIn, userId == actor, !Task.isCancelled else { return }
-            returnedWork = items.map { item in
-                var copy = item
-                copy.contentHtml = revealHTML(item.contentHtml, cipher: item.contentCipher)
-                if copy.contentHtml.isEmpty, item.contentCipher != nil {
-                    copy.contentHtml = "<p><em>This paper can't open on your account yet. Ask your teacher to share it again.</em></p>"
-                }
-                if let essay = item.contentCipher {
-                    let aad = WeftContentSeal.quoteAAD(submissionId: item.submissionId)
-                    for i in copy.comments.indices {
-                        guard (copy.comments[i].quote ?? "").isEmpty,
-                              let qc = copy.comments[i].quoteCipher else { continue }
-                        copy.comments[i].quote = WeftContentSeal.openText(
-                            qc, underEssay: essay, userId: userId, aad: aad)
-                    }
-                }
-                if let cipher = item.feedbackCipher {
-                    var opened: String?
-                    if let wrap = item.feedbackStudentWrap, let key = feedbackKeys[item.submissionId] {
-                        opened = try? WeftContentSeal.openReturnedGradeFeedback(
-                            cipher, studentWrap: wrap, submissionId: item.submissionId, studentReturnKey: key)
-                    }
-                    copy.feedback = opened ?? ""
-                    copy.feedbackUnavailable = opened == nil
-                }
-                return copy
-            }
+            returnedWork = opened
         } catch {
             guard signedIn, userId == actor, !Task.isCancelled else { return }
             errorMessage = describe(error)
         }
+    }
+
+    /// Returned work and the revision sidebar use the same student-only unwrapping.
+    /// The sidebar only needs the essay envelope when a passage is sealed.
+    private func openReturnedWork(_ rows: [ReturnedWorkItem], for actor: String,
+                                  includePaper: Bool) async -> [ReturnedWorkItem] {
+        var items = rows
+        let paperIds = items.filter { item in
+            includePaper || item.sharedComments.contains { $0.quoteCipher != nil && ($0.quote ?? "").isEmpty }
+        }.map(\.submissionId)
+        if let bodies = try? await supabase.listOwnSubmissionBodies(ids: paperIds) {
+            let byId = Dictionary(uniqueKeysWithValues: bodies.map { ($0.id, $0) })
+            for i in items.indices {
+                guard let body = byId[items[i].submissionId] else { continue }
+                if items[i].contentHtml.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    items[i].contentHtml = body.contentHtml
+                }
+                if items[i].contentCipher == nil {
+                    items[i].contentCipher = body.contentCipher
+                }
+            }
+        }
+        // The essay was sealed to the teacher; on return the teacher's
+        // Mac added a wrap for this student's key (SAT-24).
+        if let wraps = try? await supabase.listMyReturnWraps(submissionIds: paperIds) {
+            for i in items.indices {
+                guard let w = wraps[items[i].submissionId], var env = items[i].contentCipher,
+                      !env.wraps.contains(where: { $0.recipientKid == w.recipientKid })
+                else { continue }
+                env.wraps.append(w)
+                items[i].contentCipher = env
+            }
+        }
+        let feedbackIds = items.compactMap { item in
+            item.feedbackStudentWrap == nil ? nil : item.submissionId
+        }
+        let feedbackKeys = (try? await supabase.gradeFeedbackReturnKeys(submissionIds: feedbackIds)) ?? [:]
+        return items.map { item in
+            var copy = item
+            if includePaper, copy.contentHtml.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let cipher = item.contentCipher {
+                copy.contentHtml = WeftContentSeal.openHTML(cipher, userId: actor)
+                    ?? "<p><em>This paper can't open on your account yet. Ask your teacher to share it again.</em></p>"
+            }
+            if let essay = item.contentCipher {
+                let aad = WeftContentSeal.quoteAAD(submissionId: item.submissionId)
+                for i in copy.comments.indices {
+                    guard (copy.comments[i].quote ?? "").isEmpty,
+                          let qc = copy.comments[i].quoteCipher else { continue }
+                    copy.comments[i].quote = WeftContentSeal.openText(
+                        qc, underEssay: essay, userId: actor, aad: aad)
+                }
+            }
+            if let cipher = item.feedbackCipher {
+                var opened: String?
+                if let wrap = item.feedbackStudentWrap, let key = feedbackKeys[item.submissionId] {
+                    opened = try? WeftContentSeal.openReturnedGradeFeedback(
+                        cipher, studentWrap: wrap, submissionId: item.submissionId, studentReturnKey: key)
+                }
+                copy.feedback = opened ?? ""
+                copy.feedbackUnavailable = opened == nil
+            }
+            return copy
+        }
+    }
+
+    func loadExamRevisionFeedback() async {
+        guard signedIn, studentScreen == .exam, let test = activeAssignment, test.versionNumber > 1,
+              let session = activeExamSession else { return }
+        let actor = userId
+        examRevisionFeedback = .loading
+        let result: RevisionFeedbackState
+        do {
+            let previous: SupabaseManager.EarlierDraft?
+            if let carriedSource {
+                previous = carriedSource
+            } else {
+                previous = try await supabase.previousDraft(testId: test.id, sessionId: session.id)
+            }
+            if let previous {
+                let label = "Draft \(previous.versionNumber)"
+                if previous.releasedAt != nil,
+                   let item = try await supabase.returnedWork(submissionId: previous.submissionId),
+                   let opened = await openReturnedWork([item], for: actor, includePaper: false).first {
+                    result = .returned(version: previous.versionNumber, work: opened)
+                } else {
+                    result = .unavailable("Your teacher hasn’t returned \(label) yet.")
+                }
+            } else {
+                result = .unavailable("You haven’t submitted an earlier draft of this assignment in this class.")
+            }
+        } catch {
+            result = .failed("Your feedback couldn’t be loaded. You can keep writing and try again.")
+        }
+        guard !Task.isCancelled, signedIn, userId == actor, studentScreen == .exam,
+              activeExamSession?.id == session.id, activeAssignment?.id == test.id else { return }
+        examRevisionFeedback = result
     }
 
     /// Join a class by code; on success refresh the home so the new class is
@@ -1366,7 +1419,34 @@ final class AppState {
     func sessionTitle(_ s: ExamSession) -> String {
         guard let tid = s.testId,
               let a = assignments.first(where: { $0.id == tid }) else { return "Assignment" }
-        return a.versionNumber > 1 ? "\(a.title) · v\(a.versionNumber)" : a.title
+        return a.draftTitle
+    }
+
+    struct ClassRevision {
+        let session: ExamSession
+        let source: Assignment
+        let existing: Assignment?
+        var number: Int { source.versionNumber + 1 }
+        var title: String { existing?.title ?? source.title }
+        var carryForward: Bool { existing?.carryForward ?? true }
+    }
+
+    /// A class progresses from its own latest session in this family. Other
+    /// classes may already have prepared or used the next assignment version.
+    func revision(for session: ExamSession) -> ClassRevision? {
+        guard session.status == "closed", let classId = session.classId,
+              classId == teacherSelectedClassId, let sessions = classSessions,
+              let source = assignments.first(where: { $0.id == session.testId })
+        else { return nil }
+        let family = assignments.filter { $0.versionGroupId == source.versionGroupId }
+        let laterIds = Set(family.filter { $0.versionNumber > source.versionNumber }.map(\.id))
+        let sameIds = Set(family.filter { $0.versionNumber == source.versionNumber }.map(\.id))
+        guard !sessions.contains(where: { $0.testId.map(laterIds.contains) == true }),
+              let latest = sessions.first(where: { $0.testId.map(sameIds.contains) == true }),
+              latest.id == session.id, latest.status == "closed"
+        else { return nil }
+        let existing = family.first { $0.versionNumber == source.versionNumber + 1 }
+        return ClassRevision(session: session, source: source, existing: existing)
     }
 
     /// Enter a class's detail (level 2). Clears the previous class's history
@@ -1673,7 +1753,7 @@ final class AppState {
     /// Clone `source` into the next draft of its group and open the editor on
     /// it (the teacher tweaks the prompt, then launches it normally).
     func createNextDraft(of source: Assignment) async {
-        guard !draftCloneInFlight else { return }
+        guard !draftCloneInFlight, !launchInFlight else { return }
         draftCloneInFlight = true
         defer { draftCloneInFlight = false }
         errorMessage = nil
@@ -1681,17 +1761,7 @@ final class AppState {
             .filter { $0.versionGroupId == source.versionGroupId }
             .map(\.versionNumber).max() ?? source.versionNumber) + 1
         if !signedIn {
-            // Preview: local clone so the flow is demoable without a backend.
-            let clone = Assignment(id: "local-\(UUID().uuidString.prefix(6))",
-                                   title: source.title,
-                                   versionGroupId: source.versionGroupId,
-                                   versionNumber: next,
-                                   questions: source.questions,
-                                   timeLimitMinutes: source.timeLimitMinutes,
-                                   spellcheckEnabled: source.spellcheckEnabled,
-                                   outlineAllowed: source.outlineAllowed,
-                                   carryForward: true)
-            assignments.append(clone)
+            let clone = createPreviewDraft(of: source, version: next)
             pickedAssignmentId = clone.id
             openEditAssignment(clone)
             return
@@ -1710,9 +1780,54 @@ final class AppState {
         }
     }
 
+    private func createPreviewDraft(of source: Assignment, version: Int) -> Assignment {
+        let clone = Assignment(id: "local-\(UUID().uuidString.prefix(6))", title: source.title,
+                               versionGroupId: source.versionGroupId, versionNumber: version,
+                               questions: source.questions, timeLimitMinutes: source.timeLimitMinutes,
+                               spellcheckEnabled: source.spellcheckEnabled, outlineAllowed: source.outlineAllowed,
+                               carryForward: true)
+        assignments.append(clone)
+        return clone
+    }
+
     // MARK: - Teacher: live session
+    func startRevision(_ revision: ClassRevision) async {
+        guard !launchInFlight, !draftCloneInFlight, liveSession == nil,
+              let classId = revision.session.classId, self.revision(for: revision.session) != nil
+        else { return }
+        launchInFlight = true
+        defer { launchInFlight = false }
+        errorMessage = nil
+        if !signedIn {
+            let target = revision.existing ?? createPreviewDraft(of: revision.source, version: revision.number)
+            selectRevisionFamilyForLaunch(target)
+            launchPreview(testId: target.id, classId: classId, opensAt: nil)
+            return
+        }
+        let teacher = userId
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let result = try await supabase.startClassRevision(sessionId: revision.session.id)
+            guard signedIn, userId == teacher else { return }
+            assignments.removeAll { $0.id == result.assignment.id }
+            assignments.append(result.assignment)
+            selectRevisionFamilyForLaunch(result.assignment)
+            await activateLiveSession(result.session, notifyStudents: result.didLaunch)
+        } catch {
+            guard signedIn, userId == teacher else { return }
+            errorMessage = describe(error)
+        }
+    }
+
+    /// The ordinary picker offers the latest library version, even if another
+    /// class is ahead of the class that just started a revision.
+    private func selectRevisionFamilyForLaunch(_ target: Assignment) {
+        pickedAssignmentId = groupedAssignments.first { $0.versionGroupId == target.versionGroupId }?.id
+    }
+
     func launchSession() async {
-        guard !launchInFlight else { return }
+        guard !launchInFlight, !draftCloneInFlight else { return }
         launchInFlight = true
         defer { launchInFlight = false }
         errorMessage = nil
@@ -1730,38 +1845,44 @@ final class AppState {
             errorMessage = "Open a class to launch for."
             return
         }
+        let opens = scheduleLaunch ? scheduledLaunchAt : nil
         if !signedIn {
-            // Unique id per preview launch: relaunching after End session must
-            // never duplicate a ForEach identifier in the Sessions list.
-            let s = ExamSession(id: "local-\(UUID().uuidString.prefix(6))",
-                                code: SupabaseManager.sessionCode(),
-                                testId: testId, classId: classId, status: "open",
-                                createdAt: Date(),
-                                opensAt: scheduleLaunch ? scheduledLaunchAt : nil)
-            liveSession = s
-            roster = RosterStudent.sample
-            previewSessions.insert(s, at: 0)
-            classSessions = previewSessions.filter { $0.classId == classId }   // history shows the open row immediately
+            launchPreview(testId: testId, classId: classId, opensAt: opens)
             return
         }
+        let teacher = userId
         isLoading = true
         defer { isLoading = false }
         do {
-            let opens = scheduleLaunch ? scheduledLaunchAt : nil
-            liveSession = try await supabase.launchSession(testId: testId, classId: classId,
-                                                           teacherUserId: userId, teacherIP: nil,
-                                                           opensAt: opens)
-            await loadLiveRoster()
-            startRosterPolling()           // students join AFTER the launch; the card must follow them
-            await loadClassSessions()      // the new open session appears as history row 1; NO tab jump
-            // Email every enrolled student that the assignment is live. Best
-            // effort; never blocks the launch.
-            if let sid = liveSession?.id {
-                Task { await supabase.notify("assignment_launched", body: ["session_id": sid]) }
-            }
+            guard let opened = try await supabase.launchSession(testId: testId, classId: classId,
+                teacherUserId: teacher, teacherIP: nil, opensAt: opens) else { throw SupabaseError.noData }
+            guard signedIn, userId == teacher else { return }
+            await activateLiveSession(opened, notifyStudents: true)
         } catch {
+            guard signedIn, userId == teacher else { return }
             errorMessage = describe(error)
         }
+    }
+
+    private func activateLiveSession(_ opened: ExamSession, notifyStudents: Bool) async {
+        liveSession = opened
+        if notifyStudents {
+            Task { await supabase.notify("assignment_launched", body: ["session_id": opened.id]) }
+        }
+        await loadLiveRoster()
+        guard signedIn, liveSession?.id == opened.id else { return }
+        startRosterPolling()
+        await loadClassSessions()
+    }
+
+    private func launchPreview(testId: String, classId: String, opensAt: Date?) {
+        let opened = ExamSession(id: "local-\(UUID().uuidString.prefix(6))",
+                                 code: SupabaseManager.sessionCode(), testId: testId, classId: classId,
+                                 status: "open", createdAt: Date(), opensAt: opensAt)
+        liveSession = opened
+        roster = RosterStudent.sample
+        previewSessions.insert(opened, at: 0)
+        classSessions = previewSessions.filter { $0.classId == classId && $0.status != "archived" }
     }
 
     /// Load the live monitor's roster. `quiet` is for the five-second sweep: a
@@ -2231,6 +2352,8 @@ final class AppState {
         examDraftHTML = nil
         examDraftCarried = false
         examCarryNote = nil
+        examRevisionFeedback = .loading
+        carriedSource = nil
         examMaterialsFailed = false
         examLockState = nil
         pendingTeacherKey = nil
@@ -2466,15 +2589,26 @@ final class AppState {
             guard studentScreen == .checks, activeExamSession?.id == session.id else {
                 return false
             }
-            activeStudentId = sid
             let remote: (id: String, html: String, cipher: WeftEnvelope?, updatedAt: Date?)?
             if let qid = activeAssignment?.questions.first?.id {
-                remote = try? await supabase.getMyEssayDraft(sessionId: session.id,
-                                                             studentId: sid,
-                                                             questionId: qid)
+                do {
+                    remote = try await supabase.getMyEssayDraft(sessionId: session.id, studentId: sid, questionId: qid)
+                } catch {
+                    // A failed lookup cannot establish that a revision is blank.
+                    // Seeding it would autosave the old essay over the student's edits.
+                    if activeAssignment?.carryForward == true {
+                        if studentScreen == .checks, activeExamSession?.id == session.id {
+                            errorMessage = "Couldn't check for saved revision work. Try Begin again."
+                        }
+                        return false
+                    }
+                    remote = nil
+                }
             } else {
                 remote = nil
             }
+            guard studentScreen == .checks, activeExamSession?.id == session.id else { return false }
+            activeStudentId = sid
             let local = ExamDraftStore.load(userId: userId, sessionId: session.id)
             if let remote { activeSubmissionId = remote.id } else { activeSubmissionId = nil }
             examDraftCarried = false
@@ -2522,7 +2656,7 @@ final class AppState {
             // Carry forward (SAT-5): only onto a blank page. Work already saved
             // for this draft, on this Mac or the server, is never replaced.
             if startsBlank, let test = activeAssignment, test.carryForward, test.versionNumber > 1 {
-                let carried = await carryForwardPreviousDraft(test: test)
+                let carried = await carryForwardPreviousDraft(test: test, sessionId: session.id)
                 // The lookup is a few more round-trips: same late-success
                 // guard as above.
                 guard studentScreen == .checks, activeExamSession?.id == session.id else {
@@ -2532,6 +2666,7 @@ final class AppState {
                 examDraftHTML = carried.html
                 examDraftCarried = carried.html != nil
                 examCarryNote = carried.note
+                carriedSource = carried.source
             }
             guard examCanSeal, !examRecipientKeys.isEmpty else {
                 activeStudentId = nil
@@ -2562,30 +2697,25 @@ final class AppState {
     /// Returned work takes. Nothing is sent anywhere: the body is read from
     /// the student's own row and opened on this Mac. Never throws and never
     /// blocks the exam: on any failure the page starts blank with a note.
-    private func carryForwardPreviousDraft(test: Assignment) async -> (html: String?, note: String?) {
-        let earlier: [SupabaseManager.EarlierDraft]
+    private func carryForwardPreviousDraft(test: Assignment, sessionId: String) async
+        -> (html: String?, note: String, source: SupabaseManager.EarlierDraft?) {
+        let previous: SupabaseManager.EarlierDraft?
         do {
-            earlier = try await supabase.listMyEarlierDrafts(testId: test.id)
+            previous = try await supabase.previousDraft(testId: test.id, sessionId: sessionId)
         } catch {
-            return (nil, "Your earlier draft couldn't be loaded, so you're starting from a blank page.")
+            return (nil, "Your earlier draft couldn't be loaded, so you're starting from a blank page.", nil)
         }
-        // Newest draft first. A skipped draft simply has no row, so this is
-        // the latest draft the student actually handed in.
-        guard let prev = earlier
-            .filter({ $0.versionNumber < test.versionNumber && $0.submittedAt != nil })
-            .max(by: { ($0.versionNumber, $0.submittedAt ?? .distantPast)
-                     < ($1.versionNumber, $1.submittedAt ?? .distantPast) })
-        else {
-            return (nil, "There's no earlier draft of yours to bring in, so you're starting from a blank page.")
+        guard let prev = previous else {
+            return (nil, "There's no earlier draft of yours to bring in, so you're starting from a blank page.", nil)
         }
         let label = "Draft \(prev.versionNumber)"
         guard prev.releasedAt != nil else {
-            return (nil, "Your \(label) hasn't been returned yet, so you're starting from a blank page.")
+            return (nil, "Your \(label) hasn't been returned yet, so you're starting from a blank page.", nil)
         }
         let unreadable = "Your \(label) couldn't be opened on this Mac, so you're starting from a blank page."
         if essayKeyState != .ready { await checkEssayKey() }
         guard let body = try? await supabase.listOwnSubmissionBodies(ids: [prev.submissionId]).first
-        else { return (nil, unreadable) }
+        else { return (nil, unreadable, nil) }
         var cipher = body.contentCipher
         if var env = cipher,
            let wraps = try? await supabase.listMyReturnWraps(submissionIds: [prev.submissionId]),
@@ -2596,9 +2726,9 @@ final class AppState {
         }
         let html = revealHTML(body.contentHtml, cipher: cipher)
         guard !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return (nil, unreadable)
+            return (nil, unreadable, nil)
         }
-        return (html, Self.carriedNote(version: prev.versionNumber))
+        return (html, Self.carriedNote(version: prev.versionNumber), prev)
     }
 
     /// Move this attempt's roster row from "joined" to "writing" on the first
@@ -2836,6 +2966,8 @@ final class AppState {
         examDraftHTML = nil
         examDraftCarried = false
         examCarryNote = nil
+        examRevisionFeedback = .loading
+        carriedSource = nil
         examResolveCode = nil
         lastProctorFlags = nil
         studentScreen = .done

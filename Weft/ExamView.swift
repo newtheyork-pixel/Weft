@@ -49,6 +49,8 @@ struct ExamView: View {
     /// position across that, so showing the panel again reloads nothing.
     @State private var refStore = ReferenceTabStore()
     @State private var referencesVisible = true
+    @State private var feedbackSelected = true
+    @State private var feedbackAttempt = 0
     @State private var expiryTask: Task<Void, Never>?
     @State private var countdownAnchor = Date()
     @State private var draftReady = false
@@ -107,6 +109,18 @@ struct ExamView: View {
         assignment.questions.first?.prompt ?? Assignment.sample.questions.first?.prompt ?? "Respond to the prompt."
     }
     private var wordLimit: Int? { assignment.questions.first?.wordLimit }
+    private var isRevision: Bool { assignment.versionNumber > 1 || previewCarryForward }
+    private var sidebarLabel: String { isRevision ? "feedback and references" : "references" }
+
+    private struct FeedbackRequest: Equatable {
+        let sessionId: String
+        let attempt: Int
+    }
+
+    private var feedbackRequest: FeedbackRequest? {
+        guard lockdown, app.signedIn, isRevision, let session = app.activeExamSession else { return nil }
+        return FeedbackRequest(sessionId: session.id, attempt: feedbackAttempt)
+    }
 
     var body: some View {
         HSplitView {
@@ -123,6 +137,10 @@ struct ExamView: View {
                     materialsLoading: app.examMaterialsLoading,
                     materialsFailed: app.examMaterialsFailed,
                     store: refStore,
+                    feedbackSelected: isRevision ? feedbackSelected : nil,
+                    onSelectFeedback: { feedbackSelected = $0 },
+                    previewFeedback: previewCarryForward || !app.signedIn,
+                    onRetryFeedback: { feedbackAttempt += 1 },
                     onHide: { toggleReferences() },
                     onRetryMaterials: { Task { await app.retryExamMaterials() } },
                     onInsertQuote: { text, cite in
@@ -176,6 +194,9 @@ struct ExamView: View {
         .onWindow { window in
             guard lockdown, let window, examWindow !== window else { return }
             startExam(in: window)
+        }
+        .task(id: feedbackRequest) {
+            if feedbackRequest != nil { await app.loadExamRevisionFeedback() }
         }
         .task {
             if lockdown {
@@ -627,8 +648,8 @@ struct ExamView: View {
             }
             .buttonStyle(.iconHit)
             .keyboardShortcut("r", modifiers: [.command, .shift])
-            .help(referencesVisible ? "Hide references, write only (⌘⇧R)" : "Show references (⌘⇧R)")
-            .accessibilityLabel(referencesVisible ? "Hide references" : "Show references")
+            .help("\(referencesVisible ? "Hide" : "Show") \(sidebarLabel) (⌘⇧R)")
+            .accessibilityLabel("\(referencesVisible ? "Hide" : "Show") \(sidebarLabel)")
             .linkPointer()
         }
         .padding(.horizontal, Theme.Space.xl)

@@ -21,6 +21,12 @@ struct ExamReferencePanel: View {
     /// True when the materials fetch failed. Distinct from "teacher attached none".
     var materialsFailed: Bool = false
     let store: ReferenceTabStore
+    /// A first draft has references only. A revision can also show the
+    /// student's returned comments alongside the editor.
+    var feedbackSelected: Bool?
+    var onSelectFeedback: (Bool) -> Void
+    var previewFeedback: Bool
+    var onRetryFeedback: () -> Void
     var onHide: () -> Void
     var onRetryMaterials: (() -> Void)? = nil
     var onInsertQuote: ((String, String) -> Void)? = nil
@@ -29,9 +35,29 @@ struct ExamReferencePanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            tabStrip
-            Divider()
-            content
+            if let feedbackSelected {
+                HStack(spacing: Theme.Space.sm) {
+                    Picker("Writing sidebar", selection: Binding(
+                        get: { feedbackSelected }, set: onSelectFeedback)) {
+                        Text("Feedback").tag(true)
+                        Text("References").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    hideButton
+                }
+                .padding(.horizontal, Theme.Space.md)
+                .padding(.vertical, Theme.Space.sm)
+                .background(.regularMaterial)
+                Divider()
+            }
+            if feedbackSelected == true {
+                RevisionFeedbackPanel(preview: previewFeedback, onRetry: onRetryFeedback)
+            } else {
+                tabStrip
+                Divider()
+                content
+            }
         }
         .background(Color(white: 0.96))
         .task { store.configure(files: files, links: links, signedIn: signedIn) }
@@ -134,17 +160,21 @@ struct ExamReferencePanel: View {
                 .accessibilityLabel(store.splitActive ? "Back to one pane" : "Split reference panes")
                 .linkPointer()
             }
-            Button(action: onHide) {
-                Image(systemName: "sidebar.right")
-            }
-            .buttonStyle(.iconHit)
-            .help("Hide references, write only (⌘⇧R)")
-            .accessibilityLabel("Hide references")
-            .linkPointer()
+            if feedbackSelected == nil { hideButton }
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)
         .background(.regularMaterial)
+    }
+
+    private var hideButton: some View {
+        Button(action: onHide) {
+            Image(systemName: "sidebar.right")
+        }
+        .buttonStyle(.iconHit)
+        .help("Hide sidebar (⌘⇧R)")
+        .accessibilityLabel("Hide sidebar")
+        .linkPointer()
     }
 
     private func tabChip(_ m: ReferenceMaterial) -> some View {
@@ -445,6 +475,8 @@ extension ExamReferencePanel: Equatable {
             && a.signedIn == b.signedIn
             && a.materialsLoading == b.materialsLoading
             && a.materialsFailed == b.materialsFailed
+            && a.feedbackSelected == b.feedbackSelected
+            && a.previewFeedback == b.previewFeedback
             && a.files == b.files
             && a.links == b.links
     }
